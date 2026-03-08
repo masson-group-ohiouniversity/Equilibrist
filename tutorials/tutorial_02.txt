@@ -1,0 +1,18 @@
+$concentrations
+A0 = 1.00 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant  
+Ct = 10.0 mM
+
+$equilibria
+2 A = B; Kdimer = 1e6
+B + C = D; log K1 = 4.0
+
+$plot
+xmax = 3.00
+x = Ct/A0
+y = A, B, C, D
+

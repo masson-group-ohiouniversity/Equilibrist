@@ -1,0 +1,19 @@
+$concentrations
+cage0 = 50 uM
+
+$volumes
+V0 = 0.5 mL
+
+$titrant
+Gt = 0.5 mM
+
+$reactions
+G + cage = complex; log K = 5.0
+
+$plot
+xmax = 3.00
+x = Gt/cage0
+y = G, cage, complex
+
+$spectra
+

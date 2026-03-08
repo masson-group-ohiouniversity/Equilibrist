@@ -1,0 +1,24 @@
+$concentrations
+G0 = 1.00 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant  
+Ht = 10.00
+
+$equilibria
+G + H = GH; log K1 = 3.0
+GH + H = GH2; log K2 = 3.0
+
+$variables
+Gtot = G + GH + GH2
+Htot = H + GH + 2*GH2
+
+$plot
+xmax = 3.00
+x = Ht/G0
+y = G, H, GH, GH2
+
+$nmr
+shift: Gtot, Htot

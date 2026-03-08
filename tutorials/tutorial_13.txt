@@ -1,0 +1,20 @@
+$concentrations
+G0 = 1.00 mM
+H0 = 2.00 mM
+
+$volumes
+V0 = 500 uL
+
+$reactions
+G + H > GH; log k1 = 1.0
+
+$variables
+Gtot = G + GH
+Htot = H + GH
+
+$plot
+xmax = 3.00
+y = G, H, GH
+
+$nmr
+shift: Gtot, Htot

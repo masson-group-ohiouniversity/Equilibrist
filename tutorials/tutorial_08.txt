@@ -1,0 +1,30 @@
+#test comment line
+#test again
+
+$concentrations
+G0 = 1.00 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant  
+Ht = 10.00
+
+$equilibria
+G + H = GH; log K1 = 4.0
+GH + H = GH2; log K2 = 4.0
+GH2 + H = GH3; log K3 = 4.0
+
+$variables
+G012 = G + GH + GH2
+
+$plot
+xmax = 3.00
+x = Ht/G0
+y = G, H, GH, GH2, G012, GH3
+
+$nmr
+integration: 1, 3, 1
+shift: G012
+
+

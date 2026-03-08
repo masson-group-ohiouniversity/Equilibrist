@@ -1,0 +1,26 @@
+$concentrations
+A0 = 1.00 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant solid 
+Ct
+
+$reactions
+2 A = B; Kdimer = 1e6
+B + C = D; log K1 = 4.0
+
+$variables
+S = A+B+C+D
+%A = A/S
+%B = B/S
+%C = C/S
+%D = D/S
+
+$plot
+xmax = 3.00
+x = Ct/A0
+y = %A, %B, %C, %D
+
+
