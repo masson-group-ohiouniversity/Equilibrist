@@ -421,7 +421,7 @@ def create_snapshot(fig, parsed, params, logK_vals):
     """Create side-by-side snapshot of plot and parameters."""
     # Generate timestamp for filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"Network_snapshot_{timestamp}.png"
+    filename = f"Equinix_snapshot_{timestamp}.png"
     
     # Convert plotly figure to image
     try:
