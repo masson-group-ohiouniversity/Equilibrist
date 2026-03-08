@@ -1,7 +1,6 @@
 # Equinix
 
-Fitting software for equilibrium titrations and kinetics experiments.  
-Supports UV-Vis, NMR, and concentration data. Runs entirely on your computer — no data is sent anywhere.
+Fitting software for complex chemical equilibria and kinetics from NMR and absorption spectroscopy data.  
 
 ---
 
