@@ -17,17 +17,18 @@ Fitting software for complex chemical equilibria and kinetics from NMR and absor
 
 Best if you already have Anaconda or Miniconda, or if Option B gives you trouble.
 
-1. Install Miniconda if needed: https://docs.conda.io/en/latest/miniconda.html
-2. Open a terminal (Mac/Linux) or Anaconda Prompt (Windows)
-3. Navigate to the Equinix folder:
+1. Download the Equinix folder
+2. Install Miniconda if needed: https://docs.conda.io/en/latest/miniconda.html
+3. Open a terminal (Mac/Linux) or Anaconda Prompt (Windows)
+4. Navigate to the Equinix folder:
    ```
    cd path/to/Equinix
    ```
-4. Create the environment (once):
+5. Create the environment (once):
    ```
    conda env create -f environment.yml
    ```
-5. Activate it:
+6. Activate it:
    ```
    conda activate equinix
    ```
@@ -36,11 +37,12 @@ Best if you already have Anaconda or Miniconda, or if Option B gives you trouble
 
 Best if you already have Python 3.10+ installed.
 
-1. Open a terminal and navigate to the Equinix folder:
+1. Download the Equinix folder
+2. Open a terminal and navigate to the Equinix folder:
    ```
    cd path/to/Equinix
    ```
-2. Install dependencies (once):
+3. Install dependencies (once):
    ```
    pip install -r requirements.txt
    ```
