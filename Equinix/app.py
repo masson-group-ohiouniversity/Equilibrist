@@ -209,9 +209,135 @@ with st.sidebar:
 
 script_text = st.session_state.get("_script_text", None)
 
+# ── Skeleton script shown when nothing is loaded yet ─────────────────────
+_SKELETON = """\
+$concentrations
+G0 = 1.0 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant
+Ht = 10 mM
+
+$reactions
+G + H = GH;  log K1 = 4.0
+
+$plot
+xmax = 3.0
+x = Ht/G0
+y = G, H, GH\
+"""
+
 if script_text is None:
-    st.info("Upload a script (.txt) in the sidebar to begin.")
+    st.info("📂 Upload a script (.txt) in the sidebar — or write one directly below and click **▶ Apply**.")
+    _draft = st.text_area(
+        "Script editor",
+        value=_SKELETON,
+        height=320,
+        key="_welcome_editor",
+        label_visibility="collapsed",
+    )
+    _c1, _c2 = st.columns([1, 5])
+    with _c1:
+        if st.button("▶ Apply", key="_welcome_apply"):
+            st.session_state["_script_text"] = _draft
+            st.session_state["_script_filename"] = "untitled.txt"
+            st.rerun()
+    with _c2:
+        st.download_button(
+            "💾 Save script",
+            data=_draft,
+            file_name=f"equinix_script_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain",
+            key="_welcome_save",
+        )
     st.stop()
+
+# ── Shared script editor widget ───────────────────────────────────────────
+# Called at the bottom of both the kinetics and equilibrium branches.
+# Shows the original uploaded script in an editable text area with
+# Apply and Save buttons.  "Apply" re-parses; if the parameter names are
+# unchanged it keeps session state, otherwise it does a full reset.
+
+def _render_script_editor():
+    """Editable script expander rendered below the main plot."""
+    with st.expander("📝 Edit script", expanded=False):
+        _edited = st.text_area(
+            "script_editor_area",
+            value=st.session_state.get("_script_text", ""),
+            height=320,
+            key="_script_editor",
+            label_visibility="collapsed",
+        )
+        _ec1, _ec2, _ec3 = st.columns([1, 1, 5])
+        with _ec1:
+            _apply = st.button("▶ Apply", key="_script_apply")
+        with _ec2:
+            _fname_orig = st.session_state.get("_script_filename", "equinix_script.txt")
+            _fname_stem = _fname_orig.rsplit(".", 1)[0]  # strip .txt
+            _fname = f"{_fname_stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            st.download_button(
+                "💾 Save",
+                data=_edited,
+                file_name=_fname,
+                mime="text/plain",
+                key="_script_save",
+            )
+
+        if _apply:
+            _new_text = _edited
+            # Smart reset: only wipe session state if parameter names changed
+            try:
+                _new_parsed  = parse_script(_new_text)
+                _old_parsed  = parse_script(st.session_state.get("_script_text", ""))
+                _new_params  = (
+                    {e["kname"] for e in _new_parsed.get("equilibria", [])} |
+                    {r["kname"] for r in _new_parsed.get("kinetics", [])} |
+                    {r["krname"] for r in _new_parsed.get("kinetics", []) if "krname" in r}
+                )
+                _old_params  = (
+                    {e["kname"] for e in _old_parsed.get("equilibria", [])} |
+                    {r["kname"] for r in _old_parsed.get("kinetics", [])} |
+                    {r["krname"] for r in _old_parsed.get("kinetics", []) if "krname" in r}
+                )
+                _params_same = (_new_params == _old_params)
+            except Exception:
+                _params_same = False
+
+            if _params_same:
+                # Soft apply: keep logK widget state, but push new concentrations,
+                # volumes, titrant concentrations, and xmax via _pending_ so
+                # _num_input picks them up on the next render.
+                st.session_state["_script_text"] = _new_text
+                # Concentrations
+                for _cname, _cval in _new_parsed.get("concentrations", {}).items():
+                    _root = _cname[:-1] if _cname.endswith("0") else _cname
+                    st.session_state[f"_pending_conc_{_root}"] = float(_cval)
+                # Volume
+                _vols = _new_parsed.get("volumes", {})
+                if _vols:
+                    st.session_state["_pending_V0_mL"] = float(list(_vols.values())[0])
+                # Titrant concentrations
+                for _tkey, _tval in _new_parsed.get("titrant", {}).items():
+                    st.session_state[f"_pending_titrant_mM_{_tkey}"] = float(_tval)
+                # xmax / plot settings
+                if _new_parsed.get("plot_xmax") is not None:
+                    st.session_state["_pending_xmax"] = float(_new_parsed["plot_xmax"])
+            else:
+                # Hard reset: new/renamed parameters → rebuild everything
+                _fit_prefs = {k: st.session_state[k]
+                              for k in ("fit_tolerance_log", "fit_timeout")
+                              if k in st.session_state}
+                _nonce    = st.session_state.get("_uploader_nonce", 0)
+                _fname    = st.session_state.get("_script_filename", "untitled.txt")
+                st.session_state.clear()
+                st.session_state.update(_fit_prefs)
+                st.session_state["_uploader_nonce"]  = _nonce
+                st.session_state["_script_text"]     = _new_text
+                st.session_state["_script_filename"] = _fname
+            st.rerun()
+
 
 # ── Parse & validate ──────────────────────────
 try:
@@ -1109,10 +1235,8 @@ if IS_KINETICS:
                                  if not k.startswith("_"))
                 st.caption(f"Loaded: {', '.join(k for k in _kin_exp_loaded if not k.startswith('_'))} ({_total_pts} pts)")
 
-        st.subheader("Script")
-        with st.expander("Show loaded script"):
-            st.code(script_text, language="text")
-
+    # sidebar closes here — script editor goes in main area below
+    _render_script_editor()
     st.stop()   # ← kinetics branch ends here; nothing below runs
 
 
@@ -2308,9 +2432,8 @@ with col2:
                 f"Mixed fit: slow-exchange integrations [{', '.join(integ_sp)}] + "
                 f"fast-exchange shifts [{', '.join(shift_tgts)}] fitted simultaneously.")
 
-    st.subheader("Script")
-    with st.expander("Show loaded script"):
-        st.code(script_text, language="text")
+with col1:
+    _render_script_editor()
 
 # ── Execute fit AFTER all widgets have rendered ───────────────────────────
 # This is the ONLY correct place to run the fit and call st.rerun():
