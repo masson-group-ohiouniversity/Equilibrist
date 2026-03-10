@@ -262,17 +262,21 @@ if script_text is None:
 
 def _render_script_editor():
     """Editable script expander rendered below the main plot."""
+    # Use the uploader nonce in the widget key so that whenever a new script
+    # is uploaded (nonce increments), the text_area gets a fresh key and
+    # Streamlit cannot restore the previous widget value from its cache.
+    _nonce = st.session_state.get("_uploader_nonce", 0)
     with st.expander("📝 Edit script", expanded=False):
         _edited = st.text_area(
             "script_editor_area",
             value=st.session_state.get("_script_text", ""),
             height=320,
-            key="_script_editor",
+            key=f"_script_editor_{_nonce}",
             label_visibility="collapsed",
         )
         _ec1, _ec2, _ec3 = st.columns([1, 1, 5])
         with _ec1:
-            _apply = st.button("▶ Apply", key="_script_apply")
+            _apply = st.button("▶ Apply", key=f"_script_apply_{_nonce}")
         with _ec2:
             _fname_orig = st.session_state.get("_script_filename", "equinix_script.txt")
             _fname_stem = _fname_orig.rsplit(".", 1)[0]  # strip .txt
@@ -282,7 +286,7 @@ def _render_script_editor():
                 data=_edited,
                 file_name=_fname,
                 mime="text/plain",
-                key="_script_save",
+                key=f"_script_save_{_nonce}",
             )
 
         if _apply:
