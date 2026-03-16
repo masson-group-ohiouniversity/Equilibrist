@@ -1,4 +1,4 @@
-# Equinix
+# Equilibrist v1.0
 
 Fitting software for complex chemical equilibria and kinetics from NMR and absorption spectroscopy data.  
 
@@ -17,12 +17,12 @@ Fitting software for complex chemical equilibria and kinetics from NMR and absor
 
 Best if you already have Anaconda or Miniconda, or if Option B gives you trouble.
 
-1. Download the Equinix folder
+1. Download the Equilibrist folder
 2. Install Miniconda if needed: https://docs.conda.io/en/latest/miniconda.html
 3. Open a terminal (Mac/Linux) or Anaconda Prompt (Windows)
-4. Navigate to the Equinix folder:
+4. Navigate to the Equilibrist folder:
    ```
-   cd path/to/Equinix
+   cd path/to/Equilibrist
    ```
 5. Create the environment (once):
    ```
@@ -30,17 +30,17 @@ Best if you already have Anaconda or Miniconda, or if Option B gives you trouble
    ```
 6. Activate it:
    ```
-   conda activate equinix
+   conda activate Equilibrist
    ```
 
 ### Option B: pip
 
 Best if you already have Python 3.10+ installed.
 
-1. Download the Equinix folder
-2. Open a terminal and navigate to the Equinix folder:
+1. Download the Equilibrist folder
+2. Open a terminal and navigate to the Equilibrist folder:
    ```
-   cd path/to/Equinix
+   cd path/to/Equilibrist
    ```
 3. Install dependencies (once):
    ```
@@ -57,14 +57,14 @@ streamlit run app.py
 ```
 The app will open automatically in your browser at `http://localhost:8501`.
 
-**Note for conda users:** make sure the environment is activated first (`conda activate equinix`).
+**Note for conda users:** make sure the environment is activated first (`conda activate Equilibrist`).
 
 ---
 
-## Every time you use Equinix
+## Every time you use Equilibrist
 
 ```
-conda activate equinix        ← conda users only
+conda activate Equilibrist        ← conda users only
 streamlit run app.py
 ```
 
