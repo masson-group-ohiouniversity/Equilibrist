@@ -1,0 +1,1407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Equilibrist — User Manual</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:#0f0f13;--bg2:#17171e;--bg3:#1e1e28;--border:#2a2a38;
+      --accent:#7c9eff;--accent2:#c084fc;--gold:#f0c060;--text:#e8e8f0;
+      --muted:#8888a8;--code-bg:#12121a;--success:#6ee7b7;--warning:#fbbf24;
+      --danger:#f87171;
+    }
+    *{box-sizing:border-box;margin:0;padding:0;}
+    html{scroll-behavior:smooth;}
+    body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-size:15.5px;line-height:1.75;}
+
+    header{background:linear-gradient(135deg,#0f0f13 0%,#1a1030 50%,#0f1a2a 100%);border-bottom:1px solid var(--border);padding:72px 40px 52px;text-align:center;position:relative;overflow:hidden;}
+    header::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 60% 40% at 50% 0%,rgba(124,158,255,0.12),transparent);pointer-events:none;}
+    header .badge{display:inline-block;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:3px;text-transform:uppercase;color:var(--accent);border:1px solid rgba(124,158,255,0.3);padding:4px 14px;border-radius:20px;margin-bottom:22px;}
+    header h1{font-family:'DM Serif Display',serif;font-size:clamp(48px,7vw,82px);font-weight:400;letter-spacing:-2px;background:linear-gradient(135deg,#e8e8f0 30%,var(--accent) 70%,var(--accent2) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1.05;margin-bottom:14px;}
+    header .subtitle{font-size:17px;color:var(--muted);font-weight:300;max-width:620px;margin:0 auto 32px;}
+    header .version{font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);}
+
+    .layout{display:flex;max-width:1200px;margin:0 auto;padding:0 20px;}
+
+    nav{width:256px;flex-shrink:0;padding:40px 0;position:sticky;top:0;height:100vh;overflow-y:auto;border-right:1px solid var(--border);}
+    nav::-webkit-scrollbar{width:4px;}
+    nav::-webkit-scrollbar-track{background:transparent;}
+    nav::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+    nav .nav-section{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);padding:22px 24px 7px;}
+    nav a{display:block;padding:5px 24px;font-size:13px;color:var(--muted);text-decoration:none;transition:color 0.15s,border-left-color 0.15s;border-left:2px solid transparent;margin-left:-1px;}
+    nav a:hover{color:var(--text);border-left-color:var(--accent);}
+    nav a.sub{padding-left:36px;font-size:12.5px;}
+
+    main{flex:1;min-width:0;padding:48px 0 48px 56px;}
+
+    section{margin-bottom:68px;}
+    section:last-child{margin-bottom:120px;}
+
+    h2{font-family:'DM Serif Display',serif;font-size:32px;font-weight:400;letter-spacing:-0.5px;color:var(--text);margin-bottom:7px;padding-top:6px;}
+    .section-line{height:1px;background:linear-gradient(90deg,var(--accent) 0%,transparent 60%);margin-bottom:26px;opacity:0.4;}
+    h3{font-size:17px;font-weight:600;color:var(--text);margin:32px 0 11px;}
+    h4{font-size:12px;font-weight:600;color:var(--accent);font-family:'DM Mono',monospace;letter-spacing:1px;text-transform:uppercase;margin:26px 0 9px;}
+    p{color:#c8c8dc;margin-bottom:13px;max-width:740px;}
+    p strong{color:var(--text);font-weight:600;}
+    ul,ol{padding-left:22px;margin-bottom:13px;max-width:740px;}
+    li{color:#c8c8dc;margin-bottom:5px;}
+    li strong{color:var(--text);}
+
+    code{font-family:'DM Mono',monospace;font-size:12.5px;background:var(--code-bg);color:var(--accent);padding:2px 6px;border-radius:4px;border:1px solid var(--border);}
+    pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:22px;overflow-x:auto;margin:14px 0 22px;}
+    pre code{background:none;border:none;padding:0;color:#c8c8dc;font-size:13px;line-height:1.85;}
+    .kw{color:var(--accent2);}
+    .val{color:var(--gold);}
+    .cmt{color:#555570;font-style:italic;}
+    .sec{color:var(--accent);font-weight:500;}
+    .sp{color:var(--success);}
+    .op{color:#e0a060;}
+
+    .callout{border-left:3px solid var(--accent);background:rgba(124,158,255,0.06);border-radius:0 8px 8px 0;padding:15px 20px;margin:18px 0;max-width:740px;}
+    .callout.warn{border-left-color:var(--warning);background:rgba(251,191,36,0.06);}
+    .callout.success{border-left-color:var(--success);background:rgba(110,231,183,0.06);}
+    .callout.danger{border-left-color:var(--danger);background:rgba(248,113,113,0.06);}
+    .callout p{margin:0;max-width:none;}
+    .callout-title{font-family:'DM Mono',monospace;font-size:10.5px;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin-bottom:5px;display:block;}
+    .callout.warn .callout-title{color:var(--warning);}
+    .callout.success .callout-title{color:var(--success);}
+    .callout.danger .callout-title{color:var(--danger);}
+
+    .os-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:20px 0;}
+    .os-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:22px;transition:border-color 0.2s;}
+    .os-card:hover{border-color:var(--accent);}
+    .os-card .os-icon{font-size:28px;margin-bottom:10px;display:block;}
+    .os-card h3{margin-top:0;font-size:15px;}
+    .os-card ol{padding-left:16px;}
+    .os-card li{font-size:13.5px;}
+
+    table.kw-table{width:100%;max-width:780px;border-collapse:collapse;margin:14px 0 26px;font-size:13.5px;}
+    table.kw-table th{text-align:left;font-family:'DM Mono',monospace;font-size:10.5px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);padding:7px 12px 7px 0;}
+    table.kw-table td{padding:9px 12px 9px 0;border-bottom:1px solid rgba(42,42,56,0.6);vertical-align:top;color:#c8c8dc;}
+    table.kw-table td:first-child{font-family:'DM Mono',monospace;font-size:12.5px;color:var(--accent);white-space:nowrap;}
+    table.kw-table tr:last-child td{border-bottom:none;}
+
+    .steps{max-width:740px;}
+    .step{display:flex;gap:18px;margin-bottom:26px;align-items:flex-start;}
+    .step-num{flex-shrink:0;width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-family:'DM Mono',monospace;font-size:12px;font-weight:500;color:#0f0f13;margin-top:3px;}
+    .step-body h3{margin-top:0;margin-bottom:5px;font-size:15px;}
+    .step-body p{margin-bottom:7px;}
+
+    .syntax{font-family:'DM Mono',monospace;font-size:12.5px;background:rgba(124,158,255,0.08);border:1px solid rgba(124,158,255,0.2);border-radius:6px;padding:10px 16px;margin:10px 0 16px;display:inline-block;color:#c8c8dc;max-width:740px;width:100%;}
+
+    footer{border-top:1px solid var(--border);padding:36px;text-align:center;color:var(--muted);font-size:13px;}
+    footer a{color:var(--accent);text-decoration:none;}
+
+    @media(max-width:768px){nav{display:none;}main{padding:28px 16px;}.layout{padding:0;}.os-grid{grid-template-columns:1fr;}}
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="badge">User Manual · v1.0</div>
+  <h1>Equilibrist</h1>
+  <p class="subtitle">A thermodynamic and kinetic solver</p>
+  <span class="version">Python · Streamlit · Open Source</span>
+</header>
+
+<div class="layout">
+<nav>
+  <span class="nav-section">Getting Started</span>
+  <a href="#overview">Overview</a>
+  <a href="#installation">Installation</a>
+  <a href="#running">Running Equilibrist</a>
+
+  <span class="nav-section">The Script</span>
+  <a href="#script-intro">Script Structure</a>
+  <a href="#concentrations">$concentrations</a>
+  <a href="#volumes">$volumes</a>
+  <a href="#titrant">$titrant</a>
+  <a href="#temperature">$temperature</a>
+  <a href="#reactions">$reactions</a>
+  <a class="sub" href="#reactions-eq">Equilibria ( = )</a>
+  <a class="sub" href="#reactions-bounds">Soft bounds</a>
+  <a class="sub" href="#reactions-kin">Kinetics ( &gt; &lt;&gt; )</a>
+  <a class="sub" href="#reactions-dg">Free-energy input (DG)</a>
+  <a href="#variables">$variables</a>
+  <a href="#plot">$plot</a>
+  <a href="#nmr">$nmr</a>
+  <a href="#spectra">$spectra</a>
+  <a href="#constraints">$constraints</a>
+  <a class="sub" href="#constraints-logspace">Log-space syntax</a>
+  <a class="sub" href="#constraints-kspace">K-space syntax</a>
+  <a class="sub" href="#constraints-hard">Hard enforcement</a>
+  <a class="sub" href="#constraints-ui">Using the toggle</a>
+
+  <span class="nav-section">Data Files</span>
+  <a href="#data-conc">Concentration Data</a>
+  <a href="#data-nmr">NMR Data</a>
+  <a href="#data-spectra">UV-Vis Spectra Data</a>
+  <a href="#data-kinetics">Kinetics Data Files</a>
+
+  <span class="nav-section">Interface</span>
+  <a href="#sidebar">Left Margin Controls</a>
+  <a href="#script-editor">In-app Script Editor</a>
+  <a href="#right-panel">Right Panel</a>
+  <a href="#main-plot">Main Plot</a>
+  <a href="#fitting">Fitting</a>
+  <a href="#fit-stats">Fit Statistics</a>
+  <a href="#export">Export &amp; Snapshot</a>
+  <a href="#pubfig">Publication Figures</a>
+  <a href="#cycle-detection">Cycle Detection</a>
+
+  <span class="nav-section">Examples</span>
+  <a href="#ex-1to1">1:1 Binding</a>
+  <a href="#ex-12">1:2 Binding</a>
+  <a href="#ex-sequential">Sequential 1:3 (UV-Vis)</a>
+  <a href="#ex-solid">Solid Titrant</a>
+  <a href="#ex-kinetics">Kinetics</a>
+  <a href="#ex-kinetics-nmr">Kinetics + NMR</a>
+  <a href="#ex-kinetics-spectra">Kinetics + UV-Vis</a>
+  <a href="#ex-nmr-shift">NMR Shift</a>
+  <a href="#ex-nmr-integ">NMR Integration</a>
+  <a href="#ex-nmr-mixed">NMR Mixed Mode</a>
+  <a href="#ex-dg">Free-energy input</a>
+  <a href="#ex-constraints">Constraints</a>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════════════════════ OVERVIEW ═══════════════════════════════════════ -->
+<section id="overview">
+<h2>Overview</h2><div class="section-line"></div>
+<p>Equilibrist is a browser-based scientific application built with Python and Streamlit. It runs locally on your machine. You define a chemical system via a plain-text script, simulate titration or time-resolved curves, and optionally fit binding or rate constants to experimental data.</p>
+
+<h3>Key capabilities</h3>
+<ul>
+  <li><strong>Arbitrary equilibrium networks</strong> — any number of species, reactions, stoichiometries, and multiple products per reaction.</li>
+  <li><strong>Kinetics simulation</strong> — irreversible (<code>&gt;</code>) and reversible (<code>&lt;&gt;</code>) kinetic steps, including pre-equilibria defined with <code>=</code> in the same script.</li>
+  <li><strong>Free-energy input mode</strong> — reactions can be defined using ΔG° (van 't Hoff) and ΔG‡ (Eyring) energy terms in kcal/mol instead of K or k values, with a user-specified temperature.</li>
+  <li><strong>Liquid and solid titrant modes</strong> — volume-based additions with dilution, or solid additions with fixed cell volume.</li>
+  <li><strong>UV-Vis global spectral fitting</strong> — Beer–Lambert analysis over any wavelength range; molar absorptivities solved analytically at each step.</li>
+  <li><strong>NMR fitting</strong> — fast-exchange chemical shift, slow-exchange integration, and simultaneous mixed-mode fitting. Available in both equilibrium and kinetics modes.</li>
+  <li><strong>Concentration fitting</strong> — direct fitting of measured species concentrations.</li>
+  <li><strong>Dual optimizer (concentration mode)</strong> — L-BFGS-B (fast, gradient-based) followed by Nelder-Mead (robust, gradient-free), user-selectable per fit run.</li>
+  <li><strong>User-defined soft bounds on K</strong> — restrict the optimizer to physically meaningful equilibrium constant ranges.</li>
+  <li><strong>Free energy table</strong> — after fitting, ΔG° (equilibrium) and ΔG‡ (rate constants, Eyring) are reported in kcal/mol at the script temperature.</li>
+  <li><strong>Publication-quality figure export</strong> — one-click PDF with vector text, Arial font, for subsequent editing in Adobe Illustrator.</li>
+  <li><strong>Thermodynamic cycle detection</strong> — automatic warning when declared equilibrium constants are mutually inconsistent.</li>
+  <li><strong>One-click data export</strong> — timestamped Excel file with concentrations and variables, plus PNG snapshot.</li>
+  <li><strong>In-app script editor</strong> — edit the script directly in the browser without leaving the app.</li>
+</ul>
+</section>
+
+<!-- ═══════════════════════════════════════ INSTALLATION ═══════════════════════════════════════ -->
+<section id="installation">
+<h2>Installation</h2><div class="section-line"></div>
+<p>Equilibrist requires Python 3.10 or newer. Two installation methods are available: <strong>conda</strong> (recommended, especially on Windows) and <strong>pip</strong>.</p>
+
+<h3>Method A — conda (recommended)</h3>
+<p>Best if you already have Anaconda or Miniconda. If not, download Miniconda (free, ~50 MB) from <strong>docs.conda.io/en/latest/miniconda.html</strong>.</p>
+
+<div class="os-grid">
+  <div class="os-card">
+    <span class="os-icon">🪟</span>
+    <h3>Windows</h3>
+    <ol>
+      <li>Open <strong>Anaconda Prompt</strong> (installed with Miniconda).</li>
+      <li>Navigate to the Equilibrist folder: <code>cd C:\path\to\Equilibrist</code></li>
+      <li>Create the environment (once): <code>conda env create -f environment.yml</code></li>
+      <li>Activate it: <code>conda activate equinix</code></li>
+    </ol>
+  </div>
+  <div class="os-card">
+    <span class="os-icon">🍎</span>
+    <h3>macOS / Linux</h3>
+    <ol>
+      <li>Open <strong>Terminal</strong>.</li>
+      <li>Navigate to the Equilibrist folder: <code>cd ~/path/to/Equilibrist</code></li>
+      <li>Create the environment (once): <code>conda env create -f environment.yml</code></li>
+      <li>Activate it: <code>conda activate equinix</code></li>
+    </ol>
+  </div>
+</div>
+
+<div class="callout success">
+  <span class="callout-title">Why conda?</span>
+  <p>The <code>environment.yml</code> pins Python to 3.11 and installs all dependencies in an isolated environment — it won't conflict with any existing Python on your machine. Binary packages (scipy, numpy, matplotlib) install more reliably via conda on Windows.</p>
+</div>
+
+<h3>Method B — pip</h3>
+<p>Best if you already have Python 3.10+ installed.</p>
+
+<div class="os-grid">
+  <div class="os-card">
+    <span class="os-icon">🪟</span>
+    <h3>Windows</h3>
+    <ol>
+      <li>Download Python from <strong>python.org/downloads</strong>. Tick <strong>"Add Python to PATH"</strong> during install.</li>
+      <li>Open <strong>Windows Terminal</strong> or <strong>PowerShell</strong>.</li>
+      <li>Navigate to the Equilibrist folder: <code>cd C:\path\to\Equilibrist</code></li>
+      <li>Install (once): <code>pip install -r requirements.txt</code></li>
+    </ol>
+  </div>
+  <div class="os-card">
+    <span class="os-icon">🍎</span>
+    <h3>macOS / Linux</h3>
+    <ol>
+      <li>Python 3 is usually pre-installed. Verify: <code>python3 --version</code></li>
+      <li>Open <strong>Terminal</strong> and navigate to the Equilibrist folder.</li>
+      <li>Install (once): <code>pip3 install -r requirements.txt</code></li>
+    </ol>
+  </div>
+</div>
+
+<div class="callout warn">
+  <span class="callout-title">Windows pip note</span>
+  <p>If you see <em>"pip is not recognized"</em>, use <code>python -m pip install -r requirements.txt</code>. On macOS/Linux, use <code>pip3</code> if <code>pip</code> is not found.</p>
+</div>
+
+<h3>Required packages</h3>
+<table class="kw-table">
+  <thead><tr><th>Package</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td>streamlit</td><td>Web application framework — browser interface</td></tr>
+    <tr><td>numpy</td><td>Numerical arrays, linear algebra</td></tr>
+    <tr><td>pandas</td><td>Reading and writing Excel (.xlsx) files</td></tr>
+    <tr><td>scipy</td><td>L-BFGS-B and Nelder-Mead optimizers, ODE integrator</td></tr>
+    <tr><td>plotly</td><td>Interactive charts in the browser</td></tr>
+    <tr><td>matplotlib</td><td>Publication-quality PDF figure export</td></tr>
+    <tr><td>pillow</td><td>PNG image generation for snapshots</td></tr>
+    <tr><td>openpyxl</td><td>Excel engine required by pandas</td></tr>
+    <tr><td>kaleido</td><td>Static image export from Plotly (PNG snapshots)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">kaleido on Windows</span>
+  <p>The <code>requirements.txt</code> automatically pins <code>kaleido==0.2.1</code> on Windows (more reliable than the latest version). The <code>environment.yml</code> uses 0.2.1 on all platforms. If the <strong>📸 Snapshot</strong> button produces no output, reinstall with <code>pip install kaleido==0.2.1</code> and restart the app.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ RUNNING ═══════════════════════════════════════ -->
+<section id="running">
+<h2>Running Equilibrist</h2><div class="section-line"></div>
+<p>Open a terminal in the Equilibrist folder. If using conda, activate the environment first.</p>
+<pre><code>conda activate equinix     # conda users only — skip if using pip
+streamlit run app.py</code></pre>
+<p>Streamlit starts a local server and opens your browser automatically at <strong>http://localhost:8501</strong>. The application runs entirely on your machine — no internet connection required after installation.</p>
+
+<div class="callout success">
+  <span class="callout-title">Every time you use Equilibrist</span>
+  <p>conda users: <code>conda activate equinix</code> then <code>streamlit run app.py</code>.<br>pip users: just <code>streamlit run app.py</code>.</p>
+</div>
+
+<div class="callout success">
+  <span class="callout-title">Windows shortcut</span>
+  <p>Right-click the Desktop → New → Shortcut. Enter: <code>cmd /k "conda activate equinix && streamlit run C:\full\path\to\app.py"</code>. Double-clicking launches Equilibrist in one step.</p>
+</div>
+
+<p>Press <strong>Ctrl + C</strong> in the terminal to stop the server.</p>
+
+<h3>Equilibrist folder contents</h3>
+<p>The Equilibrist folder should contain the following files — nothing else is required:</p>
+<pre><code>Equilibrist/
+├── app.py                          ← main application entry point
+├── equilibrist_parser.py
+├── equilibrist_network.py
+├── equilibrist_kinetics.py
+├── equilibrist_kinetics_nmr.py
+├── equilibrist_kinetics_spectra.py
+├── equilibrist_curve.py
+├── equilibrist_fit_conc.py
+├── equilibrist_fit_nmr.py
+├── equilibrist_fit_spectra.py
+├── equilibrist_io.py
+├── requirements.txt                ← pip install list
+├── environment.yml                 ← conda environment definition
+└── README.md</code></pre>
+<p>A <code>__pycache__</code> folder may appear after first run — this is normal.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ SCRIPT STRUCTURE ═══════════════════════════════════════ -->
+<section id="script-intro">
+<h2>Script Structure</h2><div class="section-line"></div>
+<p>An Equilibrist script is a plain-text file (any extension, typically <code>.txt</code>) that fully defines the chemical system. It is divided into named sections, each opened by a <code>$</code> keyword on its own line. Section names are case-insensitive. The order of sections does not matter to the parser, but is preserved in the exported files.</p>
+<p>Lines beginning with <code>#</code> are comments. Inline comments after <code>#</code> anywhere on a line are stripped before parsing. Comment lines are preserved verbatim in the exported files. The keyword <code>$equilibria</code> is accepted as a synonym for <code>$reactions</code>.</p>
+
+<p>A minimal script:</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span> = <span class="sp">GH</span>; <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x = Ht/G0
+y = G, H, GH</code></pre>
+
+<p>Upload this file with the <strong>Equilibrist Script</strong> uploader in the left sidebar, or type it directly into the <strong>in-app script editor</strong>. The simulation runs immediately and re-runs on every sidebar change. Uploading a new script performs a full session reset automatically.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ $CONCENTRATIONS ═══════════════════════════════════════ -->
+<section id="concentrations">
+<h2>$concentrations</h2><div class="section-line"></div>
+<p>Defines the initial concentrations of all species present in the cell/NMR tube before titration or kinetics begins.</p>
+<div class="syntax"><span class="sp">Name</span> = <span class="val">value</span> <span class="op">unit</span></div>
+
+<h3>Species name derivation</h3>
+<p>If the name ends in <code>0</code>, the trailing zero is stripped to give the free-species symbol used by the solver. <code>G0</code> → species <code>G</code>.</p>
+
+<table class="kw-table">
+  <thead><tr><th>Unit</th><th>Meaning</th><th>Note</th></tr></thead>
+  <tbody>
+    <tr><td>M</td><td>Molar</td><td></td></tr>
+    <tr><td>mM</td><td>Millimolar</td><td>Default when no unit given</td></tr>
+    <tr><td>uM</td><td>Micromolar</td><td></td></tr>
+  </tbody>
+</table>
+<p>All concentrations are stored and displayed in mM internally. Scientific notation is accepted (e.g. <code>1e-3 M</code>).</p>
+
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span>   = <span class="val">1.00</span> mM    <span class="cmt"># free-species name: G</span>
+<span class="sp">Dye0</span> = <span class="val">10</span> uM      <span class="cmt"># free-species name: Dye</span></code></pre>
+
+<div class="callout">
+  <span class="callout-title">Use in x-axis expression</span>
+  <p>The script name (e.g. <code>G0</code>) is available in the x-axis expression as the <em>initial number of moles</em> (mmol = C₀ × V₀). Dividing a cumulative titrant mmol by this gives a dimensionless equivalents axis: <code>x = Ht/G0</code>.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ $VOLUMES ═══════════════════════════════════════ -->
+<section id="volumes">
+<h2>$volumes</h2><div class="section-line"></div>
+<p>Sets the initial cell/NMR tube volume. Only <code>V0</code> is required.</p>
+<pre><code><span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL</code></pre>
+
+<table class="kw-table">
+  <thead><tr><th>Unit</th><th>Meaning</th><th>Note</th></tr></thead>
+  <tbody>
+    <tr><td>L</td><td>Litres</td><td></td></tr>
+    <tr><td>mL</td><td>Millilitres</td><td>Default when no unit given</td></tr>
+    <tr><td>uL</td><td>Microlitres</td><td></td></tr>
+  </tbody>
+</table>
+<p>In solution mode, V₀ is the starting volume; dilution is recalculated at every titration point. In solid mode, V₀ is fixed throughout. <code>$volumes</code> is not required in kinetics mode (there is no titrant addition).</p>
+</section>
+
+<!-- ═══════════════════════════════════════ $TITRANT ═══════════════════════════════════════ -->
+<section id="titrant">
+<h2>$titrant</h2><div class="section-line"></div>
+<p>Defines what is added to the cell. Two modes are available, selected on the header line. Not used in kinetics mode.</p>
+
+<h3>Solution mode (default)</h3>
+<p>Each line names a component and its stock concentration. Adding solution incrementally increases the cell volume, diluting all species.</p>
+<pre><code><span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM   <span class="cmt"># primary titrant, 10 mM stock</span>
+<span class="sp">Lt</span> = <span class="val">5.00</span>  mM   <span class="cmt"># co-dissolved ligand (optional)</span></code></pre>
+
+<h3>Solid mode</h3>
+<p>Use <code>$titrant solid</code>. No stock concentration is needed. Cell volume is fixed at V₀ throughout. An optional ratio after a semicolon sets stoichiometric fractions for mixed solid additions.</p>
+<pre><code><span class="sec">$titrant solid</span>
+<span class="sp">Ht</span>          <span class="cmt"># single solid component</span></code></pre>
+<pre><code><span class="sec">$titrant solid</span>
+<span class="sp">Ht</span>; <span class="val">1.0</span>     <span class="cmt"># two-component mixture, mole ratio H : M = 1.0 : 1.3</span>
+<span class="sp">Mt</span>; <span class="val">1.3</span></code></pre>
+
+<h3>Titrant name → free-species derivation</h3>
+<table class="kw-table">
+  <thead><tr><th>Rule (applied in order)</th><th>Example</th><th>Free species</th></tr></thead>
+  <tbody>
+    <tr><td>Ends in <code>t</code> → strip it</td><td><code>Ht</code></td><td><code>H</code></td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ═══════════════════════════════════════ $TEMPERATURE ═══════════════════════════════════════ -->
+<section id="temperature">
+<h2>$temperature</h2><div class="section-line"></div>
+<p>Sets the temperature used for free-energy calculations. This affects two things: (1) conversion of ΔG values to K or k when using the <a href="#reactions-dg">free-energy input mode</a> in <code>$reactions</code>, and (2) the ΔG° / ΔG‡ values shown in the Free energies table after fitting. The default is 298.15 K (25 °C) when the section is absent.</p>
+
+<p>Three equivalent syntaxes are accepted:</p>
+<pre><code><span class="sec">$temperature</span>
+T = <span class="val">25</span> C        <span class="cmt"># 25 °C  (recommended syntax)</span></code></pre>
+<pre><code><span class="sec">$temperature</span>
+T = <span class="val">310.15</span> K    <span class="cmt"># 310.15 K</span></code></pre>
+<pre><code><span class="sec">$temperature <span class="val">37</span> C</span>   <span class="cmt"># inline — value and unit on the header line</span></code></pre>
+
+<table class="kw-table">
+  <thead><tr><th>Unit</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>K</td><td>Kelvin (default when no unit given)</td></tr>
+    <tr><td>C</td><td>Celsius (converted to Kelvin internally)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">Temperature and fitting</span>
+  <p>The temperature does <em>not</em> affect equilibrium or kinetics calculations — K and k values stored in the script are always the direct constants. Temperature only controls (a) the DG→K/k conversion at parse time, and (b) the ΔG display in the fit statistics panel.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ $REACTIONS ═══════════════════════════════════════ -->
+<section id="reactions">
+<h2>$reactions</h2><div class="section-line"></div>
+<p>Defines all chemical reactions — equilibria and/or kinetics — in a single section. The arrow symbol determines the reaction type and the solver engaged.</p>
+
+<table class="kw-table">
+  <thead><tr><th>Arrow</th><th>Type</th><th>Solver</th></tr></thead>
+  <tbody>
+    <tr><td>=</td><td>Thermodynamic equilibrium</td><td>Equilibrium solver</td></tr>
+    <tr><td>&gt;</td><td>Irreversible kinetic step</td><td>ODE (scipy.integrate)</td></tr>
+    <tr><td>&lt;&gt;</td><td>Reversible kinetic step</td><td>ODE (scipy.integrate)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <span class="callout-title">$equilibria alias</span>
+  <p><code>$equilibria</code> is accepted as a full synonym for <code>$reactions</code>. Scripts using the old keyword remain valid.</p>
+</div>
+
+<h3 id="reactions-eq">Equilibrium reactions ( = )</h3>
+<div class="syntax">reactants = products; <span class="kw">log</span> <span class="sp">Kname</span> = <span class="val">value</span></div>
+<p>Parameter names (K1, K2, …) must be unique across the entire script. The value is log₁₀(K). You may also provide the linear K directly — Equilibrist converts automatically:</p>
+<pre><code><span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span>  = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.5</span>       <span class="cmt"># log form</span>
+<span class="sp">GH</span> + <span class="sp">H</span> = <span class="sp">GH2</span>; <span class="sp">K2</span> = <span class="val">31623</span>          <span class="cmt"># linear form, auto-converted</span>
+<span class="val">2</span> <span class="sp">G</span> + <span class="sp">H</span>  = <span class="sp">G2H</span>; <span class="kw">log</span> <span class="sp">K3</span> = <span class="val">5.1</span>       <span class="cmt"># 2:1 stoichiometry</span></code></pre>
+<p>Stoichiometric coefficients are integers separated from the species name by a <strong>space</strong>: <code>2 G</code>, <code>3 H</code>. The space is mandatory — <code>2G</code> without a space is interpreted as a species literally named <code>2G</code>. Multiple products are allowed: <code>G + H = GH_A + GH_B</code>.</p>
+
+<h3 id="reactions-bounds">Soft bounds on equilibrium constants</h3>
+<p>You can restrict the optimizer to a physically meaningful range for each K by appending a <code>from … to …</code> clause. Bounds outside this range are penalised quadratically — the optimizer is strongly discouraged from leaving the region, but the constraint is not hard. The bound values follow the same convention as the K itself: log units if you wrote <code>log K1</code>, linear units if you wrote <code>K1</code>.</p>
+
+<table class="kw-table">
+  <thead><tr><th>Syntax</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>from lo to hi</code></td><td>Both lower and upper soft bounds</td></tr>
+    <tr><td><code>from lo</code></td><td>Lower bound only</td></tr>
+    <tr><td><code>to hi</code></td><td>Upper bound only</td></tr>
+    <tr><td>(absent)</td><td>Default bounds: log K ∈ [−2, 14]</td></tr>
+  </tbody>
+</table>
+
+<pre><code><span class="sec">$reactions</span>
+<span class="sp">L</span> + <span class="sp">Eu</span> = <span class="sp">EuL</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">6.0</span>;  from <span class="val">2.0</span> to <span class="val">12.0</span>
+<span class="sp">L</span> + <span class="sp">Eu</span> = <span class="sp">EuL</span>;  <span class="sp">K1</span> = <span class="val">1e6</span>;     from <span class="val">1e2</span> to <span class="val">3.5e12</span>  <span class="cmt"># linear bounds</span></code></pre>
+
+<h3 id="reactions-kin">Kinetic reactions ( &gt; and &lt;&gt; )</h3>
+<p>As soon as any kinetic arrow appears in the script, Equilibrist switches to the ODE engine for the whole system. Rate constants can be entered in log form (<code>log k1 = 3.0</code>) or linear form (<code>k1 = 1000</code>). Both forms are accepted.</p>
+<pre><code><span class="sec">$reactions</span>
+<span class="sp">A</span> + <span class="sp">B</span> &gt;  <span class="sp">AB</span>; <span class="kw">log</span> <span class="sp">k1</span>  = <span class="val">3.0</span>                  <span class="cmt"># irreversible, log form</span>
+<span class="sp">A</span> + <span class="sp">B</span> &gt;  <span class="sp">AB</span>; <span class="sp">k1</span>  = <span class="val">1000</span>                   <span class="cmt"># irreversible, linear form</span>
+<span class="sp">A</span> + <span class="sp">B</span> &lt;&gt; <span class="sp">AB</span>; <span class="kw">log</span> <span class="sp">k1</span>  = <span class="val">4.0</span>; <span class="kw">log</span> <span class="sp">k-1</span> = <span class="val">1.0</span>  <span class="cmt"># reversible</span>
+<span class="sp">A</span> + <span class="sp">B</span> &lt;&gt; <span class="sp">AB</span>; <span class="sp">k1</span>  = <span class="val">2e4</span>;  <span class="sp">k-1</span> = <span class="val">2.0</span>         <span class="cmt"># reversible, linear</span></code></pre>
+
+<h3>Mixed equilibria and kinetics</h3>
+<p>Both arrow types can coexist freely. Pre-equilibria (<code>=</code>) in a mixed system are enforced via large reversible rate constants consistent with the declared K value.</p>
+<pre><code><span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span> = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>    <span class="cmt"># fast pre-equilibrium</span>
+<span class="sp">GH</span>    &gt; <span class="sp">P</span>;   <span class="kw">log</span> <span class="sp">k2</span> = <span class="val">-2.0</span>   <span class="cmt"># slow irreversible step</span></code></pre>
+
+<h3 id="reactions-dg">Free-energy input mode (DG / DG#)</h3>
+<p>Instead of K or k values, reactions can be defined using free energies in kcal/mol. The temperature set in <code>$temperature</code> (default 298.15 K) is used for all conversions. Two prefixes are available:</p>
+
+<table class="kw-table">
+  <thead><tr><th>Prefix</th><th>Meaning</th><th>Used for</th></tr></thead>
+  <tbody>
+    <tr><td><code>DG = value</code></td><td>Reaction free energy ΔG° (kcal/mol), van 't Hoff: K = exp(−ΔG°/RT)</td><td>Equilibrium reactions (<code>=</code>)</td></tr>
+    <tr><td><code>DG# = value</code></td><td>Activation free energy ΔG‡ (kcal/mol), Eyring: k = (k_BT/h) · exp(−ΔG‡/RT)</td><td>Kinetic reactions (<code>&gt;</code>, <code>&lt;&gt;</code>)</td></tr>
+  </tbody>
+</table>
+
+<p>For reversible kinetic reactions (<code>&lt;&gt;</code>), both <code>DG#</code> (forward barrier) and <code>DG</code> (reaction energy) are required. The reverse barrier is computed as ΔG‡_rev = ΔG‡ − ΔG°. An error is raised if this would be ≤ 0 (unphysical: transition state below products).</p>
+
+<p>DG and k/K inputs cannot be mixed on the same reaction line.</p>
+
+<pre><code><span class="sec">$temperature</span>
+T = <span class="val">25</span> C
+
+<span class="sec">$reactions</span>
+<span class="cmt"># Equilibrium via ΔG° (van 't Hoff)</span>
+<span class="sp">G</span> + <span class="sp">H</span> = <span class="sp">GH</span>; DG = <span class="val">-5.5</span>              <span class="cmt"># ΔG° = −5.5 kcal/mol → log K ≈ 4.04</span>
+
+<span class="cmt"># Irreversible kinetics via ΔG‡ (Eyring)</span>
+<span class="sp">GH</span> &gt; <span class="sp">P</span>; DG# = <span class="val">18.0</span>                  <span class="cmt"># ΔG‡ = 18.0 kcal/mol</span>
+
+<span class="cmt"># Reversible kinetics via ΔG‡ and ΔG° (Eyring + van 't Hoff)</span>
+<span class="sp">A</span> + <span class="sp">B</span> &lt;&gt; <span class="sp">C</span>; DG# = <span class="val">15.0</span>; DG = <span class="val">-3.0</span>  <span class="cmt"># ΔG‡_rev = 15.0 − (−3.0) = 18.0 kcal/mol</span></code></pre>
+
+<div class="callout">
+  <span class="callout-title">Parameter names in DG mode</span>
+  <p>When DG mode is used, parameter names are auto-generated: equilibrium constants are named <code>K</code> + label (e.g. <code>K1</code>), forward rate constants <code>kf</code> + label, reverse rate constants <code>kr</code> + label. An optional label can be appended to the DG prefix: <code>DG#A</code> generates <code>kfA</code>.</p>
+</div>
+
+<div class="callout">
+  <span class="callout-title">Parameter naming (general)</span>
+  <p>Parameter names can be <strong>any alphanumeric string</strong> — <code>log K1</code>, <code>log Benzene</code>, <code>log beta3</code>, <code>k-1</code> are all equally valid. The distinction between an equilibrium constant and a rate constant is determined entirely by the arrow symbol (<code>=</code> vs <code>&gt;</code> / <code>&lt;&gt;</code>), not by the name. Names must be unique across the entire script.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ $VARIABLES ═══════════════════════════════════════ -->
+<section id="variables">
+<h2>$variables</h2><div class="section-line"></div>
+<p>Defines algebraic combinations of species concentrations for use as plot quantities, NMR shift targets, or in the x-axis expression. Full arithmetic is supported: <code>+</code>, <code>-</code>, <code>*</code>, <code>/</code>, parentheses.</p>
+<pre><code><span class="sec">$variables</span>
+<span class="sp">Gtot</span>  = G + GH + GH2
+<span class="sp">alpha</span> = (GH + GH2) / (G + GH + GH2)</code></pre>
+<p>Variables are computed from solved concentrations at each simulation point. They can appear in the <code>y =</code> list of <code>$plot</code> and as targets in <code>shift:</code> of <code>$nmr</code>. Variables may reference other variables; circular dependencies raise a parse error.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ $PLOT ═══════════════════════════════════════ -->
+<section id="plot">
+<h2>$plot</h2><div class="section-line"></div>
+<p>Controls the x-axis expression, sweep range, and y-axis species list.</p>
+<pre><code><span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH, GH2</code></pre>
+
+<table class="kw-table">
+  <thead><tr><th>Key</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>xmax</td><td>Maximum x-axis value. Controls both the simulation sweep range and the plot axis limit. Automatically updated when a data file is uploaded (set to the x-value of the last data point, rounded up). In kinetics mode this sets the time axis maximum in seconds. The sidebar input overrides the script value and is what gets saved to the parameters export tab.</td></tr>
+    <tr><td>x</td><td>x-axis expression (equilibrium mode only). In kinetics mode the x-axis is always time in seconds and this key is ignored. Any arithmetic expression of species names, concentration names, and titrant names is valid.</td></tr>
+    <tr><td>y</td><td>Comma-separated list of species or <code>$variables</code> to plot. All species are plotted if omitted.</td></tr>
+  </tbody>
+</table>
+
+<h3>x-axis expression namespace (equilibrium mode)</h3>
+<table class="kw-table">
+  <thead><tr><th>Symbol</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td>Species name (e.g. <code>G</code>)</td><td>Concentration in mM at each simulation point (array)</td></tr>
+    <tr><td>$concentrations name (e.g. <code>G0</code>)</td><td>Initial moles = C₀ × V₀ in mmol (scalar)</td></tr>
+    <tr><td>$titrant key (e.g. <code>Ht</code>)</td><td>Cumulative moles added so far in mmol (array)</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ═══════════════════════════════════════ $NMR ═══════════════════════════════════════ -->
+<section id="nmr">
+<h2>$nmr</h2><div class="section-line"></div>
+<p>Activates NMR fitting mode. One or both of the following keywords can appear in the section. Available in both equilibrium (titration x-axis) and kinetics (time x-axis) modes — the data format differs only in column A (see <a href="#data-kinetics">Kinetics Data Files</a>).</p>
+
+<h3>shift: — Fast exchange (chemical shift titration)</h3>
+<p>The observed shift is a population-weighted average over all species. The target must be a species name or a <code>$variables</code> name whose expression gives the stoichiometric composition of the observed nucleus.</p>
+<pre><code><span class="sec">$nmr</span>
+shift: Gtot         <span class="cmt"># Gtot = G + GH + GH2 defined in $variables</span>
+shift: Gtot, Htot   <span class="cmt"># multiple independent signal targets</span></code></pre>
+<p>Data column headers must match the target name exactly, or use <code>Name.N</code> / <code>Name_N</code> suffixes for duplicate proton environments (e.g. <code>Gtot.1</code>, <code>Gtot_2</code>). The <strong>first data row</strong> sets δ_free for each column. Bound-state shift increments Δδ are solved analytically (linear least squares) inside each optimizer step; only log K (or log k) is optimised non-linearly.</p>
+
+<h3>integration: — Slow exchange (signal integrals)</h3>
+<p>Separate peaks for each species are integrated. Absolute concentrations are recovered using the host mass balance. The integers after the colon give the number of NMR-active nuclei contributing to each signal column, in order.</p>
+<pre><code><span class="sec">$nmr</span>
+integration: <span class="val">3</span>, <span class="val">3</span>, <span class="val">6</span>   <span class="cmt"># columns B, C, D: 3H, 3H, 6H respectively</span></code></pre>
+<p>Column headers should match species names (e.g. <code>G</code>, <code>GH</code>) optionally with <code>.N</code> or <code>_N</code> suffixes for duplicate peaks. The primary component (mass-balance denominator) is the first species listed in <code>$concentrations</code>.</p>
+
+<h3>Mixed mode (simultaneous slow + fast exchange)</h3>
+<p>Include both keywords in the same section. The first <em>n</em> data columns (where <em>n</em> = count of numbers in <code>integration:</code>) are integration columns; all remaining columns are chemical shift columns.</p>
+<pre><code><span class="sec">$nmr</span>
+integration: <span class="val">3</span>, <span class="val">3</span>   <span class="cmt"># columns B–C: slow-exchange integrals</span>
+shift: Gtot          <span class="cmt"># columns D onward: fast-exchange shifts</span></code></pre>
+</section>
+
+<!-- ═══════════════════════════════════════ $SPECTRA ═══════════════════════════════════════ -->
+<section id="spectra">
+<h2>$spectra</h2><div class="section-line"></div>
+<p>Activates UV-Vis/circular dichroism/emission global spectral fitting using the Beer–Lambert law. Available in both equilibrium and kinetics modes. Optionally declare which species are transparent (ε = 0 at all wavelengths):</p>
+<pre><code><span class="sec">$spectra</span>
+transparent: H, Eu       <span class="cmt"># these species do not absorb</span></code></pre>
+<pre><code><span class="sec">$spectra</span>                 <span class="cmt"># valid: section with no body — all species may absorb</span></code></pre>
+<p>All species <em>not</em> listed as transparent are treated as absorbers with unknown molar absorptivities ε(λ). When <code>$spectra</code> is present and a data file is uploaded, Equilibrist:</p>
+<ul>
+  <li>Displays the <strong>rainbow spectral plot</strong> below the main chart.</li>
+  <li>Updates <strong>xmax</strong> to the x-value of the last spectrum.</li>
+  <li>Shows the wavelength range controls in the sidebar, seeded from the file's actual wavelength extent.</li>
+</ul>
+
+<div class="callout warn">
+  <span class="callout-title">Concentration fitting with spectra</span>
+  <p>Concentration fitting (the <em>fit</em> checkbox next to each concentration) is automatically disabled when only spectra data is loaded — concentrations are not identifiable from Beer-Lambert alone (the system A = C·ε is scale-invariant with respect to C₀).</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ $CONSTRAINTS ═══════════════════════════════════════ -->
+<section id="constraints">
+<h2>$constraints</h2><div class="section-line"></div>
+<p>Defines inter-parameter relationships that the optimizer must respect during fitting. Each line is one constraint. The section is silently ignored during simulation — it only takes effect when the <strong>Activate constraints</strong> toggle is switched on in the sidebar.</p>
+
+<div class="callout">
+  <span class="callout-title">Opt-in at fit time</span>
+  <p>Constraints are <strong>never active by default</strong>. The <strong>Activate constraints</strong> checkbox appears in the sidebar only when a <code>$constraints</code> section is present in the script. It is unchecked on every script load.</p>
+</div>
+
+<p>All modes support constraints: concentration, NMR (shift, integration, mixed), spectra, and kinetics (all variants). Equilibrium constants, forward rate constants, and reverse rate constants may all appear in the same constraint.</p>
+
+<h3 id="constraints-logspace">Log-space syntax (default)</h3>
+<p>When the expression contains only multiplication, division, or isolated parameter names — no addition or subtraction between parameters — Equilibrist evaluates everything in log space.</p>
+
+<table class="kw-table">
+  <thead><tr><th>Written as</th><th>Mathematical meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>K1 = K2</code></td><td>K1 = K2</td></tr>
+    <tr><td><code>K1 / K2 = 1e3</code></td><td>K1 / K2 = 1000</td></tr>
+    <tr><td><code>K1 * K2 = 1e8</code></td><td>K1 · K2 = 10⁸</td></tr>
+    <tr><td><code>K1 * K2 / K3 = 1e5</code></td><td>K1 · K2 / K3 = 10⁵</td></tr>
+    <tr><td><code>2 * K1 = K2</code></td><td>2 · K1 = K2 (linear factor)</td></tr>
+    <tr><td><code>2 * log K1 = log K2</code></td><td>K2 = K1² (log-space exponent)</td></tr>
+    <tr><td><code>k1 / k-1 = 1e4</code></td><td>k1 / k−1 = 10⁴ (hyphenated name)</td></tr>
+    <tr><td><code>log K1 - log K2 = 3</code></td><td>K1 / K2 = 1000 (explicit log form)</td></tr>
+    <tr><td><code>K1 > 1e5</code></td><td>K1 &gt; 10⁵</td></tr>
+    <tr><td><code>K1 < K2</code></td><td>K1 &lt; K2</td></tr>
+    <tr><td><code>1e3 &lt; K1 / K2 &lt; 1e6</code></td><td>1000 &lt; K1/K2 &lt; 10⁶ (chained)</td></tr>
+    <tr><td><code>K1 = K2 = K3</code></td><td>K1 = K2 and K2 = K3 (chained equality)</td></tr>
+  </tbody>
+</table>
+
+<pre><code><span class="sec">$constraints</span>
+<span class="cmt"># Thermodynamic cycle: K3 must equal K1 * K2</span>
+<span class="sp">K3</span> <span class="op">=</span> <span class="sp">K1</span> <span class="op">*</span> <span class="sp">K2</span>
+
+<span class="cmt"># Microscopic reversibility: on-rate / off-rate = equilibrium constant</span>
+<span class="sp">k1</span> <span class="op">/</span> <span class="sp">k-1</span> <span class="op">=</span> <span class="val">1e4</span>
+
+<span class="cmt"># Ratio of binding constants within a factor of 10</span>
+<span class="val">1e-1</span> <span class="op">&lt;</span> <span class="sp">K1</span> <span class="op">/</span> <span class="sp">K2</span> <span class="op">&lt;</span> <span class="val">1e1</span></code></pre>
+
+<h3 id="constraints-kspace">K-space syntax</h3>
+<p>When a <code>+</code> or <code>−</code> operator appears directly between two parameter names, Equilibrist switches to K-space evaluation: parameters are substituted as their actual K values (10<sup>logK</sup>).</p>
+<pre><code><span class="sec">$constraints</span>
+<span class="sp">k1</span> <span class="op">+</span> <span class="sp">k2</span> <span class="op">=</span> <span class="val">1e7</span>         <span class="cmt"># sum of two rate constants</span>
+<span class="val">2</span> <span class="op">*</span> <span class="sp">K1</span> <span class="op">+</span> <span class="sp">K2</span> <span class="op">=</span> <span class="val">3e6</span>     <span class="cmt"># weighted sum</span></code></pre>
+
+<h3 id="constraints-hard">Hard vs soft enforcement</h3>
+<p>By default all constraints are <strong>soft</strong>: violations add a quadratic penalty to the objective. Appending <code>; hard</code> increases the penalty weight by 10⁶, making violation effectively impossible in practice.</p>
+
+<table class="kw-table">
+  <thead><tr><th>Type</th><th>Inequality penalty weight</th><th>Equality penalty weight</th></tr></thead>
+  <tbody>
+    <tr><td>Soft (default)</td><td>10⁶ × (violation)²</td><td>10⁸ × (violation)²</td></tr>
+    <tr><td>Hard (<code>; hard</code>)</td><td>10¹² × (violation)²</td><td>10¹⁴ × (violation)²</td></tr>
+  </tbody>
+</table>
+
+<pre><code><span class="sec">$constraints</span>
+<span class="sp">K1</span> <span class="op">=</span> <span class="sp">K2</span>              <span class="cmt"># soft equality</span>
+<span class="sp">K1</span> <span class="op">&gt;</span> <span class="val">1e3</span>; <span class="kw">hard</span>      <span class="cmt"># hard lower bound</span></code></pre>
+
+<h3 id="constraints-ui">Using the Activate constraints toggle</h3>
+<p>When a <code>$constraints</code> section is present, an <strong>Activate constraints</strong> checkbox appears at the bottom of the sidebar parameter list. It is unchecked by default on every script load.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Starting point reset</span>
+  <p>When you uncheck <strong>Activate constraints</strong> after a constrained fit, Equilibrist automatically resets the starting parameter values to the script defaults before the next fit. This prevents the unconstrained optimizer from starting at the constrained optimum — which may lie in a narrow valley — and failing to find the true global minimum.</p>
+</div>
+
+<p>Parameter errors reported after a constrained fit are computed from the data residuals only (constraint penalty excluded from the Hessian). This ensures reported uncertainties reflect genuine information content in the data.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ DATA CONCENTRATION ═══════════════════════════════════════ -->
+<section id="data-conc">
+<h2>Concentration Data Files</h2><div class="section-line"></div>
+<p>Used in equilibrium mode when neither <code>$nmr</code> nor <code>$spectra</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as column headers.</p>
+<table class="kw-table">
+  <thead><tr><th>Column</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td>A</td><td><strong>Solution mode:</strong> volume of titrant added in mL.<br><strong>Solid mode:</strong> x-axis value (e.g. equivalents).</td></tr>
+    <tr><td>B, C, D…</td><td>Measured species concentrations in <strong>mM</strong>. Headers must match species names from <code>$reactions</code>. Unrecognised headers are ignored. NaN rows are dropped per column.</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ═══════════════════════════════════════ DATA NMR ═══════════════════════════════════════ -->
+<section id="data-nmr">
+<h2>NMR Data Files</h2><div class="section-line"></div>
+<p>Used in equilibrium mode when <code>$nmr</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as headers. For kinetics NMR data see <a href="#data-kinetics">Kinetics Data Files</a>.</p>
+<table class="kw-table">
+  <thead><tr><th>Column</th><th>Shift mode</th><th>Integration mode</th></tr></thead>
+  <tbody>
+    <tr><td>A</td><td colspan="2">Volume added (mL) in solution mode; x-axis values in solid mode.</td></tr>
+    <tr><td>B, C…</td><td>Observed δ in <strong>ppm</strong>. Header = target name (<code>Gtot</code>) or <code>Gtot.1</code>, <code>Gtot_2</code> for duplicates.</td><td>Integrated signal areas (arbitrary units, self-consistent within each spectrum). Header = species name (<code>GH</code>) or <code>GH.1</code>, <code>GH_2</code>.</td></tr>
+  </tbody>
+</table>
+<h4>Mixed mode column order</h4>
+<p>Integration columns come first (B through B+n−1), shift columns follow. The count <em>n</em> is the number of integers in <code>integration:</code>.</p>
+<div class="callout">
+  <span class="callout-title">Shift reference point</span>
+  <p>The <strong>first data row</strong> of each shift column sets δ_free. Ensure this corresponds to a condition where the observed nucleus is essentially unbound.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ DATA SPECTRA ═══════════════════════════════════════ -->
+<section id="data-spectra">
+<h2>UV-Vis Spectra Data Files</h2><div class="section-line"></div>
+<p>The wavelength axis is encoded in <strong>row 1</strong>, not in a column. The same format is used in both equilibrium and kinetics modes; only the meaning of column A differs.</p>
+<table class="kw-table">
+  <thead><tr><th>Position</th><th>Equilibrium mode</th><th>Kinetics mode</th></tr></thead>
+  <tbody>
+    <tr><td>Row 1, column A</td><td colspan="2">Any label (ignored by parser).</td></tr>
+    <tr><td>Row 1, columns B+</td><td colspan="2">Wavelength values in <strong>nm</strong> (integer or float; evenly or unevenly spaced).</td></tr>
+    <tr><td>Column A, rows 2+</td><td>Volume of titrant added in mL (solution mode) or x-axis value (solid mode).</td><td>Time in seconds.</td></tr>
+    <tr><td>Body (rows 2+, cols B+)</td><td colspan="2">Absorbance values (unitless). Path length is absorbed into ε.</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ═══════════════════════════════════════ DATA KINETICS ═══════════════════════════════════════ -->
+<section id="data-kinetics">
+<h2>Kinetics Data Files</h2><div class="section-line"></div>
+<p>All kinetics data files use <strong>time in seconds</strong> as the x-axis (column A). Three formats are available depending on the active mode:</p>
+
+<h3>Concentration data (no $nmr, no $spectra)</h3>
+<table class="kw-table">
+  <thead><tr><th>Column</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td>A</td><td>Time in seconds.</td></tr>
+    <tr><td>B, C, D…</td><td>Measured species concentrations in <strong>mM</strong>. Headers must match species names from <code>$reactions</code>.</td></tr>
+  </tbody>
+</table>
+
+<h3>NMR data ($nmr present)</h3>
+<table class="kw-table">
+  <thead><tr><th>Column</th><th>Shift mode</th><th>Integration mode</th></tr></thead>
+  <tbody>
+    <tr><td>A</td><td colspan="2">Time in seconds.</td></tr>
+    <tr><td>B, C…</td><td>Observed δ in <strong>ppm</strong>. Header = target name or <code>Name.N</code> / <code>Name_N</code> for duplicates.</td><td>Integrated signal areas. Header = species name or <code>Species.N</code>.</td></tr>
+  </tbody>
+</table>
+<p>In mixed mode, integration columns come first, shift columns follow — same as equilibrium NMR.</p>
+
+<h3>UV-Vis spectra data ($spectra present)</h3>
+<p>Same format as equilibrium spectra data, but column A rows 2+ contain time in seconds instead of volume. See <a href="#data-spectra">UV-Vis Spectra Data Files</a> for the full layout.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ SIDEBAR ═══════════════════════════════════════ -->
+<section id="sidebar">
+<h2>Left Margin Controls</h2><div class="section-line"></div>
+
+<h3>Equilibrist Script</h3>
+<p>Drag-and-drop a <code>.txt</code> script file or click to browse. When a file is successfully loaded, its filename is displayed as a <strong>blue pill badge</strong> below the uploader. Click <strong>↺ Reset / load new script</strong> to clear the entire session and start fresh. Uploading a new script also performs a full session reset automatically.</p>
+
+<h3>Initial concentrations [mM]</h3>
+<p>One numeric input per entry in <code>$concentrations</code>. A small <strong>fit</strong> checkbox to the right selects that concentration for fitting. The checkbox is disabled when only spectra data is loaded (concentration is not identifiable from Beer-Lambert alone).</p>
+
+<h3>Volume &amp; Titrant (equilibrium mode only)</h3>
+<p><strong>V₀ [mL]</strong> — initial cell volume seeded from <code>$volumes</code>.<br>
+<strong>Titrant stock [mM]</strong> — editable stock concentration(s) for solution mode. In solid mode, a caption confirms fixed volume.</p>
+
+<h3>Plot settings</h3>
+<p><strong>x-axis expression</strong> — read-only caption showing the current <code>x =</code> expression from the script.<br>
+<strong>X-axis max</strong> (equilibrium) / <strong>Time max [s]</strong> (kinetics) — editable; controls simulation range and plot axis limit. Updated automatically when a data file is uploaded. The value shown here is what gets saved to the parameters export tab.<br>
+<strong># points</strong> — number of simulation points (default 100 for equilibrium, 200 for kinetics; minimum 5 / 20 respectively).</p>
+
+<h3>Wavelength range [nm] (spectra only)</h3>
+<p>Appears only after a UV-Vis spectra file is loaded, seeded from the file's actual wavelength extent.</p>
+<ul>
+  <li><strong>Min / Max</strong> — wavelength range used for both the spectral plot and fitting.</li>
+  <li><strong>Auto-optimize range</strong> — two-pass procedure selects the most discriminating sub-range. Boxes update after fitting.</li>
+  <li><strong>Allow negative absorbances</strong> — unconstrained ε (signed); useful for CD spectra.</li>
+</ul>
+
+<h3>Equilibrium constants / Rate constants</h3>
+<p>One numeric input per parameter. <strong>Equilibrium constants</strong> are displayed and entered as log₁₀(K) (e.g. <code>4.00</code> means K = 10⁴). <strong>Rate constants</strong> are displayed and entered in linear units (e.g. <code>2.0e4</code> means k = 2×10⁴ M⁻¹s⁻¹). Each input shows the reaction equation and units. A small <strong>fit</strong> checkbox to the right selects that parameter for optimization. In kinetics mode, pre-equilibrium reactions appear in a separate <strong>Pre-equilibria (= reactions)</strong> subsection below the rate constants.</p>
+
+<h3>Fitting controls</h3>
+<p>Displayed in the right panel above the Fit button:</p>
+<table class="kw-table">
+  <thead><tr><th>Control</th><th>Meaning</th><th>Default</th></tr></thead>
+  <tbody>
+    <tr><td>Tol (−log)</td><td>Convergence tolerance as 10<sup>−n</sup>.</td><td>6.0</td></tr>
+    <tr><td>Timeout (s)</td><td>Maximum wall-clock time. Best result found is returned if exceeded.</td><td>30</td></tr>
+    <tr><td>L-BFGS-B</td><td>Enable gradient-based optimizer (concentration mode only).</td><td>✓ on</td></tr>
+    <tr><td>Nelder-Mead</td><td>Enable simplex optimizer (all modes).</td><td>✓ on</td></tr>
+  </tbody>
+</table>
+<p><strong>🔧 Fit Parameters</strong> — disabled until data are loaded and at least one parameter checkbox is ticked.</p>
+
+<h3>Experimental data</h3>
+<p>Single uploader widget. A hint caption describes the required format. When a file is loaded, its filename appears as a blue pill badge. Click <strong>↺ Reset experimental data</strong> to clear loaded data without resetting the script.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ SCRIPT EDITOR ═══════════════════════════════════════ -->
+<section id="script-editor">
+<h2>In-app Script Editor</h2><div class="section-line"></div>
+<p>An editable text area appears at the bottom of the main panel (below the plots). It shows the current script and lets you modify it directly in the browser without leaving the app.</p>
+<ul>
+  <li><strong>Apply</strong> — re-parses the edited script. If the parameter names are unchanged (same set of K and k names), session state is preserved — fitted values, loaded data, and sidebar settings are kept. If parameter names changed, a full reset is performed.</li>
+  <li><strong>💾 Save script</strong> — downloads the current editor content as a timestamped <code>.txt</code> file.</li>
+</ul>
+<div class="callout success">
+  <span class="callout-title">Quick iteration workflow</span>
+  <p>Edit the script in-app (e.g. change a starting K value or add a reaction), click Apply, and the simulation updates immediately. No need to save a file, switch to a text editor, and re-upload.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ RIGHT PANEL ═══════════════════════════════════════ -->
+<section id="right-panel">
+<h2>Right Panel</h2><div class="section-line"></div>
+<p>The right column (both equilibrium and kinetics modes) presents controls and results in this order:</p>
+<ol>
+  <li><strong>Fit message</strong> — green success or yellow warning banner from the previous fit run.</li>
+  <li><strong>Solver options</strong> — Tol, Timeout, L-BFGS-B and Nelder-Mead checkboxes, Fit Parameters button.</li>
+  <li><strong>Data Export</strong> — 💾 Export data and 📸 Snapshot buttons.</li>
+  <li><strong>Experimental data</strong> — file uploader, reset button, loaded file badge, data summary.</li>
+  <li><strong>Fit Statistics</strong> — R², RMSE, fitted constants table, free energy table, NMR assignment tables (shown only after a fit run).</li>
+</ol>
+</section>
+
+<!-- ═══════════════════════════════════════ MAIN PLOT ═══════════════════════════════════════ -->
+<section id="main-plot">
+<h2>Main Plot</h2><div class="section-line"></div>
+<p>The main chart shows simulated concentration curves [mM] vs. the evaluated <code>x</code> expression (equilibrium) or time [s] (kinetics), clipped to xmax. After fitting, back-calculated data points are overlaid as filled circles in matching colors:</p>
+<ul>
+  <li><strong>Spectra mode</strong> — points from back-projection of A through ε.</li>
+  <li><strong>NMR integration</strong> — points from mass-balance deconvolution of integrals.</li>
+  <li><strong>Concentration mode</strong> — experimental mM values overlaid directly.</li>
+</ul>
+
+<h3>UV-Vis rainbow spectral plot</h3>
+<p>Below the main chart when UV-Vis data are loaded. X-axis: wavelength [nm], clipped to the sidebar range. Each spectrum is colored on a violet→red gradient (violet = first, red = last).</p>
+
+<h3>Pure species spectra plot</h3>
+<p>After UV-Vis fitting, a third plot shows the fitted molar absorptivity ε(λ) [mM⁻¹] for each absorbing species.</p>
+
+<h3>NMR chemical shift plot</h3>
+<p>After NMR shift fitting, a plot shows the experimental Δδ points and fitted Δδ curves for each signal column. Y-axis: Δδ (ppm).</p>
+</section>
+
+<!-- ═══════════════════════════════════════ FITTING ═══════════════════════════════════════ -->
+<section id="fitting">
+<h2>Fitting</h2><div class="section-line"></div>
+<p>All modes minimise the sum of squared residuals (SSR) over the selected log₁₀(K) or log₁₀(k) parameters.</p>
+
+<h4>Re-fit loop (all NMR and kinetics modes)</h4>
+<p>The optimizer runs multiple Nelder-Mead passes in a loop. After each pass, parameter bounds shift to ±20% of the current fitted value ("bounds recentring"), and the simplex step size is set to the full feasible range per dimension. The loop continues until parameters stop moving (max change &lt; tolerance) or the global timeout is reached. In integration and mixed modes, the back-calculated concentrations (bc) are frozen at the start of each pass to avoid a moving-target problem — bc is only recomputed between passes.</p>
+
+<h4>Concentration mode</h4>
+<p>The equilibrium is solved directly at each experimental x-point. Both L-BFGS-B and Nelder-Mead are available. When both are on, L-BFGS-B runs first as a warm-up. The re-fit loop then refines with Nelder-Mead until convergence or timeout.</p>
+
+<h4>NMR chemical shift mode</h4>
+<p>Mole fractions F_i(x) are fully determined for fixed K. Bound-state increments Δδ_i are solved analytically inside each step — only K is optimised non-linearly. Uses the re-fit loop with bounds recentring.</p>
+
+<h4>NMR integration mode</h4>
+<p>Back-calculated concentrations are derived from integrals using mass balances (K-independent). The optimizer moves K until theoretical curves match bc. Uses the re-fit loop with frozen bc per pass and bounds recentring.</p>
+
+<h4>NMR mixed mode</h4>
+<p>Integration and shift residuals combined into a single weighted objective. Integration bc is frozen per pass; shift SSR is recomputed each iteration. Uses the re-fit loop.</p>
+
+<h4>UV-Vis spectral mode</h4>
+<p>For fixed K, the concentration matrix C is fully determined. ε is solved analytically: ε = lstsq(C, A). L-BFGS-B runs first, followed by Nelder-Mead. The optimizer selection checkboxes do not affect spectral fitting — both stages always run.</p>
+
+<h4>Kinetics modes</h4>
+<p>ODE integration (scipy) at each evaluation. All NMR and spectra fitting modes are available in kinetics mode, using time [s] as the x-axis instead of equivalents. The same re-fit loop applies.</p>
+
+<p><strong>Soft bounds</strong> — applied as quadratic penalties outside [lo, hi]. Default range: log K ∈ [−2, 14] for equilibrium constants; no default bounds for rate constants.</p>
+
+<h3>UV-Vis timeout and identifiability</h3>
+<p>After every UV-Vis fit, Equilibrist analyses whether the fitted K values are uniquely identifiable by computing the <strong>condition number</strong> of C. If cond(C) &gt; 10,000, a warning shows the condition number and the best-determined parameter combination (typically the cumulative product).</p>
+
+<h3>Auto-optimize wavelength range</h3>
+<p>When ticked, a two-pass procedure selects the most informative wavelength sub-range:</p>
+<div class="steps">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <h3>Full-range fit (pass 1)</h3>
+      <p>Fits over the complete [min, max] range to get an initial ε(λ) estimate.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <h3>Range selection</h3>
+      <p>Spectral contrast = variance of ε across absorbers at each wavelength. Edge wavelengths below the 10th percentile are trimmed. A 50 nm minimum window is enforced.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <h3>Refined fit (pass 2)</h3>
+      <p>Re-fits on the selected range. Wavelength boxes update automatically.</p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ FIT STATISTICS ═══════════════════════════════════════ -->
+<section id="fit-stats">
+<h2>Fit Statistics</h2><div class="section-line"></div>
+<p>Displayed in the right panel after each fit. A green banner confirms success; a yellow banner appears if fitting timed out or did not fully converge.</p>
+
+<table class="kw-table">
+  <thead><tr><th>Statistic</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Spectral R²</td><td><em>(spectra only)</em> R² of absorbance reconstruction A_calc = C·ε vs. A_measured. Almost always near 1.0 regardless of K quality — use Concentration R² for fit quality assessment.</td></tr>
+    <tr><td>Concentration R²</td><td><em>(spectra only)</em> R² between equilibrium-model C and C back-projected from absorbance. This is the meaningful quality metric.</td></tr>
+    <tr><td>R²</td><td>Coefficient of determination. In mixed NMR mode, reported separately for the integration and shift components.</td></tr>
+    <tr><td>RMSE</td><td>Root mean squared error. Units: mM (concentration/integration), ppm (NMR shift). In mixed NMR mode, reported separately for each component.</td></tr>
+    <tr><td>Data points</td><td>Total number of values used.</td></tr>
+    <tr><td>Reduced χ²</td><td>SSR / (n_data − n_params). Shown only when n_data &gt; n_params.</td></tr>
+    <tr><td>Evaluations</td><td>Total number of objective function calls across all re-fit passes.</td></tr>
+  </tbody>
+</table>
+
+<h3>Fitted constants table</h3>
+<p>Shows each fitted parameter P with its value and uncertainty (from finite-difference Hessian on the data-only objective). The columns differ by parameter type:</p>
+<table class="kw-table">
+  <thead><tr><th>Parameter type</th><th>Columns shown</th></tr></thead>
+  <tbody>
+    <tr><td>Equilibrium constant (K)</td><td>log P, ±log P, P, ±P</td></tr>
+    <tr><td>Rate constant (k)</td><td>P, ±P (no log columns)</td></tr>
+    <tr><td>Concentration (mM)</td><td>P (mM), ±P (no log columns)</td></tr>
+  </tbody>
+</table>
+<p>Fitted values are written back to the sidebar inputs immediately after the fit completes.</p>
+
+<h3>Free energies table</h3>
+<p>Shown below the fitted constants table when at least one K or k parameter was fitted. The temperature is taken from <code>$temperature</code> (default 298.15 K) and shown in the table header.</p>
+<table class="kw-table">
+  <thead><tr><th>Parameter type</th><th>Formula</th><th>Column</th></tr></thead>
+  <tbody>
+    <tr><td>Equilibrium constant K</td><td>ΔG° = −RT ln(K) = −RT ln(10) · log K</td><td>ΔG° (kcal/mol)</td></tr>
+    <tr><td>Rate constant k</td><td>ΔG‡ = RT (ln(k_BT/h) − ln(10) · log k)  (Eyring, assuming elementary step)</td><td>ΔG (kcal/mol) *</td></tr>
+  </tbody>
+</table>
+<p>Rate constant rows are marked with <code>*</code> and a caption "ΔG‡: assuming elementary steps" appears below the table. R = 1.9872 × 10⁻³ kcal mol⁻¹ K⁻¹.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Eyring assumption</span>
+  <p>The ΔG‡ calculation assumes an elementary (single-step) mechanism and that transmission coefficient κ = 1. For non-elementary steps or diffusion-limited reactions, the Eyring value is an effective barrier and should be interpreted with caution.</p>
+</div>
+
+<h3>NMR signal assignment table</h3>
+<p>After integration or mixed-mode fitting, lists each species, the number of signal columns used for that species, and the n_H values.</p>
+
+<h3>Pure-species chemical shifts table</h3>
+<p>After shift or mixed-mode fitting, reports δ for every species per signal column.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ EXPORT ═══════════════════════════════════════ -->
+<section id="export">
+<h2>Export &amp; Snapshot</h2><div class="section-line"></div>
+<p>Two buttons appear under <strong>Data Export</strong> in the right panel:</p>
+<ul>
+  <li><strong>💾 Export data</strong> — downloads a timestamped <code>.xlsx</code> file containing three tabs.</li>
+  <li><strong>📸 Snapshot</strong> — downloads a timestamped <code>.png</code> combining the main Plotly chart with a parameter summary panel.</li>
+</ul>
+<p>Both files are named <code>Equilibrist_YYYYMMDD_HHMMSS.xlsx</code> / <code>Equilibrist_snapshot_YYYYMMDD_HHMMSS.png</code>.</p>
+
+<h3>Excel tab: data</h3>
+<p>Simulated curves at all computed points.</p>
+<table class="kw-table">
+  <thead><tr><th>Column</th><th>Equilibrium mode</th><th>Kinetics mode</th></tr></thead>
+  <tbody>
+    <tr><td>First column</td><td>V_add(mL) — volume added (solution mode only)</td><td>Time [s]</td></tr>
+    <tr><td>Second column</td><td>Evaluated x-axis expression (e.g. Ht/G0)</td><td>— (absent)</td></tr>
+    <tr><td>Species columns</td><td colspan="2">Concentration [mM] for every species in the network</td></tr>
+    <tr><td>Variable columns</td><td colspan="2">Evaluated <code>$variables</code> expressions [mM]</td></tr>
+  </tbody>
+</table>
+
+<h3>Excel tab: script</h3>
+<p>Verbatim copy of the uploaded script. Column B row 1: script filename. Column C row 1: input data filename (if loaded). Column widths are auto-fitted.</p>
+
+<h3>Excel tab: parameters</h3>
+<p>A reconstructed script with <em>current</em> parameter values — including fitted values and the current sidebar xmax — ready to paste back into a new script. Section order and comment lines are preserved exactly. The <code>xmax</code> value written is the current sidebar value (not the script default), so it reflects exactly the sweep range used when exporting.</p>
+
+<div class="callout success">
+  <span class="callout-title">Workflow tip</span>
+  <p>After a successful fit, export to Excel and copy the Parameters tab back to your script file. This gives you a new starting-point script with the fitted K values already in place.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ PUBLICATION FIGURES ═══════════════════════════════════════ -->
+<section id="pubfig">
+<h2>Publication Figures</h2><div class="section-line"></div>
+<p>A <strong>📐 Publication figure (pdf)</strong> button appears below each chart. Clicking it generates and downloads a publication-ready PDF immediately.</p>
+
+<h3>Available publication figures</h3>
+<table class="kw-table">
+  <thead><tr><th>Button location</th><th>Filename key</th></tr></thead>
+  <tbody>
+    <tr><td>Below main equilibrium plot</td><td><code>equilibrium_main_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+    <tr><td>Below NMR shift plot (equilibrium)</td><td><code>equilibrium_nmr_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+    <tr><td>Below UV-Vis spectra plot (equilibrium)</td><td><code>equilibrium_spectra_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+    <tr><td>Below pure species spectra plot (equilibrium)</td><td><code>equilibrium_spectra_species_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+    <tr><td>Below main kinetics plot</td><td><code>kinetics_main_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+    <tr><td>Below NMR shift plot (kinetics)</td><td><code>kinetics_nmr_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+    <tr><td>Below UV-Vis spectra plot (kinetics)</td><td><code>kinetics_spectra_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+    <tr><td>Below pure species spectra plot (kinetics)</td><td><code>kinetics_spectra_species_YYYYMMDD_HHMMSS.pdf</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Output specification</h3>
+<table class="kw-table">
+  <thead><tr><th>Property</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td>Format</td><td>PDF (vector)</td></tr>
+    <tr><td>Dimensions</td><td>3.0 × 2.4 inches</td></tr>
+    <tr><td>Font</td><td>Arial Regular, 9 pt (falls back to Helvetica, then DejaVu Sans)</td></tr>
+    <tr><td>Font embedding</td><td>TrueType (pdf.fonttype = 42) — text fully editable in Adobe Illustrator</td></tr>
+    <tr><td>Ticks</td><td>Inward on all four sides; minor ticks included</td></tr>
+    <tr><td>Frame</td><td>Full box; linewidth = 0.8 pt</td></tr>
+    <tr><td>Trace linewidth</td><td>0.8 pt</td></tr>
+    <tr><td>Axis limits</td><td>Tight bounds from data within xmax; no matplotlib padding</td></tr>
+    <tr><td>Legend / title</td><td>Not included — add in Adobe Illustrator</td></tr>
+    <tr><td>Axis units</td><td>Square brackets: [mM], [nm], [s], [mL], [mM⁻¹]. NMR shift uses ppm without brackets.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <span class="callout-title">Axis range and zoom</span>
+  <p>PDF axis limits are determined server-side from the Plotly layout's declared range. Adjust <strong>X-axis max</strong> in the sidebar before clicking the button to change the exported x range.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ CYCLE DETECTION ═══════════════════════════════════════ -->
+<section id="cycle-detection">
+<h2>Thermodynamic Cycle Detection</h2><div class="section-line"></div>
+<p>On every render, Equilibrist traces all reaction paths between every pair of species. If two independent paths give different total log₁₀(K) (tolerance 0.01 log units), a warning banner names the inconsistent species pair. No warning means all K values are mutually consistent.</p>
+</section>
+
+<!-- ═══════════════════════════════════════ EXAMPLES ═══════════════════════════════════════ -->
+<section id="ex-1to1">
+<h2>Example: 1:1 Binding</h2><div class="section-line"></div>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span> = <span class="sp">GH</span>; <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH</code></pre>
+</section>
+
+<section id="ex-12">
+<h2>Example: 1:2 Binding</h2><div class="section-line"></div>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span>  + <span class="sp">H</span> = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.5</span>; from <span class="val">2.0</span> to <span class="val">12.0</span>
+<span class="sp">GH</span> + <span class="sp">H</span> = <span class="sp">GH2</span>; <span class="kw">log</span> <span class="sp">K2</span> = <span class="val">4.0</span>; from <span class="val">2.0</span> to <span class="val">12.0</span>
+
+<span class="sec">$variables</span>
+<span class="sp">Gtot</span> = G + GH + GH2
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH, GH2</code></pre>
+</section>
+
+<section id="ex-sequential">
+<h2>Example: Sequential 1:3 Binding with UV-Vis Fitting</h2><div class="section-line"></div>
+<p>Eu³⁺ binds ligand L step-by-step. Eu does not absorb; L and the three complexes do.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">Eu0</span> = <span class="val">0.10</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">2400</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Lt</span> = <span class="val">2.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">L</span>   + <span class="sp">Eu</span>  = <span class="sp">EuL</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">6.0</span>; from <span class="val">2.0</span> to <span class="val">12.0</span>
+<span class="sp">L</span>   + <span class="sp">EuL</span> = <span class="sp">EuL2</span>; <span class="kw">log</span> <span class="sp">K2</span> = <span class="val">5.0</span>; from <span class="val">2.0</span> to <span class="val">12.0</span>
+<span class="sp">L</span>   + <span class="sp">EuL2</span>= <span class="sp">EuL3</span>; <span class="kw">log</span> <span class="sp">K3</span> = <span class="val">4.0</span>; from <span class="val">2.0</span> to <span class="val">12.0</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">10.0</span>
+x    = Lt/Eu0
+y    = Eu, L, EuL, EuL2, EuL3
+
+<span class="sec">$spectra</span>
+transparent: Eu</code></pre>
+</section>
+
+<section id="ex-solid">
+<h2>Example: Solid Titrant</h2><div class="section-line"></div>
+<p>Cell volume is fixed at V₀. Column A of the data file contains x-axis values, not volumes.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant solid</span>
+<span class="sp">Ht</span>
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span>  = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>
+<span class="sp">GH</span> + <span class="sp">H</span> = <span class="sp">GH2</span>; <span class="kw">log</span> <span class="sp">K2</span> = <span class="val">3.5</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH, GH2</code></pre>
+</section>
+
+<section id="ex-kinetics">
+<h2>Example: Kinetics</h2><div class="section-line"></div>
+<p><code>xmax</code> sets the time axis maximum in seconds. No <code>$titrant</code> or <code>$volumes</code> is needed.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">A0</span> = <span class="val">1.00</span> mM
+<span class="sp">B0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">A</span> + <span class="sp">B</span> &lt;&gt; <span class="sp">AB</span>; <span class="sp">k1</span> = <span class="val">2e4</span>; <span class="sp">k-1</span> = <span class="val">2.0</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">60</span>
+y    = A, B, AB</code></pre>
+
+<p>Pre-equilibrium model (mixed <code>=</code> and <code>&gt;</code>):</p>
+<pre><code><span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span> = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>   <span class="cmt"># fast pre-equilibrium</span>
+<span class="sp">GH</span>    &gt; <span class="sp">P</span>;   <span class="kw">log</span> <span class="sp">k2</span> = <span class="val">-2.0</span>   <span class="cmt"># slow irreversible step</span></code></pre>
+</section>
+
+<section id="ex-kinetics-nmr">
+<h2>Example: Kinetics + NMR Integration</h2><div class="section-line"></div>
+<p>Data file: column A = time (s), columns B–E = integrated signal areas for G, H, GH, GH2. The n_H list mirrors the signal column order.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+<span class="sp">H0</span> = <span class="val">2.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span> &gt; <span class="sp">GH</span>; <span class="kw">log</span> <span class="sp">k1</span> = <span class="val">1.0</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+y    = G, H, GH
+
+<span class="sec">$nmr</span>
+integration: <span class="val">1</span>, <span class="val">1</span>, <span class="val">1</span>, <span class="val">1</span>, <span class="val">2</span>, <span class="val">1</span>, <span class="val">3</span>, <span class="val">1</span>   <span class="cmt"># 8 signal columns</span></code></pre>
+</section>
+
+<section id="ex-kinetics-spectra">
+<h2>Example: Kinetics + UV-Vis Spectra</h2><div class="section-line"></div>
+<p>Data file: row 1 = wavelengths, column A rows 2+ = time in seconds, body = absorbance. Species B is transparent.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">A0</span> = <span class="val">50</span> uM
+<span class="sp">B0</span> = <span class="val">30</span> uM
+
+<span class="sec">$reactions</span>
+<span class="sp">A</span> + <span class="sp">B</span> &lt;&gt; <span class="sp">C</span>; <span class="sp">k1</span>  = <span class="val">2e4</span>; <span class="sp">k-1</span> = <span class="val">2.0</span>
+<span class="sp">C</span>       &gt;  <span class="sp">D</span>; <span class="sp">k2</span>  = <span class="val">1.5</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+y    = A, B, C, D
+
+<span class="sec">$spectra</span>
+transparent: B</code></pre>
+</section>
+
+<section id="ex-nmr-shift">
+<h2>Example: NMR — Chemical Shift (fast exchange)</h2><div class="section-line"></div>
+<p>Data file: column A = volume [mL], column B = observed δ in ppm, header <code>Gtot</code>.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span>  + <span class="sp">H</span> = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>
+<span class="sp">GH</span> + <span class="sp">H</span> = <span class="sp">GH2</span>; <span class="kw">log</span> <span class="sp">K2</span> = <span class="val">3.5</span>
+
+<span class="sec">$variables</span>
+<span class="sp">Gtot</span> = G + GH + GH2
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH, GH2
+
+<span class="sec">$nmr</span>
+shift: Gtot</code></pre>
+</section>
+
+<section id="ex-nmr-integ">
+<h2>Example: NMR — Integration (slow exchange)</h2><div class="section-line"></div>
+<p>Data file: column A = volume [mL], columns B–D = integration areas, headers <code>G</code>, <code>GH</code>, <code>GH2</code>.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span>  + <span class="sp">H</span> = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>
+<span class="sp">GH</span> + <span class="sp">H</span> = <span class="sp">GH2</span>; <span class="kw">log</span> <span class="sp">K2</span> = <span class="val">3.5</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH, GH2
+
+<span class="sec">$nmr</span>
+integration: <span class="val">3</span>, <span class="val">3</span>, <span class="val">6</span>   <span class="cmt"># 3H for G, 3H for GH, 6H for GH2</span></code></pre>
+</section>
+
+<section id="ex-nmr-mixed">
+<h2>Example: NMR — Mixed Mode</h2><div class="section-line"></div>
+<p>Data file: column A = volume [mL], columns B–C = slow-exchange integrals, columns D–E = fast-exchange shifts. Headers: <code>G</code>, <code>GH</code>, <code>Gtot.1</code>, <code>Gtot.2</code>.</p>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span>  + <span class="sp">H</span> = <span class="sp">GH</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">4.0</span>
+<span class="sp">GH</span> + <span class="sp">H</span> = <span class="sp">GH2</span>; <span class="kw">log</span> <span class="sp">K2</span> = <span class="val">3.5</span>
+
+<span class="sec">$variables</span>
+<span class="sp">Gtot</span> = G + GH + GH2
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH, GH2
+
+<span class="sec">$nmr</span>
+integration: <span class="val">3</span>, <span class="val">3</span>   <span class="cmt"># columns B–C</span>
+shift: Gtot          <span class="cmt"># columns D–E</span></code></pre>
+</section>
+
+<section id="ex-dg">
+<h2>Example: Free-energy Input</h2><div class="section-line"></div>
+<p>Define reactions using ΔG° and ΔG‡ values in kcal/mol at a specified temperature, instead of K and k values.</p>
+
+<h3>Equilibrium via ΔG° (25 °C)</h3>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">G0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Ht</span> = <span class="val">10.00</span> mM
+
+<span class="sec">$temperature</span>
+T = <span class="val">25</span> C
+
+<span class="sec">$reactions</span>
+<span class="sp">G</span> + <span class="sp">H</span> = <span class="sp">GH</span>; DG = <span class="val">-5.46</span>   <span class="cmt"># ΔG° = −5.46 kcal/mol → log K ≈ 4.0</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+x    = Ht/G0
+y    = G, H, GH</code></pre>
+
+<h3>Kinetics via ΔG‡ and ΔG° (37 °C)</h3>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">A0</span> = <span class="val">1.00</span> mM
+<span class="sp">B0</span> = <span class="val">1.00</span> mM
+
+<span class="sec">$temperature <span class="val">37</span> C</span>
+
+<span class="sec">$reactions</span>
+<span class="cmt"># Reversible: DG# = forward barrier, DG = reaction energy</span>
+<span class="sp">A</span> + <span class="sp">B</span> &lt;&gt; <span class="sp">C</span>; DG# = <span class="val">15.0</span>; DG = <span class="val">-3.0</span>
+
+<span class="cmt"># Irreversible: DG# only</span>
+<span class="sp">C</span> &gt; <span class="sp">D</span>; DG# = <span class="val">18.5</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">60</span>
+y    = A, B, C, D</code></pre>
+</section>
+
+<section id="ex-constraints">
+<h2>Example: Constraints</h2><div class="section-line"></div>
+
+<h3>Equilibrium: thermodynamic cycle</h3>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">A0</span> = <span class="val">1.0</span> mM
+<span class="sp">B0</span> = <span class="val">1.0</span> mM
+
+<span class="sec">$volumes</span>
+<span class="sp">V0</span> = <span class="val">500</span> uL
+
+<span class="sec">$titrant</span>
+<span class="sp">Bt</span> = <span class="val">10.0</span> mM
+
+<span class="sec">$reactions</span>
+<span class="sp">A</span>     + <span class="sp">B</span>  = <span class="sp">AB</span>;  <span class="kw">log</span> <span class="sp">K1</span> = <span class="val">5.0</span>
+<span class="sp">AB</span>    + <span class="sp">B</span>  = <span class="sp">AB2</span>; <span class="kw">log</span> <span class="sp">K2</span> = <span class="val">4.0</span>
+<span class="sp">A</span>  + <span class="val">2</span> <span class="sp">B</span>  = <span class="sp">AB2</span>; <span class="kw">log</span> <span class="sp">K3</span> = <span class="val">9.0</span>   <span class="cmt"># must equal K1 * K2</span>
+
+<span class="sec">$constraints</span>
+<span class="sp">K3</span> <span class="op">=</span> <span class="sp">K1</span> <span class="op">*</span> <span class="sp">K2</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+y    = A, B, AB, AB2</code></pre>
+
+<h3>Kinetics: microscopic reversibility</h3>
+<pre><code><span class="sec">$concentrations</span>
+<span class="sp">A0</span> = <span class="val">50</span> uM
+<span class="sp">B0</span> = <span class="val">30</span> uM
+
+<span class="sec">$reactions</span>
+<span class="sp">A</span> + <span class="sp">B</span> &lt;&gt; <span class="sp">C</span>; <span class="sp">k1</span>  = <span class="val">2e4</span>; <span class="sp">k-1</span> = <span class="val">2.0</span>
+<span class="sp">C</span>       &gt;  <span class="sp">D</span>; <span class="sp">k2</span>  = <span class="val">1.5</span>
+
+<span class="sec">$constraints</span>
+<span class="sp">k1</span> <span class="op">/</span> <span class="sp">k-1</span> <span class="op">=</span> <span class="val">1e4</span>   <span class="cmt"># microscopic reversibility</span>
+
+<span class="sec">$plot</span>
+xmax = <span class="val">3.00</span>
+y    = A, B, C, D
+
+<span class="sec">$spectra</span>
+transparent: B</code></pre>
+
+<div class="callout">
+  <span class="callout-title">How to use constraints</span>
+  <p>Upload the script, load experimental data, check the parameters to fit. The <strong>Activate constraints</strong> checkbox appears at the bottom of the parameter list in the sidebar. Run once unconstrained to see the free fit, then check the box and re-run to enforce the relationship.</p>
+</div>
+
+</section>
+
+</main>
+</div>
+
+<footer>
+  <p>Equilibrist — built with Python &amp; Streamlit &nbsp;·&nbsp; all computation local, no data transmitted &nbsp;·&nbsp; <a href="#">v1.0</a></p>
+</footer>
+
+</body>
+</html>
