@@ -1,8 +1,6 @@
 name: Build Electron distributables
 
 on:
-  push:
-    branches: ["claude/**"]
   pull_request:
     branches: ["*"]
 
