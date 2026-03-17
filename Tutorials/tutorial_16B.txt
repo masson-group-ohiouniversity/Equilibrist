@@ -1,0 +1,58 @@
+$concentrations
+A0 = 50 uM
+B0 = 30 uM
+
+$volumes
+V0 = 0.5 mL
+
+
+$reactions
+A + B <> C; k1 = 2e4; k-1 = 2.0
+C > D; k2 = 1.5
+
+$constraints
+k1 / k2 = 1e4
+
+$plot
+xmax = 3.00
+y = A, B, C, D
+
+$spectra
+transparent: B
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

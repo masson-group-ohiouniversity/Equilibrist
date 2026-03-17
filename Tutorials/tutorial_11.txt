@@ -1,0 +1,15 @@
+$concentrations
+A0 = 1.0
+B0 = 2.0
+
+$volumes
+V0 = 1.0 mL
+
+$equilibria
+A + 2 B <> C + D; k1 = 1e2; k-1 = 1e2
+
+$plot
+xmax = 3.0
+y = A, B, C, D
+
+
