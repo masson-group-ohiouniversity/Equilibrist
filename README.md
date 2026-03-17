@@ -1,8 +1,12 @@
-# Equilibrist v1.0
+<p align="center">
+  <img src="Equilibrist_logo.jpg" width="320" alt="Equilibrist logo"/>
+</p>
+
+# Equilibrist
 
 A browser-based thermodynamic and kinetic solver built with Python and Streamlit.  
-Define a chemical system in a plain-text script, simulate titration or time-resolved curves, and fit equilibrium and/or rate constants to experimental data.  
-Runs entirely locally.
+Define a chemical system in a plain-text script, simulate titration or time-resolved curves, and fit binding or rate constants to experimental data.  
+Runs entirely on your local machine — no data is sent anywhere.
 
 ---
 
@@ -88,6 +92,45 @@ Equilibrist/
 ```
 
 A `__pycache__` folder may appear after the first run — this is normal.
+
+---
+
+## Quick-start script
+
+```
+$concentrations
+G0 = 1.00 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant
+Ht = 10.00 mM
+
+$reactions
+G + H = GH; log K1 = 4.0
+
+$plot
+xmax = 3.00
+x = H0/G0
+y = G, H, GH
+```
+
+Save as a `.txt` file, upload it with the **Equilibrist Script** uploader in the sidebar, and the simulation runs immediately.
+
+---
+
+## Experimental data files
+
+All data files are Excel (`.xlsx`). Column A meaning depends on the mode:
+
+| Mode | Column A |
+|---|---|
+| Solution titration (concentration, NMR, spectra) | Volume of titrant added in **mL** |
+| Solid titration (concentration, NMR, spectra) | Header in cell A1 must be a titrant concentration name (e.g. `H0`, in mM) or an equivalency ratio (e.g. `H0/G0`). Equilibrist converts to equivalents automatically. |
+| Kinetics (all data types) | Time in **seconds** |
+
+Columns B onward: species concentrations (mM), NMR signals (ppm or integrals), or absorbance values depending on the active mode. See the full manual for details.
 
 ---
 
