@@ -270,13 +270,13 @@
     <tr><td>matplotlib</td><td>Publication-quality PDF figure export</td></tr>
     <tr><td>pillow</td><td>PNG image generation for snapshots</td></tr>
     <tr><td>openpyxl</td><td>Excel engine required by pandas</td></tr>
-    <tr><td>kaleido</td><td>Static image export from Plotly (PNG snapshots)</td></tr>
+    <tr><td><!-- kaleido removed: see KALEIDO.md --></td></tr>
   </tbody>
 </table>
 
-<div class="callout warn">
-  <span class="callout-title">kaleido on Windows</span>
-  <p>The <code>requirements.txt</code> automatically pins <code>kaleido==0.2.1</code> on Windows (more reliable than the latest version). The <code>environment.yml</code> uses 0.2.1 on all platforms. If the <strong>📸 Snapshot</strong> button produces no output, reinstall with <code>pip install kaleido==0.2.1</code> and restart the app.</p>
+<div class="callout success">
+  <span class="callout-title">Static image export</span>
+  <p>PNG snapshots are generated using <strong>matplotlib</strong> — no additional dependencies are needed beyond the standard install. See <code>KALEIDO.md</code> in the repository for background on why the previous kaleido dependency was removed.</p>
 </div>
 </section>
 

@@ -10,8 +10,61 @@ from equilibrist_network import compute_variable_curve
 from equilibrist_kinetics import _collect_all_kinetic_species
 from equilibrist_curve import convert_exp_x
 
+
+def _plotly_to_png_bytes(plotly_fig, width_px=800, height_px=600):
+    """Convert a Plotly figure to PNG bytes using matplotlib (no kaleido)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import io as _io
+
+    dpi = 100
+    fig_w = width_px / dpi
+    fig_h = height_px / dpi
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+
+    _cc = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    _ci = 0
+    for trace in plotly_fig.data:
+        xs = list(trace.x) if trace.x is not None else []
+        ys = list(trace.y) if trace.y is not None else []
+        if not xs or not ys:
+            continue
+        _col = None
+        if hasattr(trace, "line") and trace.line and trace.line.color:
+            _col = trace.line.color
+        elif hasattr(trace, "marker") and trace.marker:
+            _mc = getattr(trace.marker, "color", None)
+            if isinstance(_mc, str):
+                _col = _mc
+        if not _col:
+            _col = _cc[_ci % len(_cc)]; _ci += 1
+        mode = getattr(trace, "mode", "lines") or "lines"
+        if "lines" in mode and "markers" in mode:
+            ax.plot(xs, ys, color=_col, lw=1.0,
+                    marker="o", markersize=3, markeredgewidth=0)
+        elif "markers" in mode:
+            ax.scatter(xs, ys, color=_col, s=12, linewidths=0, zorder=3)
+        else:
+            ax.plot(xs, ys, color=_col, lw=1.0)
+
+    layout = plotly_fig.layout
+    if layout.xaxis and layout.xaxis.title and layout.xaxis.title.text:
+        ax.set_xlabel(layout.xaxis.title.text)
+    if layout.yaxis and layout.yaxis.title and layout.yaxis.title.text:
+        ax.set_ylabel(layout.yaxis.title.text)
+    if layout.title and layout.title.text:
+        ax.set_title(layout.title.text, fontsize=10)
+
+    fig.tight_layout()
+    buf = _io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
 __all__ = ['export_to_excel', 'generate_parameters_text', 'generate_kinetics_parameters_text', 'text_to_image', 'create_snapshot', '_export_kinetics_excel', 'load_experimental_data', 'load_spectra_data', '_pub_tight_bounds', '_pub_figure_bytes', '_pub_axis_range', '_pub_download_button', '_plot_backcalc_dots', '_infer_unit', '_infer_y_label',
-           'Image', 'ImageDraw', 'ImageFont']
+           '_plotly_to_png_bytes', 'Image', 'ImageDraw', 'ImageFont']
 
 
 def export_to_excel(curve, x_vals, parsed, params, network, script_text, logK_vals,
@@ -426,13 +479,11 @@ def create_snapshot(fig, parsed, params, logK_vals, xmax=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"Equilibrist_snapshot_{timestamp}.png"
     
-    # Convert plotly figure to image
+    # Convert plotly figure to image via matplotlib (no kaleido dependency)
     try:
-        # Export figure as PNG bytes
-        plot_bytes = fig.to_image(format="png", width=800, height=600, engine="kaleido")
+        plot_bytes = _plotly_to_png_bytes(fig, width_px=800, height_px=600)
         plot_img = Image.open(io.BytesIO(plot_bytes))
     except Exception as e:
-        # If kaleido fails, create a placeholder
         plot_img = Image.new('RGB', (800, 600), color='lightgray')
         draw = ImageDraw.Draw(plot_img)
         draw.text((400, 300), "Plot export failed", fill='black', anchor='mm')

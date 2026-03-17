@@ -72,11 +72,11 @@ streamlit run app.py
 
 ## Troubleshooting
 
-**"streamlit: command not found"**  
+**"streamlit: command not found"**
 Run `pip install streamlit` or make sure the conda environment is activated.
 
-**Publication figure (PDF) button does nothing**  
-Run `pip install kaleido==0.2.1` and restart the app.
+**Publication figure (PDF) or Snapshot button does nothing**
+These features use matplotlib — make sure it is installed: `pip install matplotlib>=3.7`
 
-**Wrong Python version**  
+**Wrong Python version**
 Make sure you are using Python 3.10 or later: `python --version`

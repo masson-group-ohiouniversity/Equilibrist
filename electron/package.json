@@ -1,0 +1,66 @@
+{
+  "name": "equilibrist",
+  "version": "1.0.0",
+  "description": "Equilibrist – interactive fitting of chemical equilibria and kinetics",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac --win --linux",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.equilibrist.app",
+    "productName": "Equilibrist",
+    "files": [
+      "main.js",
+      "preload.js",
+      "splash.html"
+    ],
+    "extraResources": [
+      {
+        "from": "../Equilibrist",
+        "to": "Equilibrist",
+        "filter": [
+          "**/*.py",
+          "requirements.txt",
+          "environment.yml"
+        ]
+      },
+      {
+        "from": "python-runtime",
+        "to": "python-runtime"
+      },
+      {
+        "from": "python-libs",
+        "to": "python-libs"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Science"
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+  }
+}

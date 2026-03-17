@@ -1186,7 +1186,7 @@ if IS_KINETICS:
                 if fig_s:
                     params_text = generate_kinetics_parameters_text(parsed_kin, logk_dict, script_text)
                     params_img  = text_to_image(params_text, width=600)
-                    plot_bytes  = fig_s.to_image(format="png", width=800, height=600, engine="kaleido")
+                    plot_bytes  = _plotly_to_png_bytes(fig_s, width_px=800, height_px=600)
                     plot_img    = Image.open(io.BytesIO(plot_bytes))
                     target_h    = max(plot_img.height, params_img.height)
                     if plot_img.height != target_h:
