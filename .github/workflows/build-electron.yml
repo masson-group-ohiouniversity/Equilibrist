@@ -55,9 +55,15 @@ jobs:
         include:
           - os: macos-latest
             dist_cmd: dist:mac
-            artifact_name: Equilibrist-macOS
+            artifact_name: Equilibrist-macOS-arm64
             artifact_path: electron/dist/*.dmg
             pbs_arch: aarch64-apple-darwin-install_only_stripped.tar.gz
+
+          - os: macos-13
+            dist_cmd: dist:mac
+            artifact_name: Equilibrist-macOS-x64
+            artifact_path: electron/dist/*.dmg
+            pbs_arch: x86_64-apple-darwin-install_only_stripped.tar.gz
 
           - os: windows-latest
             dist_cmd: dist:win
