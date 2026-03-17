@@ -1,0 +1,18 @@
+# Equilibrist — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+# Core app
+streamlit>=1.32
+
+# Numerics
+numpy>=1.24
+scipy>=1.11
+pandas>=2.0
+
+# Plotting
+plotly>=5.18
+matplotlib>=3.7          # required for publication-quality PDF export
+
+# File I/O
+openpyxl>=3.1
+Pillow>=10.0
