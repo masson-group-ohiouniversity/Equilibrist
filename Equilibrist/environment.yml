@@ -14,4 +14,3 @@ dependencies:
   - pip:
     - streamlit>=1.32
     - plotly>=5.18
-    - kaleido==0.2.1

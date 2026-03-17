@@ -1,0 +1,182 @@
+name: Build Electron distributables
+
+on:
+  pull_request:
+    branches: ["*"]
+
+concurrency:
+  group: electron-build-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# python-build-standalone release to pull portable CPython from
+env:
+  PBS_TAG: "20241219"
+  PBS_PY: "cpython-3.11.11"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    name: Validate configuration
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate package.json
+        working-directory: electron
+        run: node -e "const p=require('./package.json'); const assert=require('assert'); assert(p.main==='main.js'); assert(p.devDependencies.electron); assert(p.devDependencies['electron-builder']); assert(p.build.extraResources.length===3); console.log('package.json OK');"
+
+      - name: Validate Electron source files exist
+        run: |
+          for f in electron/main.js electron/preload.js electron/splash.html electron/package.json; do
+            test -f "$f" && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }
+          done
+
+      - name: Validate Python source files
+        run: |
+          test -f Equilibrist/app.py || { echo "MISSING: app.py"; exit 1; }
+          test -f Equilibrist/requirements.txt || { echo "MISSING: requirements.txt"; exit 1; }
+          python3 -m py_compile Equilibrist/app.py
+          echo "Python source OK"
+
+      - name: Validate main.js syntax
+        working-directory: electron
+        run: node --check main.js && node --check preload.js && echo "JS syntax OK"
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            dist_cmd: dist:mac
+            artifact_name: Equilibrist-macOS-arm64
+            artifact_path: electron/dist/*.dmg
+            pbs_arch: aarch64-apple-darwin-install_only_stripped.tar.gz
+
+          - os: macos-latest
+            dist_cmd: dist:mac:x64
+            artifact_name: Equilibrist-macOS-x64
+            artifact_path: electron/dist/*.dmg
+            pbs_arch: x86_64-apple-darwin-install_only_stripped.tar.gz
+
+          - os: windows-latest
+            dist_cmd: dist:win
+            artifact_name: Equilibrist-Windows
+            artifact_path: electron/dist/*.exe
+            pbs_arch: x86_64-pc-windows-msvc-install_only_stripped.tar.gz
+
+          - os: ubuntu-latest
+            dist_cmd: dist:linux
+            artifact_name: Equilibrist-Linux
+            artifact_path: electron/dist/*.AppImage
+            pbs_arch: x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.os }})
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Portable Python runtime ───────────────────────────────────────
+      - name: Download standalone Python
+        shell: bash
+        run: |
+          url="https://github.com/indygreg/python-build-standalone/releases/download/$PBS_TAG/$PBS_PY+$PBS_TAG-${{ matrix.pbs_arch }}"
+          echo "Downloading $url"
+          curl -fSL --retry 3 -o python.tar.gz "$url"
+
+      - name: Extract Python into electron/python-runtime
+        shell: bash
+        run: |
+          mkdir -p electron/python-runtime
+          tar -xzf python.tar.gz --strip-components=1 -C electron/python-runtime
+          rm python.tar.gz
+          # Verify
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            electron/python-runtime/python.exe --version
+          else
+            electron/python-runtime/bin/python3 --version
+          fi
+
+      - name: Install Python dependencies into portable lib dir
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PY=electron/python-runtime/python.exe
+          else
+            PY=electron/python-runtime/bin/python3
+          fi
+          $PY -m pip install --upgrade pip
+          $PY -m pip install --target electron/python-libs -r Equilibrist/requirements.txt
+          echo "--- Installed packages ---"
+          ls electron/python-libs/
+
+      - name: Pre-compile bytecode and strip bloat
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PY=electron/python-runtime/python.exe
+          else
+            PY=electron/python-runtime/bin/python3
+          fi
+
+          # Compile all .py → .pyc so Python never compiles at runtime
+          $PY -m compileall -q -j 0 electron/python-libs/ Equilibrist/
+
+          # Strip test suites, docs, and other files not needed at runtime
+          # NOTE: *.dist-info dirs are kept — they contain package metadata
+          # required by importlib.metadata (streamlit needs this to launch).
+          # NOTE: numpy/testing is kept — scipy imports it at startup via
+          # numpy.testing (used by scipy._lib._array_api → array_api_compat).
+          find electron/python-libs/ \( \
+            -type d -name "tests" -o \
+            -type d -name "test" -o \
+            -type d -name "testing" -not -path "*/numpy/testing" -o \
+            -type d -name "__pycache__" -o \
+            -type f -name "*.pyx" -o \
+            -type f -name "*.pxd" -o \
+            -type f -name "*.c" -o \
+            -type f -name "*.h" \
+          \) -exec rm -rf {} + 2>/dev/null || true
+
+          # Also strip from the runtime stdlib
+          find electron/python-runtime/ \( \
+            -type d -name "test" -o \
+            -type d -name "tests" -o \
+            -type d -name "idle_test" -o \
+            -type d -name "__pycache__" \
+          \) -exec rm -rf {} + 2>/dev/null || true
+
+          echo "--- Size after cleanup ---"
+          du -sh electron/python-runtime/ electron/python-libs/
+
+      # ── Node / Electron ───────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Electron dependencies
+        working-directory: electron
+        run: npm ci --include=dev || npm install
+
+      - name: Build distributable
+        working-directory: electron
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run ${{ matrix.dist_cmd }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14

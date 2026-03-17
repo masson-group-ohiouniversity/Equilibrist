@@ -420,53 +420,119 @@ def text_to_image(text, width=600, font_size=22):
     
     return img
 
-def create_snapshot(fig, parsed, params, logK_vals, xmax=None):
-    """Create side-by-side snapshot of plot and parameters."""
-    # Generate timestamp for filename
+def create_snapshot(fig, parsed, params, logK_vals, xmax=None,
+                    x_label="", y_label="", params_text=None):
+    """
+    Create a publication-style snapshot PDF using matplotlib (no kaleido).
+    Left panel: the plot (same rendering as the publication figure button).
+    Right panel: current parameter values as text.
+    params_text: if provided, used directly instead of generating from parsed/params.
+    Returns (bytes, filename).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
+    import io as _io
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"Equilibrist_snapshot_{timestamp}.png"
-    
-    # Convert plotly figure to image
-    try:
-        # Export figure as PNG bytes
-        plot_bytes = fig.to_image(format="png", width=800, height=600, engine="kaleido")
-        plot_img = Image.open(io.BytesIO(plot_bytes))
-    except Exception as e:
-        # If kaleido fails, create a placeholder
-        plot_img = Image.new('RGB', (800, 600), color='lightgray')
-        draw = ImageDraw.Draw(plot_img)
-        draw.text((400, 300), "Plot export failed", fill='black', anchor='mm')
-    
-    # Generate parameters text
-    params_text = generate_parameters_text(parsed, params, logK_vals, xmax=xmax)
-    
-    # Convert parameters to image
-    params_img = text_to_image(params_text, width=600)
-    
-    # Resize images to have same height
-    target_height = max(plot_img.height, params_img.height)
-    
-    if plot_img.height != target_height:
-        new_width = int(plot_img.width * target_height / plot_img.height)
-        plot_img = plot_img.resize((new_width, target_height), Image.Resampling.LANCZOS)
-    
-    if params_img.height != target_height:
-        new_width = int(params_img.width * target_height / params_img.height)
-        params_img = params_img.resize((new_width, target_height), Image.Resampling.LANCZOS)
-    
-    # Combine images side by side
-    combined_width = plot_img.width + params_img.width
-    combined_img = Image.new('RGB', (combined_width, target_height), color='white')
-    
-    # Paste images
-    combined_img.paste(plot_img, (0, 0))
-    combined_img.paste(params_img, (plot_img.width, 0))
-    
-    # Convert to bytes for download
-    buffer = io.BytesIO()
-    combined_img.save(buffer, format='PNG')
-    
-    return buffer.getvalue(), filename
+    filename  = f"Equilibrist_snapshot_{timestamp}.pdf"
+
+    # ── Font setup (same as _pub_figure_bytes) ───────────────────────────
+    _font_candidates = ["Arial", "Helvetica", "DejaVu Sans"]
+    _chosen = None
+    for _fc in _font_candidates:
+        if any(_fc.lower() in f.name.lower() for f in fm.fontManager.ttflist):
+            _chosen = _fc
+            break
+    plt.rcParams.update({
+        "font.family":       "sans-serif",
+        "font.sans-serif":   [_chosen or "DejaVu Sans"] + _font_candidates,
+        "font.size":         9,
+        "axes.linewidth":    0.8,
+        "xtick.direction":   "in",  "ytick.direction":   "in",
+        "xtick.major.width": 0.8,   "ytick.major.width": 0.8,
+        "xtick.minor.width": 0.5,   "ytick.minor.width": 0.5,
+        "xtick.top":         True,  "ytick.right":       True,
+        "axes.spines.top":   True,  "axes.spines.right": True,
+        "pdf.fonttype":      42,
+        "figure.dpi":        150,
+    })
+
+    # ── Build parameters text ─────────────────────────────────────────────
+    if params_text is None:
+        params_text = generate_parameters_text(parsed, params, logK_vals, xmax=xmax)
+
+    # ── Figure layout: plot (left) + text panel (right) ──────────────────
+    fig_out, (ax_plot, ax_text) = plt.subplots(
+        1, 2, figsize=(8.0, 3.2),
+        gridspec_kw={"width_ratios": [1, 0.72]})
+
+    # ── Draw the plot traces ──────────────────────────────────────────────
+    _cc = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    _ci = 0
+    for trace in fig.data:
+        xs = list(trace.x) if trace.x is not None else []
+        ys = list(trace.y) if trace.y is not None else []
+        if not xs or not ys:
+            continue
+        _col = None
+        if hasattr(trace, "line") and trace.line and trace.line.color:
+            _col = trace.line.color
+        elif hasattr(trace, "marker") and trace.marker:
+            _mc = getattr(trace.marker, "color", None)
+            if isinstance(_mc, str):
+                _col = _mc
+        if not _col:
+            _col = _cc[_ci % len(_cc)]; _ci += 1
+        mode = getattr(trace, "mode", "lines") or "lines"
+        name = getattr(trace, "name", "") or ""
+        if "lines" in mode and "markers" in mode:
+            ax_plot.plot(xs, ys, color=_col, lw=0.8, label=name,
+                         marker="o", markersize=2.5, markeredgewidth=0)
+        elif "markers" in mode:
+            ax_plot.scatter(xs, ys, color=_col, s=9, linewidths=0,
+                            zorder=3, label=name)
+        else:
+            ax_plot.plot(xs, ys, color=_col, lw=0.8, label=name)
+
+    # ── Axis labels and limits ────────────────────────────────────────────
+    layout = fig.layout
+    _xl = x_label or (layout.xaxis.title.text if layout.xaxis and layout.xaxis.title else "")
+    _yl = y_label or (layout.yaxis.title.text if layout.yaxis and layout.yaxis.title else "")
+    if _xl: ax_plot.set_xlabel(_xl)
+    if _yl:
+        _yl = (_yl.replace("⁻¹", r"$^{-1}$").replace("⁻²", r"$^{-2}$").replace("⁻", r"$^{-}$"))
+        ax_plot.set_ylabel(_yl)
+
+    xlim, ylim = _pub_axis_range(fig)
+    ax_plot.margins(0)
+    ax_plot.set_xlim(xlim)
+    ax_plot.set_ylim(ylim)
+    ax_plot.minorticks_on()
+
+    # Legend below plot
+    handles, labels = ax_plot.get_legend_handles_labels()
+    if handles:
+        ax_plot.legend(handles, labels, fontsize=6.5,
+                       loc="upper center", bbox_to_anchor=(0.5, -0.22),
+                       ncol=min(len(labels), 4), frameon=False)
+
+    # ── Parameters text panel ─────────────────────────────────────────────
+    ax_text.axis("off")
+    ax_text.text(0.04, 0.97, params_text,
+                 transform=ax_text.transAxes,
+                 fontsize=7, verticalalignment="top",
+                 fontfamily="monospace",
+                 wrap=False)
+
+    fig_out.tight_layout(pad=0.5)
+
+    buf = _io.BytesIO()
+    fig_out.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig_out)
+    buf.seek(0)
+    return buf.getvalue(), filename
 
 # ─────────────────────────────────────────────
 
@@ -877,6 +943,10 @@ def _infer_unit(name, variables, species_set, _seen=None):
     _seen = _seen | {name}
 
     if name in species_set:
+        return "mM"
+
+    # X0 variables (analytical concentrations before equilibrium) are always mM
+    if name.endswith("0") and name not in variables:
         return "mM"
 
     if name not in variables:
