@@ -205,14 +205,36 @@ installers.  The `Equilibrist/` source, `python-runtime/` interpreter, and
 The workflow at `.github/workflows/build-electron.yml` builds distributable
 packages for all three platforms on every pull request:
 
-| Runner           | Output         | Artifact name        |
-|------------------|----------------|----------------------|
-| `macos-latest`   | `.dmg`         | Equilibrist-macOS    |
-| `windows-latest` | `.exe` (NSIS)  | Equilibrist-Windows  |
-| `ubuntu-latest`  | `.AppImage`    | Equilibrist-Linux    |
+| Runner           | Target arch | Output         | Artifact name              |
+|------------------|-------------|----------------|----------------------------|
+| `macos-latest`   | arm64       | `.dmg`         | Equilibrist-macOS-arm64    |
+| `macos-latest`   | x64         | `.dmg`         | Equilibrist-macOS-x64      |
+| `windows-latest` | x64         | `.exe` (NSIS)  | Equilibrist-Windows        |
+| `ubuntu-latest`  | x64         | `.AppImage`    | Equilibrist-Linux          |
 
-Artifacts are uploaded with 14-day retention and can be downloaded from the
-PR's Actions tab.
+The Intel (x64) macOS build is **cross-compiled** on an ARM runner using
+`electron-builder --x64`.  This avoids the need for a dedicated `macos-13`
+runner (which is not available in all CI environments).  The bundled Python
+runtime for the x64 build is the `x86_64-apple-darwin` variant from
+python-build-standalone, so it runs natively on Intel Macs.
+
+Artifacts are uploaded with 14-day retention.
+
+### Downloading installers from CI
+
+Pre-built installers are generated automatically on every pull request.
+To download them:
+
+1. Open the pull request on GitHub.
+2. Click the **Checks** tab (or scroll to the status checks at the bottom).
+3. Click the **"Build Electron distributables"** workflow run.
+4. On the workflow summary page, scroll to the **Artifacts** section.
+5. Download the artifact for your platform:
+   - **Equilibrist-macOS-arm64** — `.dmg` for Apple Silicon Macs (M1/M2/M3/M4)
+   - **Equilibrist-macOS-x64** — `.dmg` for Intel Macs
+   - **Equilibrist-Windows** — `.exe` installer for Windows
+   - **Equilibrist-Linux** — `.AppImage` for Linux
+6. Unzip the downloaded archive and run the installer.
 
 ## Future enhancements
 

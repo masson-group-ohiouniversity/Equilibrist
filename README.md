@@ -70,6 +70,32 @@ streamlit run app.py
 
 ---
 
+## Desktop installer (optional)
+
+Pre-built desktop installers are available for **Windows**, **macOS**, and
+**Linux**.  The installer bundles Python, all dependencies, and a native app
+window — no separate Python installation required.
+
+**This is the recommended way to run Equilibrist on Windows**, as it avoids
+common issues with Python path configuration, missing build tools for compiled
+dependencies, and permission errors.
+
+To get the installer:
+
+1. Go to the latest pull request or release on GitHub.
+2. Open the **Checks** tab and click the **"Build Electron distributables"**
+   workflow.
+3. Download the artifact for your platform from the **Artifacts** section:
+   - **Windows** — `Equilibrist-Windows` (`.exe` installer)
+   - **macOS (Apple Silicon)** — `Equilibrist-macOS-arm64` (`.dmg`)
+   - **macOS (Intel)** — `Equilibrist-macOS-x64` (`.dmg`)
+   - **Linux** — `Equilibrist-Linux` (`.AppImage`)
+4. Run the installer — no additional setup needed.
+
+For more details on the Electron wrapper, see `ELECTRON.md`.
+
+---
+
 ## Troubleshooting
 
 **"streamlit: command not found"**

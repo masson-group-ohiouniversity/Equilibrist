@@ -313,7 +313,7 @@ G + H = GH;  log K1 = 4.0
 
 $plot
 xmax = 3.0
-x = Ht/G0
+x = H0/G0
 y = G, H, GH\
 """
 
@@ -925,6 +925,7 @@ if IS_KINETICS:
         st.plotly_chart(fig, width='stretch')
         _pub_download_button(fig, "kinetics_main")
         st.session_state["_current_figure"] = fig
+        st.session_state.pop("_kin_snapshot_data", None)
 
         # ── NMR chemical shift plot ──────────────────────────────────────────
         _kin_nmr_cfg = parsed.get("nmr")
@@ -1182,37 +1183,25 @@ if IS_KINETICS:
                 st.error(f"Export failed: {e}")
         with col_snap:
             try:
-                fig_s = st.session_state.get("_current_figure")
-                if fig_s:
-                    params_text = generate_kinetics_parameters_text(parsed_kin, logk_dict, script_text)
-                    params_img  = text_to_image(params_text, width=600)
-                    plot_bytes  = _plotly_to_png_bytes(fig_s, width_px=800, height_px=600)
-                    plot_img    = Image.open(io.BytesIO(plot_bytes))
-                    target_h    = max(plot_img.height, params_img.height)
-                    if plot_img.height != target_h:
-                        plot_img = plot_img.resize(
-                            (int(plot_img.width * target_h / plot_img.height), target_h),
-                            Image.Resampling.LANCZOS)
-                    if params_img.height != target_h:
-                        params_img = params_img.resize(
-                            (int(params_img.width * target_h / params_img.height), target_h),
-                            Image.Resampling.LANCZOS)
-                    combined = Image.new('RGB', (plot_img.width + params_img.width, target_h), 'white')
-                    combined.paste(plot_img, (0, 0))
-                    combined.paste(params_img, (plot_img.width, 0))
-                    buf_snap = io.BytesIO()
-                    combined.save(buf_snap, format='PNG')
-                    fname_snap = f"Equilibrist_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                _kin_fig = st.session_state.get("_current_figure")
+                if _kin_fig is not None:
+                    _kin_ptxt = generate_kinetics_parameters_text(
+                        parsed_kin, logk_dict, script_text, xmax=float(t_max_ui))
+                    _kin_snap_bytes, _kin_snap_fname = create_snapshot(
+                        _kin_fig, parsed, {}, {},
+                        xmax=float(t_max_ui),
+                        x_label="Time [s]",
+                        y_label="Concentration [mM]",
+                        params_text=_kin_ptxt)
                     st.download_button(
                         label="📸 Snapshot",
-                        data=buf_snap.getvalue(),
-                        file_name=fname_snap,
-                        mime="image/png",
+                        data=_kin_snap_bytes,
+                        file_name=_kin_snap_fname,
+                        mime="application/pdf",
                         width='stretch',
                     )
-            except Exception as e:
-                st.error(f"Snapshot failed: {e}")
-
+            except Exception as _se:
+                st.error(f"Snapshot failed: {_se}")
         # ── Experimental data upload ──────────────────────────────
         st.subheader("Experimental data")
         _kin_nmr_cfg_up = parsed.get("nmr")
@@ -1517,7 +1506,10 @@ with st.sidebar:
             titrant_ratios[tfree] = 1.0
 
     st.header("Plot settings")
-    x_expr_default = parsed["plot_x_expr"] if parsed["plot_x_expr"] else f"{titrant_key}/{list(parsed['concentrations'].keys())[0]}"
+    # Default x-expression: H0/G0 (equivalents using X0 convention)
+    _ref_cname = list(parsed['concentrations'].keys())[0]  # e.g. 'G0'
+    _tit_free  = network['titrant_free_names'][0] if network.get('titrant_free_names') else titrant_key[:-1] if titrant_key.endswith('t') else titrant_key
+    x_expr_default = parsed["plot_x_expr"] if parsed["plot_x_expr"] else f"{_tit_free}0/{_ref_cname}"
     st.caption(f"x-axis expression: `{x_expr_default}`")
     xmax = _num_input("X-axis max (sweep range)", key="xmax", default=float(parsed["plot_xmax"]), step=0.1, format="%.3f")
     nPts = st.number_input("# points", value=100, step=1, min_value=5)
@@ -1594,7 +1586,9 @@ for w in cycle_warnings:
 # so that the sweep exactly covers [0, xmax].
 # _x_per_equiv is defined earlier in the file (near find_equiv_for_x).
 
-_x_expr_main = parsed.get("plot_x_expr") or f"{titrant_key}/{list(parsed['concentrations'].keys())[0]}"
+_ref_cname_m = list(parsed['concentrations'].keys())[0]
+_tit_free_m  = network['titrant_free_names'][0] if network.get('titrant_free_names') else titrant_key[:-1] if titrant_key.endswith('t') else titrant_key
+_x_expr_main = parsed.get("plot_x_expr") or f"{_tit_free_m}0/{_ref_cname_m}"
 _xpe = _x_per_equiv(
     _x_expr_main, parsed, conc_vals, float(V0_mL),
     titrant_free_names, titrant_keys, titrant_mMs, titrant_ratios,
@@ -1629,7 +1623,8 @@ with st.spinner("Solving mass balances…"):
 x_expr = parsed["plot_x_expr"]
 if not x_expr:
     ref_key = list(parsed["concentrations"].keys())[0]
-    x_expr  = f"{titrant_key}/{ref_key}"   # e.g. Mt/G0
+    _tit_free_fb = network['titrant_free_names'][0] if network.get('titrant_free_names') else titrant_key[:-1] if titrant_key.endswith('t') else titrant_key
+    x_expr  = f"{_tit_free_fb}0/{ref_key}"   # e.g. H0/G0 (X0 convention)
 
 # Patch parsed concentrations with sidebar values so x-axis expression
 # (e.g. Gt/cage0) uses the same cage0 as convert_exp_x does for the dots.
@@ -1654,9 +1649,11 @@ for key in curve:
         curve[key] = curve[key][x_mask]
 
 # ── Resolve $plot y targets ───────────────────
-def resolve_plot_targets(plot_y_names, variables, all_species):
+def resolve_plot_targets(plot_y_names, variables, all_species, x0_keys=None):
+    """x0_keys: set of X0 variable names available in curve (e.g. {'G0','H0'})."""
     resolved  = []
     plot_warns = []
+    _x0 = x0_keys or set()
     for name in plot_y_names:
         if name in variables:
             expr = variables[name]
@@ -1665,8 +1662,8 @@ def resolve_plot_targets(plot_y_names, variables, all_species):
             if all(c in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+ ' for c in expr):
                 # Old-style sum variable - parse as before
                 members = [p.strip() for p in expr.split("+") if p.strip()]
-                valid   = [sp for sp in members if sp in all_species]
-                invalid = [sp for sp in members if sp not in all_species]
+                valid   = [sp for sp in members if sp in all_species or sp in _x0]
+                invalid = [sp for sp in members if sp not in all_species and sp not in _x0]
                 if invalid:
                     plot_warns.append(f"Variable '{name}': species {invalid} not found, ignored.")
                 if valid:
@@ -1675,14 +1672,15 @@ def resolve_plot_targets(plot_y_names, variables, all_species):
                 # New-style expression variable - treat as single computed target
                 resolved.append((name, [name]))  # Will be computed via expression evaluation
                 
-        elif name in all_species:
+        elif name in all_species or name in _x0:
             resolved.append((name, [name]))
         else:
             plot_warns.append(f"Plot target '{name}' is not a species or variable — skipped.")
     return resolved, plot_warns
 
 plot_y_names = parsed["plot_y"] if parsed["plot_y"] else network["all_species"][:6]
-plot_targets, plot_warns = resolve_plot_targets(plot_y_names, parsed["variables"], network["all_species"])
+_x0_curve_keys = {k for k in curve if k.endswith("0") and k not in {"V0_mL", "totals_mM"}}
+plot_targets, plot_warns = resolve_plot_targets(plot_y_names, parsed["variables"], network["all_species"], _x0_curve_keys)
 
 for w in plot_warns:
     st.warning(w)
@@ -2141,6 +2139,7 @@ with col1:
     st.plotly_chart(fig, width='stretch')
     _pub_download_button(fig, "equilibrium_main", y_label=_infer_y_label(plot_y_names, parsed, network))
     st.session_state["_current_figure"] = fig
+    st.session_state.pop("_eq_snapshot_data", None)
 
     # ── UV-Vis secondary spectra plot ────────────────────────────
     if parsed.get("spectra") is not None:
@@ -2455,17 +2454,20 @@ with col2:
         try:
             current_fig = st.session_state.get("_current_figure")
             if current_fig is not None:
-                snapshot_data, filename = create_snapshot(current_fig, parsed, params, logK_vals)
+                _eq_snap_bytes, _eq_snap_fname = create_snapshot(
+                    current_fig, parsed, params, logK_vals,
+                    xmax=float(x_vals[-1]) if len(x_vals) > 0 else None,
+                    x_label=x_label,
+                    y_label=_infer_y_label(plot_y_names, parsed, network))
                 st.download_button(
                     label="📸 Snapshot",
-                    data=snapshot_data,
-                    file_name=filename,
-                    mime="image/png",
+                    data=_eq_snap_bytes,
+                    file_name=_eq_snap_fname,
+                    mime="application/pdf",
                     width='stretch',
                 )
-        except Exception as e:
-            st.error(f"Snapshot failed: {e}")
-    
+        except Exception as _se:
+            st.error(f"Snapshot failed: {_se}")
     # ── Warning Popup for Solver Issues ────────
     n_warn = int(np.sum(warn))
     if n_warn > 0:
