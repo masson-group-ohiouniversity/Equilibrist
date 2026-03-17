@@ -1,6 +1,8 @@
 name: Build Electron distributables
 
 on:
+  push:
+    branches: ["claude/**"]
   pull_request:
     branches: ["*"]
 
@@ -14,7 +16,41 @@ env:
   PBS_PY: "cpython-3.11.11"
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    name: Validate configuration
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate package.json
+        working-directory: electron
+        run: node -e "const p=require('./package.json'); const assert=require('assert'); assert(p.main==='main.js'); assert(p.devDependencies.electron); assert(p.devDependencies['electron-builder']); assert(p.build.extraResources.length===3); console.log('package.json OK');"
+
+      - name: Validate Electron source files exist
+        run: |
+          for f in electron/main.js electron/preload.js electron/splash.html electron/package.json; do
+            test -f "$f" && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }
+          done
+
+      - name: Validate Python source files
+        run: |
+          test -f Equilibrist/app.py || { echo "MISSING: app.py"; exit 1; }
+          test -f Equilibrist/requirements.txt || { echo "MISSING: requirements.txt"; exit 1; }
+          python3 -m py_compile Equilibrist/app.py
+          echo "Python source OK"
+
+      - name: Validate main.js syntax
+        working-directory: electron
+        run: node --check main.js && node --check preload.js && echo "JS syntax OK"
+
   build:
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
