@@ -127,10 +127,12 @@ jobs:
           # Strip test suites, docs, and other files not needed at runtime
           # NOTE: *.dist-info dirs are kept — they contain package metadata
           # required by importlib.metadata (streamlit needs this to launch).
+          # NOTE: numpy/testing is kept — scipy imports it at startup via
+          # numpy.testing (used by scipy._lib._array_api → array_api_compat).
           find electron/python-libs/ \( \
             -type d -name "tests" -o \
             -type d -name "test" -o \
-            -type d -name "testing" -o \
+            -type d -name "testing" -not -path "*/numpy/testing" -o \
             -type d -name "__pycache__" -o \
             -type f -name "*.pyx" -o \
             -type f -name "*.pxd" -o \
