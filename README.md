@@ -94,6 +94,12 @@ A `__pycache__` folder may appear after the first run — this is normal.
 
 ---
 
+## Tutorials
+
+18 Tutorials available; tutorials_MMX.txt scripts (MM = 01-18, X = A, B, C...) assess any input files tutorial_MMX_input.xlsx.
+
+---
+
 ## Documentation
 
 Open `Equilibrist_manual.html` in any browser for the full user manual, including all script syntax, data file formats, fitting modes, and worked examples.
