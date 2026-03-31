@@ -84,6 +84,159 @@ def _pub_download_button(plotly_fig, key: str,
 
 
 
+# ── Outlier helpers ──────────────────────────────────────────────────────────
+# Outlier state lives in three session-state keys:
+#   _outliers_main    : dict  col_name → set of int indices  (exp_data / kinetics)
+#   _outliers_nmr     : dict  col_name → set of int indices  (nmr_data)
+#   _outliers_spectra : set   of int row indices              (spectra_data)
+
+def _bump_outlier_ver(state_key: str) -> None:
+    k = f"_outlier_ver_{state_key}"
+    st.session_state[k] = st.session_state.get(k, 0) + 1
+
+def _toggle_outlier(state_key: str, col: str, idx: int) -> None:
+    """Toggle a single point in session_state[state_key][col]."""
+    d = st.session_state.setdefault(state_key, {})
+    s = d.setdefault(col, set())
+    s.discard(idx) if idx in s else s.add(idx)
+    _bump_outlier_ver(state_key)
+
+def _toggle_spectra_outlier(state_key: str, idx: int) -> None:
+    """Toggle a single row in session_state[state_key] (plain set)."""
+    s = st.session_state.setdefault(state_key, set())
+    s.discard(idx) if idx in s else s.add(idx)
+    _bump_outlier_ver(state_key)
+
+def _filter_exp_outliers(data: dict, state_key: str) -> dict:
+    """Return a copy of an exp/nmr data dict with excluded rows removed."""
+    outliers = st.session_state.get(state_key, {})
+    if not outliers:
+        return data
+    out = {}
+    for k, v in data.items():
+        if k.startswith("_"):
+            out[k] = v; continue
+        excl = outliers.get(k, set())
+        if not excl:
+            out[k] = v; continue
+        mask = np.array([i not in excl for i in range(len(v["y"]))])
+        out[k] = {"v_add_mL": v["v_add_mL"][mask], "y": v["y"][mask]}
+    return out
+
+def _filter_spectra_outliers(data: dict, state_key: str) -> dict:
+    """Return a copy of spectra_data with excluded rows removed."""
+    excl = st.session_state.get(state_key, set())
+    if not excl or not data:
+        return data
+    mask = np.array([i not in excl for i in range(len(data["x_vals"]))])
+    return {**data, "x_vals": data["x_vals"][mask], "A": data["A"][mask]}
+
+def _n_outliers(state_key: str) -> int:
+    v = st.session_state.get(state_key)
+    if isinstance(v, dict):
+        return sum(len(s) for s in v.values())
+    if isinstance(v, set):
+        return len(v)
+    return 0
+
+def _nmr_excl_union(nmr_data: dict) -> set:
+    """Union of excluded row indices across all NMR columns — used to hollow
+    back-calc concentration dots that share the same row indices as NMR data."""
+    outliers = st.session_state.get("_outliers_nmr", {})
+    if not outliers:
+        return set()
+    all_cols = [c for c in nmr_data if not c.startswith("_")]
+    merged = set()
+    for col in all_cols:
+        merged |= outliers.get(col, set())
+    return merged
+
+def _nmr_excl_intersection(nmr_data: dict) -> set:
+    """Intersection of excluded row indices across all NMR columns.
+
+    A back-calc concentration dot at row i should only be hollowed when ALL
+    NMR columns have row i excluded — meaning the whole row was flagged via
+    a main-plot click.  A single-column exclusion (from a shift-plot click)
+    leaves the concentration dot solid because the concentration is still
+    derivable from the remaining signals.
+    """
+    outliers = st.session_state.get("_outliers_nmr", {})
+    if not outliers:
+        return set()
+    all_cols = [c for c in nmr_data if not c.startswith("_")]
+    if not all_cols:
+        return set()
+    result = outliers.get(all_cols[0], set()).copy()
+    for col in all_cols[1:]:
+        result &= outliers.get(col, set())
+    return result
+
+def _outlier_bar(chart_id: str, *state_keys: str) -> None:
+    """Always render an outlier hint below a chart; add count + clear when points are excluded."""
+    total = sum(_n_outliers(k) for k in state_keys)
+    if total == 0:
+        st.caption("🖱️ Click a data point to flag it as an outlier and exclude it from fitting")
+        return
+    _ob1, _ob2 = st.columns([5, 1])
+    with _ob1:
+        st.caption(
+            f"⚠️ {total} point{'s' if total != 1 else ''} excluded from fitting — "
+            "click a hollow marker to restore it"
+        )
+    with _ob2:
+        if st.button("✕ Clear all", key=f"_clr_{chart_id}"):
+            for k in state_keys:
+                st.session_state.pop(k, None)
+                _bump_outlier_ver(k)
+            st.rerun()
+
+def _process_outlier_event(event, state_key: str, is_spectra: bool = False,
+                             nmr_bc_cols: list = None) -> bool:
+    """
+    Process a plotly_chart on_select event.
+
+    Handles three customdata shapes:
+      ["__nmr_bc__", idx]   — back-calc NMR dot on main plot; toggles idx in
+                              ALL nmr_bc_cols inside _outliers_nmr so the
+                              secondary NMR plot hollows the same row.
+      [col_name, idx]       — regular exp/NMR dot; toggles in state_key.
+      [[row_idx]]           — spectra line (is_spectra=True); toggles in state_key.
+
+    Always bumps the version key on any click (even on non-customdata traces)
+    so the chart gets a fresh widget key, clearing Plotly selection highlighting
+    and breaking the on_select -> rerun -> on_select loop.
+    """
+    if not event or not event.selection or not event.selection.points:
+        return False
+    for _pt in event.selection.points:
+        _cd = _pt.get("customdata")
+        if not _cd:
+            continue
+        if is_spectra:
+            _toggle_spectra_outlier(state_key, int(_cd[0]))
+        elif str(_cd[0]) == "__nmr_bc__" and nmr_bc_cols and len(_cd) >= 2:
+            # Back-calc NMR dot: mirror exclusion across all NMR columns so
+            # the secondary NMR shift plot hollows the matching row too.
+            for _col in nmr_bc_cols:
+                _toggle_outlier("_outliers_nmr", _col, int(_cd[1]))
+            _bump_outlier_ver("_outliers_nmr")
+        elif str(_cd[0]) == "__uvvis_bc__" and len(_cd) >= 2:
+            # Back-calc UV-Vis dot: toggle the row index in _outliers_spectra
+            # so the spectra plot dashes the matching spectrum.
+            _toggle_spectra_outlier("_outliers_spectra", int(_cd[1]))
+        else:
+            if len(_cd) < 2:
+                continue
+            _toggle_outlier(state_key, str(_cd[0]), int(_cd[1]))
+    # MUST always bump here: _toggle_* only bumps when customdata is present.
+    # Without this, clicking a non-customdata trace returns True but leaves the
+    # version unchanged -> same chart key -> Plotly restores selection -> fires
+    # on_select again -> infinite rerun loop.
+    _bump_outlier_ver(state_key)
+    return True
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _num_input(label, key, default, **kwargs):
     """Number input that seeds from default only on first encounter.
     Also applies any pending override (e.g. _pending_<key>) before rendering."""
@@ -123,6 +276,46 @@ def _logk_input_with_fit(label, key, default):
     with c2:
         st.checkbox("fit", key=fit_key, disabled=not has_exp_data)
     return float(val)
+
+
+def _pka_input_with_fit(label, pka_key, logk_key, default_pka):
+    """
+    pKa widget (positive number) with fit checkbox — acid-base mode only.
+    Stores pKa in session_state[pka_key]; logK = -pKa is returned for the solver.
+    Handles _pending_logK_ writeback from the fitting engine by converting to pKa.
+    """
+    # Convert any pending logK (from fitter) → pKa.
+    # The top-of-file loop may have already applied _pending_logK_ → logK_{key},
+    # so check both the pending key and the logK key.
+    kname_suffix    = logk_key[len('logK_'):]
+    pending_pka_key = f"_pending_pKa_{kname_suffix}"
+    pending_logk_key = f"_pending_logK_{kname_suffix}"
+    if pending_pka_key in st.session_state:
+        # Soft-apply or direct pKa pending — takes priority
+        st.session_state[pka_key] = float(st.session_state.pop(pending_pka_key))
+    elif pending_logk_key in st.session_state:
+        # Fitter wrote _pending_logK_ before the top-of-file loop consumed it
+        st.session_state[pka_key] = -float(st.session_state.pop(pending_logk_key))
+    elif logk_key in st.session_state and pka_key not in st.session_state:
+        # top-of-file loop already moved pending → logK_{kname}; convert to pKa
+        st.session_state[pka_key] = -float(st.session_state[logk_key])
+    elif pka_key not in st.session_state:
+        st.session_state[pka_key] = float(default_pka)
+
+    fit_key = f"fit_{logk_key}"   # keep same fit key as normal mode so fitter finds it
+    if fit_key not in st.session_state:
+        st.session_state[fit_key] = False
+
+    has_exp_data = (bool(st.session_state.get("_exp_data", {})) or
+                    bool(st.session_state.get("_nmr_data", {})) or
+                    bool(st.session_state.get("_spectra_data", {})))
+
+    c1, c2 = st.columns([0.86, 0.14])
+    with c1:
+        pka_val = st.number_input(label, key=pka_key, step=0.1, format="%.2f")
+    with c2:
+        st.checkbox("fit", key=fit_key, disabled=not has_exp_data)
+    return -float(pka_val)   # return logK for the solver
 
 
 def _conc_input_with_fit(label, key, default):
@@ -408,7 +601,11 @@ def _render_script_editor():
                 # logK values — covers the case where log/linear prefix changed
                 # (e.g. "log k2 = 10.0" → "k2 = 10.0") with the same param name
                 for _eq in _new_parsed.get("equilibria", []):
-                    st.session_state[f"_pending_logK_{_eq['kname']}"] = float(_eq["logK"])
+                    if _new_parsed.get("is_acid_base") and _eq["kname"] != "Kw":
+                        # acid-base mode: push as pKa so the pKa widget picks it up
+                        st.session_state[f"_pending_pKa_{_eq['kname']}"] = -float(_eq["logK"])
+                    else:
+                        st.session_state[f"_pending_logK_{_eq['kname']}"] = float(_eq["logK"])
                 for _rxn in _new_parsed.get("kinetics", []):
                     st.session_state[f"_pending_logK_{_rxn['kname']}"] = float(_rxn["log_k"])
                     if "krname" in _rxn:
@@ -448,6 +645,13 @@ try:
 except Exception as e:
     st.warning(f"⚠️ Script error — please revise: {e}")
     st.stop()
+
+# ── Clear outliers when the script changes ────
+_script_hash_now = hash(script_text)
+if st.session_state.get("_last_script_hash") != _script_hash_now:
+    for _ok in ("_outliers_main", "_outliers_nmr", "_outliers_spectra"):
+        st.session_state.pop(_ok, None)
+    st.session_state["_last_script_hash"] = _script_hash_now
 
 # ── Temperature warning (soft parse failure) ──
 _temp_warn = parsed.pop("_temperature_warning", None)
@@ -492,9 +696,9 @@ if IS_KINETICS:
 
     # ── Handle kinetics fitting (before widgets) ──────────────────
     if st.session_state.pop("_fit_requested", False):
-        _nmr_data_fit     = st.session_state.get("_nmr_data", {})
-        exp_data_fit      = st.session_state.get("_exp_data", {})
-        _spectra_data_fit = st.session_state.get("_spectra_data", {})
+        _nmr_data_fit     = _filter_exp_outliers(st.session_state.get("_nmr_data", {}),     "_outliers_nmr")
+        exp_data_fit      = _filter_exp_outliers(st.session_state.get("_exp_data", {}),     "_outliers_main")
+        _spectra_data_fit = _filter_spectra_outliers(st.session_state.get("_spectra_data", {}), "_outliers_spectra")
         _nmr_cfg_fit      = parsed.get("nmr")
         _use_nmr_fit      = (_nmr_cfg_fit is not None and
                              _nmr_cfg_fit["mode"] in ("shift", "integration", "mixed") and
@@ -680,33 +884,59 @@ if IS_KINETICS:
 
         st.header("Rate constants")
         logk_ui = {}
+        _rendered_knames_rate = set()
         for rxn in parsed["kinetics"]:
             kn   = rxn["kname"]
             lbl  = _kinetics_reaction_label(rxn)
             n_r  = sum(c for c, _ in rxn["reactants"])
             n_p  = sum(c for c, _ in rxn["products"])
             u_fwd = _rate_constant_units(n_r)
-            st.caption(f"**{lbl}**  —  {kn}: {u_fwd}")
-            logk_ui[kn] = _k_input_with_fit(
-                kn, key=f"logK_{kn}", default_log=logk_dict[kn])
+            if kn in _rendered_knames_rate:
+                st.caption(f"**{lbl}**  —  {kn}: {u_fwd}  *(shared with above)*")
+                logk_ui[kn] = float(st.session_state.get(f"logK_{kn}", logk_dict[kn]))
+            else:
+                st.caption(f"**{lbl}**  —  {kn}: {u_fwd}")
+                logk_ui[kn] = _k_input_with_fit(
+                    kn, key=f"logK_{kn}", default_log=logk_dict[kn])
+                _rendered_knames_rate.add(kn)
             if "krname" in rxn:
                 krn   = rxn["krname"]
                 u_rev = _rate_constant_units(n_p, is_reverse=True, n_products=n_p)
-                st.caption(f"{krn}: {u_rev}")
-                logk_ui[krn] = _k_input_with_fit(
-                    krn, key=f"logK_{krn}", default_log=logk_dict[krn])
+                if krn in _rendered_knames_rate:
+                    st.caption(f"{krn}: {u_rev}  *(shared with above)*")
+                    logk_ui[krn] = float(st.session_state.get(f"logK_{krn}", logk_dict[krn]))
+                else:
+                    st.caption(f"{krn}: {u_rev}")
+                    logk_ui[krn] = _k_input_with_fit(
+                        krn, key=f"logK_{krn}", default_log=logk_dict[krn])
+                    _rendered_knames_rate.add(krn)
 
         if parsed["equilibria"]:
             st.header("Pre-equilibria (= reactions)")
+            _rendered_knames_kin = set()
             for eq in parsed["equilibria"]:
                 kn  = eq["kname"]
                 n_r = sum(c for c, _ in eq["reactants"])
                 n_p = sum(c for c, _ in eq["products"])
                 lbl = _kinetics_reaction_label({**eq, "type": "equilibrium"})
                 units = _equilibrium_constant_units(n_r, n_p)
-                st.caption(f"**{lbl}**  —  {kn}: {units}")
-                logk_ui[kn] = _logk_input_with_fit(
-                    f"log {kn}", key=f"logK_{kn}", default=eq["logK"])
+                if kn in _rendered_knames_kin:
+                    # Shared kname — show reaction label as caption only, no duplicate widget
+                    st.caption(f"**{lbl}**  —  {kn}: {units}  *(shared with above)*")
+                    logk_ui[kn] = float(st.session_state.get(f"logK_{kn}", eq["logK"]))
+                else:
+                    # Check whether other equilibria share this kname
+                    _sharing_kin = [e for e in parsed["equilibria"] if e["kname"] == kn]
+                    if len(_sharing_kin) > 1:
+                        _all_lbl = " = ".join(
+                            _kinetics_reaction_label({**e, "type": "equilibrium"})
+                            for e in _sharing_kin)
+                        st.caption(f"**{_all_lbl}**  —  {kn}: {units}  *(shared)*")
+                    else:
+                        st.caption(f"**{lbl}**  —  {kn}: {units}")
+                    logk_ui[kn] = _logk_input_with_fit(
+                        f"log {kn}", key=f"logK_{kn}", default=eq["logK"])
+                    _rendered_knames_kin.add(kn)
 
         # Merge UI values into logk_dict
         logk_dict.update(logk_ui)
@@ -762,20 +992,39 @@ if IS_KINETICS:
                 x=t_vals, y=y_vals, mode="lines", name=sp,
                 line=dict(color=color, width=2)))
 
-        # Experimental overlay (column A = time in seconds)
+        # Experimental overlay — only for quantities listed in $plot y
         exp_data = st.session_state.get("_exp_data", {})
+        _kin_plot_y_set = set(plot_y_names) if plot_y_names else None
+        _kin_main_excl = st.session_state.get("_outliers_main", {})
         for col_name, col_data in exp_data.items():
             if col_name.startswith("_"):
                 continue
+            if _kin_plot_y_set is not None and col_name not in _kin_plot_y_set:
+                continue
             color = trace_colors.get(col_name, "#FFFFFF")
-            fig.add_trace(go.Scatter(
-                x=col_data["v_add_mL"],   # time in seconds
-                y=col_data["y"],
-                mode="markers", name=f"{col_name} (exp)",
-                marker=dict(color=color, size=7, symbol="circle",
-                            line=dict(width=1, color="white")),
-                showlegend=True,
-            ))
+            _xs_all = col_data["v_add_mL"]
+            _ys_all = col_data["y"]
+            _excl_set = _kin_main_excl.get(col_name, set())
+            _inc = [i for i in range(len(_ys_all)) if i not in _excl_set]
+            _exc = [i for i in range(len(_ys_all)) if i in _excl_set]
+            if _inc:
+                fig.add_trace(go.Scatter(
+                    x=_xs_all[_inc], y=_ys_all[_inc],
+                    mode="markers", name=f"{col_name} (exp)",
+                    customdata=[[col_name, i] for i in _inc],
+                    marker=dict(color=color, size=7, symbol="circle",
+                                line=dict(width=1, color="white")),
+                    showlegend=True,
+                ))
+            if _exc:
+                fig.add_trace(go.Scatter(
+                    x=_xs_all[_exc], y=_ys_all[_exc],
+                    mode="markers", name=f"_outlier_{col_name}",
+                    customdata=[[col_name, i] for i in _exc],
+                    marker=dict(color=color, size=7, symbol="circle-open",
+                                line=dict(width=1.5, color=color)),
+                    showlegend=False,
+                ))
 
         # ── NMR back-calculated concentrations on main plot ─────────────────
         _kin_fit_stats   = st.session_state.get("_fit_stats", {})
@@ -786,16 +1035,20 @@ if IS_KINETICS:
 
         # Integration / mixed — post-fit: sp_concs from fit stats
         if _kin_sp_concs and _kin_nmr_data:
-            _bc_kin_int = {}
-            for sp, arr_list in _kin_sp_concs.items():
-                t_ref = arr_list[0][0]
-                c_avg = np.mean([np.interp(t_ref, ta, ca) for ta, ca in arr_list], axis=0)
-                _bc_kin_int[sp] = (t_ref, c_avg)
             _kin_sfx_integ = "(NMR/integration)" if _kin_nmr_cfg_plt and _kin_nmr_cfg_plt.get("mode") == "mixed" else "(NMR)"
-            _plot_backcalc_dots(fig, _bc_kin_int, plot_y_names,
+            # Integration back-calc is K-independent — always render from the full
+            # unfiltered data so original row indices are correct in customdata.
+            _kni_nh = _kin_nmr_cfg_plt.get("n_H_list", [])
+            _kni_ni = _kin_nmr_cfg_plt.get("n_integ", len(_kni_nh))
+            _kni_cols = [c for c in _kin_nmr_data if not c.startswith("_")][:_kni_ni]
+            _kni_data = {c: _kin_nmr_data[c] for c in _kni_cols}
+            _kni_full = _kinetics_nmr_integration_backCalc(
+                _kni_data, _kni_nh[:_kni_ni], parsed, _kin_all_sp_plt)
+            _plot_backcalc_dots(fig, _kni_full, plot_y_names,
                                 parsed.get("variables", {}),
                                 _kin_all_sp_plt, trace_colors,
-                                label_suffix=_kin_sfx_integ)
+                                label_suffix=_kin_sfx_integ,
+                                excl_rows=_nmr_excl_intersection(_kin_nmr_data))
 
         # Integration / mixed — pre-fit: back-calc from raw integrals (no k needed)
         elif (_kin_nmr_cfg_plt is not None and
@@ -812,7 +1065,8 @@ if IS_KINETICS:
             _plot_backcalc_dots(fig, _bc_pre_kin, plot_y_names,
                                 parsed.get("variables", {}),
                                 _kin_all_sp_plt, trace_colors,
-                                label_suffix=_kin_sfx_pre)
+                                label_suffix=_kin_sfx_pre,
+                                excl_rows=_nmr_excl_intersection(_kin_nmr_data))
 
         # Shift mode: invert M-matrix to back-calculate concentrations from Δδ
         # (same algorithm as equilibrium branch)
@@ -892,7 +1146,8 @@ if IS_KINETICS:
                 _plot_backcalc_dots(fig, _bc_kin_shift, plot_y_names,
                                     parsed.get("variables", {}),
                                     _collect_all_kinetic_species(parsed), trace_colors,
-                                    label_suffix=_kin_sfx_shift)
+                                    label_suffix=_kin_sfx_shift,
+                                    excl_rows=_nmr_excl_intersection(_kin_nmr_data))
 
         # ── UV-Vis back-calc dots on kinetics main plot ──────────────────────────
         _kin_fit_stats_sp = st.session_state.get("_fit_stats", {})
@@ -906,25 +1161,48 @@ if IS_KINETICS:
                 _plot_backcalc_dots(fig, _bc_kin_sp, plot_y_names,
                                     parsed.get("variables", {}),
                                     all_kin_species, trace_colors,
-                                    label_suffix="(UV-Vis)")
+                                    label_suffix="(UV-Vis)",
+                                    excl_rows=st.session_state.get("_outliers_spectra", set()),
+                                    bc_tag="__uvvis_bc__")
 
         if not kin_curve.get("success", True):
             st.warning("⚠️ ODE integrator did not fully converge.")
 
+        _kin_net_fake = {"all_species": _collect_all_kinetic_species(parsed)}
+        _kin_y_label  = _infer_y_label(plot_y_names, parsed, _kin_net_fake)
+        _kin_rangemode = None if _has_log_units(plot_y_names, parsed, _kin_net_fake) else "tozero"
+        _kin_yaxis = dict(title=_kin_y_label)
+        if _kin_rangemode is None:
+            _kin_yaxis["autorange"] = True
+        else:
+            _kin_yaxis["rangemode"] = _kin_rangemode
         fig.update_layout(
             height=700,
             margin=dict(l=40, r=20, t=40, b=120),
             xaxis=dict(title="Time [s]"),
-            yaxis=dict(title=_infer_y_label(plot_y_names,
-                                            parsed,
-                                            {"all_species": _collect_all_kinetic_species(parsed)}),
-                       rangemode="tozero"),
+            yaxis=_kin_yaxis,
             template="plotly_dark",
             showlegend=True,
             legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
         )
-        st.plotly_chart(fig, width='stretch')
-        _pub_download_button(fig, "kinetics_main")
+        _kin_ver_main = st.session_state.get("_outlier_ver__outliers_main", 0)
+        # Suppress Plotly's built-in selection dimming so only our hollow markers
+        # communicate exclusion state, not Plotly's opacity reduction.
+        fig.update_traces(
+            unselected=dict(marker=dict(opacity=1.0)),
+            selected=dict(marker=dict(opacity=1.0, size=10)),
+            selector=dict(mode="markers"),
+        )
+        _kin_main_event = st.plotly_chart(
+            fig, width='stretch',
+            on_select="rerun", selection_mode="points",
+            key=f"_kin_main_chart_{_kin_ver_main}",
+        )
+        if _process_outlier_event(_kin_main_event, "_outliers_main",
+                                   nmr_bc_cols=[c for c in _kin_nmr_data if not c.startswith("_")]):
+            st.rerun()
+        _outlier_bar("kin_main", "_outliers_main", "_outliers_nmr", "_outliers_spectra")
+        _pub_download_button(fig, "kinetics_main", y_label=_kin_y_label)
         st.session_state["_current_figure"] = fig
         st.session_state.pop("_kin_snapshot_data", None)
 
@@ -956,6 +1234,7 @@ if IS_KINETICS:
                     _kin_c2t[_col] = _kin_nmr_cfg["targets"][0] if _kin_nmr_cfg["targets"] else _col
 
             _shown_tgt = set()
+            _kin_nmr_excl = st.session_state.get("_outliers_nmr", {})
             for _col in _shift_cols_k:
                 _col_data = _kin_nmr_data[_col]
                 _t_exp    = _col_data["v_add_mL"]
@@ -964,12 +1243,26 @@ if IS_KINETICS:
                 _tgt      = _kin_c2t.get(_col, _col)
                 _color    = _kin_tgt_colors.get(_tgt, "#888888")
                 _show_leg = _tgt not in _shown_tgt; _shown_tgt.add(_tgt)
-                fig_nmr_k.add_trace(go.Scatter(
-                    x=_t_exp, y=_dobs_rel, mode="markers",
-                    name=_tgt if _show_leg else _col,
-                    legendgroup=_tgt, showlegend=_show_leg,
-                    marker=dict(color=_color, size=6, symbol="circle"),
-                ))
+                _excl_set_n = _kin_nmr_excl.get(_col, set())
+                _inc_n = [i for i in range(len(_dobs_rel)) if i not in _excl_set_n]
+                _exc_n = [i for i in range(len(_dobs_rel)) if i in _excl_set_n]
+                if _inc_n:
+                    fig_nmr_k.add_trace(go.Scatter(
+                        x=_t_exp[_inc_n], y=_dobs_rel[_inc_n], mode="markers",
+                        name=_tgt if _show_leg else _col,
+                        legendgroup=_tgt, showlegend=_show_leg,
+                        customdata=[[_col, i] for i in _inc_n],
+                        marker=dict(color=_color, size=6, symbol="circle"),
+                    ))
+                if _exc_n:
+                    fig_nmr_k.add_trace(go.Scatter(
+                        x=_t_exp[_exc_n], y=_dobs_rel[_exc_n], mode="markers",
+                        name=f"_outlier_{_col}",
+                        legendgroup=_tgt, showlegend=False,
+                        customdata=[[_col, i] for i in _exc_n],
+                        marker=dict(color=_color, size=6, symbol="circle-open",
+                                    line=dict(width=1.5, color=_color)),
+                    ))
 
             # Theoretical Δδ curves — only shown after a fit has been run
             _kin_nmr_fitted = bool(_kin_delta_vecs)
@@ -1020,7 +1313,20 @@ if IS_KINETICS:
                 title=dict(text="NMR Chemical Shift Changes", x=0.5,
                            font=dict(size=13)),
             )
-            st.plotly_chart(fig_nmr_k, width='stretch')
+            _kin_ver_nmr = st.session_state.get("_outlier_ver__outliers_nmr", 0)
+            fig_nmr_k.update_traces(
+                unselected=dict(marker=dict(opacity=1.0)),
+                selected=dict(marker=dict(opacity=1.0, size=9)),
+                selector=dict(mode="markers"),
+            )
+            _kin_nmr_event = st.plotly_chart(
+                fig_nmr_k, width='stretch',
+                on_select="rerun", selection_mode="points",
+                key=f"_kin_nmr_chart_{_kin_ver_nmr}",
+            )
+            if _process_outlier_event(_kin_nmr_event, "_outliers_nmr"):
+                st.rerun()
+            _outlier_bar("kin_nmr", "_outliers_nmr")
             _pub_download_button(fig_nmr_k, "kinetics_nmr", y_label="Δδ [ppm]")
 
         # ── UV-Vis spectra subplot (inside col1) ──────────────────────────────
@@ -1043,13 +1349,37 @@ if IS_KINETICS:
                 return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
 
             fig_kin_sp = go.Figure()
+            _kin_sp_excl = st.session_state.get("_outliers_spectra", set())
             for _i in range(_kin_n_sp):
                 _col_c = _kin_rainbow(_i, _kin_n_sp)
                 _lbl = f"t={_kin_t_raw[_i]:.3g} s"
+                _is_excl = _i in _kin_sp_excl
+                # Visual line — dashed+dim when excluded
                 fig_kin_sp.add_trace(go.Scatter(
                     x=_kin_wl_plot, y=_kin_A_plot[_i], mode="lines",
-                    line=dict(color=_col_c, width=1.5), name=_lbl, showlegend=False,
-                    hovertemplate=f"{_lbl}<br>λ=%{{x:.0f}} nm<br>A=%{{y:.4f}}<extra></extra>",
+                    line=dict(color=_col_c, width=1.5,
+                              dash="dash" if _is_excl else "solid"),
+                    opacity=0.75 if _is_excl else 1.0,
+                    name=f"_outlier_{_i}" if _is_excl else _lbl,
+                    showlegend=False,
+                    hoverinfo="skip",
+                ))
+                # Full-line click surface: markers at every wavelength point, near-invisible.
+                # This makes the entire line clickable, not just the peak.
+                _n_wl = len(_kin_wl_plot)
+                fig_kin_sp.add_trace(go.Scatter(
+                    x=_kin_wl_plot, y=_kin_A_plot[_i], mode="markers",
+                    name=f"_outlier_{_i}" if _is_excl else f"_sp_sel_{_i}",
+                    showlegend=False,
+                    customdata=[[_i]] * _n_wl,
+                    marker=dict(
+                        color=_col_c,
+                        size=6,
+                        opacity=0.01,   # near-invisible but still hit-testable by Plotly
+                        symbol="circle-open" if _is_excl else "circle",
+                        line=dict(width=0),
+                    ),
+                    hovertemplate=f"{'[excluded — click to restore] ' if _is_excl else '[click to exclude] '}{_lbl}<br>λ=%{{x:.0f}} nm<br>A=%{{y:.4f}}<extra></extra>",
                 ))
             fig_kin_sp.add_annotation(x=0.01, y=1.02, xref="paper", yref="paper",
                                       text=f"t={_kin_t_raw[0]:.3g} s", showarrow=False,
@@ -1064,9 +1394,23 @@ if IS_KINETICS:
                 xaxis=dict(title="Wavelength [nm]"),
                 yaxis=dict(title="Absorbance", rangemode="tozero"),
                 template="plotly_dark", showlegend=False,
-                title=dict(text="UV-Vis spectra (kinetics)", font=dict(size=13), x=0.5),
+                title=dict(text="UV-Vis spectra (kinetics) — click anywhere on a spectrum to exclude/restore", font=dict(size=13), x=0.5),
             )
-            st.plotly_chart(fig_kin_sp, width='stretch')
+            _kin_ver_sp = st.session_state.get("_outlier_ver__outliers_spectra", 0)
+            # Suppress selection highlighting on marker traces only
+            fig_kin_sp.update_traces(
+                unselected=dict(marker=dict(opacity=1.0)),
+                selected=dict(marker=dict(opacity=1.0)),
+                selector=dict(mode="markers"),
+            )
+            _kin_sp_event = st.plotly_chart(
+                fig_kin_sp, width='stretch',
+                on_select="rerun", selection_mode="points",
+                key=f"_kin_sp_chart_{_kin_ver_sp}",
+            )
+            if _process_outlier_event(_kin_sp_event, "_outliers_spectra", is_spectra=True):
+                st.rerun()
+            _outlier_bar("kin_sp", "_outliers_spectra")
             _pub_download_button(fig_kin_sp, "kinetics_spectra",
                                  x_label="Wavelength [nm]", y_label="Absorbance")
 
@@ -1077,6 +1421,7 @@ if IS_KINETICS:
                 _kin_wl_fit = _kin_fit_sp.get("wavelengths_fit")
                 _kin_abs    = _kin_fit_sp.get("absorbers", [])
                 if _kin_E is not None and len(_kin_abs) > 0:
+                    _kin_path_disp = float(_kin_fit_sp.get("path_cm", 1.0))
                     _PALETTE = ["#636EFA","#EF553B","#00CC96","#AB63FA",
                                 "#FFA15A","#19D3F3","#FF6692","#B6E880"]
                     fig_kin_pure = go.Figure()
@@ -1085,19 +1430,19 @@ if IS_KINETICS:
                             x=_kin_wl_fit, y=_kin_E[_j], mode="lines",
                             line=dict(color=_PALETTE[_j % len(_PALETTE)], width=2),
                             name=_sp,
-                            hovertemplate=f"{_sp}<br>λ=%{{x:.0f}} nm<br>ε=%{{y:.4f}} mM⁻¹<extra></extra>",
+                            hovertemplate=f"{_sp}<br>λ=%{{x:.0f}} nm<br>ε=%{{y:.4f}} mM⁻¹ cm⁻¹<extra></extra>",
                         ))
                     fig_kin_pure.update_layout(
                         height=350, margin=dict(l=40, r=20, t=40, b=60),
                         xaxis=dict(title="Wavelength [nm]"),
-                        yaxis=dict(title="ε [mM⁻¹, path length absorbed]", rangemode="tozero"),
+                        yaxis=dict(title="ε [mM⁻¹ cm⁻¹]", rangemode="tozero"),
                         template="plotly_dark", showlegend=True,
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                        title=dict(text="Pure species spectra", font=dict(size=13), x=0.5),
+                        title=dict(text=f"Pure species spectra  (path = {_kin_path_disp} cm)", font=dict(size=13), x=0.5),
                     )
                     st.plotly_chart(fig_kin_pure, width='stretch')
                     _pub_download_button(fig_kin_pure, "kinetics_spectra_species",
-                                         x_label="Wavelength [nm]", y_label="ε [mM⁻¹]")
+                                         x_label="Wavelength [nm]", y_label="ε [mM⁻¹ cm⁻¹]")
 
     with col2:
         # ── Fit message ──────────────────────────────────────────
@@ -1171,7 +1516,8 @@ if IS_KINETICS:
                                               parsed_kin, logk_dict, script_text,
                                               variables,
                                               script_path=st.session_state.get("_script_filename"),
-                                              input_path=st.session_state.get("_input_filename"))
+                                              input_path=st.session_state.get("_input_filename"),
+                                              fit_stats=st.session_state.get("_fit_stats", {}))
                 fname = f"Equilibrist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                 st.download_button(
                     label="💾 Export data",
@@ -1241,7 +1587,7 @@ if IS_KINETICS:
             if _kin_has_spectra:
                 _loaded_kin = load_spectra_data(exp_uploaded.read())
                 st.session_state["_spectra_data"] = _loaded_kin
-                # Seed wavelength range from actual data on first load
+                st.session_state.pop("_outliers_spectra", None)
                 if _loaded_kin and len(_loaded_kin.get("wavelengths", [])) > 0:
                     st.session_state["_pending_spectra_wl_min"] = float(_loaded_kin["wavelengths"][0])
                     st.session_state["_pending_spectra_wl_max"] = float(_loaded_kin["wavelengths"][-1])
@@ -1253,8 +1599,10 @@ if IS_KINETICS:
                 _loaded_kin = load_experimental_data(exp_uploaded.read())
                 if _kin_nmr_cfg_up is not None:
                     st.session_state["_nmr_data"] = _loaded_kin
+                    st.session_state.pop("_outliers_nmr", None)
                 else:
                     st.session_state["_exp_data"] = _loaded_kin
+                    st.session_state.pop("_outliers_main", None)
                 # Update xmax from last data point (time axis stored in v_add_mL)
                 _kin_cols = [c for c in _loaded_kin if not c.startswith("_")]
                 if _kin_cols:
@@ -1474,7 +1822,12 @@ with st.sidebar:
 
     st.header("Initial concentrations (mM)")
     conc_vals = {}
+    _is_acid_base = parsed.get("is_acid_base", False)
     for root, default in conc_roots.items():
+        if _is_acid_base and root == "H2O":
+            # H2O is implicit in acid-base mode — keep value but hide widget
+            conc_vals[root] = float(st.session_state.get(f"conc_{root}", float(default)))
+            continue
         conc_vals[root] = _conc_input_with_fit(
             f"{root}₀", key=f"conc_{root}", default=float(default),
         )
@@ -1532,20 +1885,28 @@ with st.sidebar:
         st.checkbox("Auto-optimize range", key="spectra_auto_range")
         st.checkbox("Allow negative absorbances", key="spectra_allow_neg")
 
-    st.header("Equilibrium constants (log₁₀ K)")
+    if _is_acid_base:
+        st.header("pKa values")
+    else:
+        st.header("Equilibrium constants (log₁₀ K)")
     logK_vals = {}
+    _rendered_knames = set()
     for eq in parsed["equilibria"]:
         kname = eq["kname"]
-        
-        # Format reactants: (coeff, species) → "coeff species" or just "species" if coeff=1
+
+        # In acid-base mode: hide Kw (implicit) silently
+        if _is_acid_base and kname == "Kw":
+            logK_vals[kname] = eq["logK"]
+            continue
+
+        # Build reaction label for this equilibrium
         reactants_str = []
         for coeff, species in eq["reactants"]:
             if coeff == 1:
                 reactants_str.append(species)
             else:
                 reactants_str.append(f"{coeff}{species}")
-        
-        # Format product(s): handle both single and multiple products
+
         products_display = []
         if "products" in eq:
             for prod_coeff, prod_species in eq["products"]:
@@ -1554,17 +1915,49 @@ with st.sidebar:
                 else:
                     products_display.append(f"{prod_coeff}{prod_species}")
         elif "product" in eq:
-            # Backwards compatibility
             prod_coeff, prod_species = eq["product"]
             if prod_coeff == 1:
                 products_display.append(prod_species)
             else:
                 products_display.append(f"{prod_coeff}{prod_species}")
-        
+
         products_str = " + ".join(products_display)
-        
-        label = f"{kname}  ({' + '.join(reactants_str)} ⇌ {products_str})"
-        logK_vals[kname] = _logk_input_with_fit(label, key=f"logK_{kname}", default=eq["logK"])
+        rxn_str = f"{' + '.join(reactants_str)} ⇌ {products_str}"
+
+        if kname in _rendered_knames:
+            logK_vals[kname] = float(st.session_state.get(f"logK_{kname}",
+                                     logK_vals.get(kname, eq["logK"])))
+        else:
+            _sharing = [e for e in parsed["equilibria"] if e["kname"] == kname]
+            if len(_sharing) > 1:
+                all_rxn_strs = []
+                for _e in _sharing:
+                    _r = " + ".join(
+                        sp if c == 1 else f"{c}{sp}"
+                        for c, sp in _e["reactants"])
+                    _p_list = []
+                    if "products" in _e:
+                        _p_list = [sp if c == 1 else f"{c}{sp}"
+                                   for c, sp in _e["products"]]
+                    elif "product" in _e:
+                        c, sp = _e["product"]
+                        _p_list = [sp if c == 1 else f"{c}{sp}"]
+                    all_rxn_strs.append(f"{_r} ⇌ {' + '.join(_p_list)}")
+                label = f"{kname}  ({' = '.join(all_rxn_strs)})"
+            else:
+                label = f"{kname}  ({rxn_str})"
+
+            if _is_acid_base:
+                # Show as pKa (positive number); logK returned for solver
+                _pka_default = -eq["logK"]
+                _pka_key  = f"pKa_{kname}"
+                _logk_key = f"logK_{kname}"
+                logK_vals[kname] = _pka_input_with_fit(
+                    label, pka_key=_pka_key, logk_key=_logk_key,
+                    default_pka=_pka_default)
+            else:
+                logK_vals[kname] = _logk_input_with_fit(label, key=f"logK_{kname}", default=eq["logK"])
+            _rendered_knames.add(kname)
 
 # ── Constraints toggle (only shown when $constraints section present) ──
 if parsed.get("constraints"):
@@ -1690,17 +2083,19 @@ for w in plot_warns:
 
 # ── Fit dispatch — runs BEFORE plots so spinner appears at top ────────
 if st.session_state.pop("_fit_requested", False):
-    exp_data_fit     = st.session_state.get("_exp_data", {})
-    nmr_data_fit     = st.session_state.get("_nmr_data", {})
-    spectra_data_fit = st.session_state.get("_spectra_data", {})
+    exp_data_fit     = _filter_exp_outliers(st.session_state.get("_exp_data", {}),      "_outliers_main")
+    nmr_data_fit     = _filter_exp_outliers(st.session_state.get("_nmr_data", {}),      "_outliers_nmr")
+    spectra_data_fit = _filter_spectra_outliers(st.session_state.get("_spectra_data", {}), "_outliers_spectra")
     nmr_cfg_fit      = parsed.get("nmr")
     use_nmr_fit      = (nmr_cfg_fit is not None and
                         nmr_cfg_fit["mode"] in ("shift", "integration", "mixed") and
                         bool(nmr_data_fit))
     use_spectra_fit  = parsed.get("spectra") is not None and bool(spectra_data_fit)
 
-    fit_keys_end = [eq["kname"] for eq in parsed["equilibria"]
-                    if st.session_state.get(f"fit_logK_{eq['kname']}", False)]
+    fit_keys_end = list(dict.fromkeys(
+        eq["kname"] for eq in parsed["equilibria"]
+        if st.session_state.get(f"fit_logK_{eq['kname']}", False)
+    ))
     has_data_end = use_nmr_fit or use_spectra_fit or bool(exp_data_fit)
 
     # Concentrations and titrant to fit
@@ -1800,7 +2195,10 @@ if st.session_state.pop("_fit_requested", False):
                         fit_titrant_keys=fit_titrant_keys_end)
 
             for kname, fitted_val in fitted_logKs.items():
-                st.session_state[f"_pending_logK_{kname}"] = float(fitted_val)
+                if parsed.get("is_acid_base") and kname != "Kw":
+                    st.session_state[f"_pending_pKa_{kname}"] = -float(fitted_val)
+                else:
+                    st.session_state[f"_pending_logK_{kname}"] = float(fitted_val)
             # Push fitted concentrations back to sidebar widgets
             for root, mM_val in stats.get("fitted_concs", {}).items():
                 st.session_state[f"_pending_conc_{root}"] = float(mM_val)
@@ -1878,12 +2276,10 @@ with col1:
     exp_data = st.session_state.get("_exp_data", {})
     if exp_data:
         # ── Pass 1: resolve direct species → variable matches ────────────
-        # For each raw exp column (e.g. "A"), find the plotted variable it
-        # directly feeds (e.g. "%A" because A appears in "%A = A/S").
-        # Transform the y-values through that variable expression and record
-        # the resulting exp series keyed by variable name.
-        # Also collect a shared x-axis from the first column that has data.
-        exp_series = {}   # {var_name: (exp_x, exp_y_transformed)}
+        # exp_series values are now 4-tuples: (exp_x, exp_y, col_name, orig_indices)
+        # col_name + orig_indices let us look up exclusion state at render time.
+        # For chained variables (pass 2) col_name=None, orig_indices=None.
+        exp_series = {}   # {var_name: (exp_x, exp_y_transformed, col_name, orig_indices)}
 
         for col_name, col_vals in exp_data.items():
             if col_name.startswith("_"): continue
@@ -1893,12 +2289,13 @@ with col1:
             exp_x = convert_exp_x(
                 col_vals["v_add_mL"], x_expr, parsed, params, network,
                 x_col_header=_exp_hdr)
+            orig_indices = list(range(len(col_vals["y"])))
             if matched_var and matched_var in trace_colors:
                 exp_y_transformed = transform_exp_via_variable(
                     matched_var, variables,
                     col_name, exp_x, col_vals["y"],
                     curve, x_vals, network)
-                exp_series[matched_var] = (exp_x, exp_y_transformed)
+                exp_series[matched_var] = (exp_x, exp_y_transformed, col_name, orig_indices)
             else:
                 # No variable match — plot raw, match color by name
                 if col_name in trace_colors:
@@ -1909,56 +2306,74 @@ with col1:
                     display_name = col_name.lstrip("%")
                 else:
                     display_name = col_name
-                exp_series[display_name] = (exp_x, col_vals["y"])
+                exp_series[display_name] = (exp_x, col_vals["y"], col_name, orig_indices)
 
         # ── Pass 2: propagate through chained variables ──────────────────
-        # If "%AB = %A + %B" and both "%A" and "%B" have exp series,
-        # compute "%AB (exp)" by evaluating the expression using the
-        # already-resolved exp values (same logic as transform_exp_via_variable
-        # but substituting all available exp series, not just one species).
         dep_order = resolve_variable_dependencies(variables)
         for var_name in dep_order:
             if var_name in exp_series:
-                continue                        # already computed in pass 1
+                continue
             if var_name not in plot_y_names:
-                continue                        # not plotted — skip
+                continue
             expr_deps = extract_identifiers_from_expression(variables[var_name])
-            # Check every dep that is itself a variable is covered by exp_series
             var_deps = [d for d in expr_deps if d in variables]
             if not var_deps:
-                continue                        # depends only on species, handled in pass 1
+                continue
             if not all(d in exp_series for d in var_deps):
-                continue                        # some dep has no exp data — skip
-            # All variable deps are available: evaluate the chained expression
-            # Use x-axis from the first dep (all should be on the same x-grid)
-            ref_x, _ = exp_series[var_deps[0]]
+                continue
+            ref_x, _, _, _ = exp_series[var_deps[0]]
             n = len(ref_x)
             chained_y = np.full(n, np.nan)
             for i in range(n):
-                # Build namespace from exp_series values at this point
                 var_vals = {}
                 for dep in var_deps:
-                    dep_x, dep_y = exp_series[dep]
-                    # Interpolate dep's exp series at this x point
+                    dep_x, dep_y, _, _ = exp_series[dep]
                     var_vals[dep] = float(np.interp(ref_x[i], dep_x, dep_y))
-                # Also interpolate theoretical species for any species deps
                 species_vals = {sp: float(np.interp(ref_x[i], x_vals,
                                 curve.get(sp, np.zeros_like(x_vals))))
                                 for sp in network["all_species"]}
                 chained_y[i] = evaluate_variable_expression(
                     variables[var_name], species_vals, var_vals)
-            exp_series[var_name] = (ref_x, chained_y)
+            exp_series[var_name] = (ref_x, chained_y, None, None)
 
-        # ── Render all exp series ────────────────────────────────────────
-        for display_name, (exp_x, plot_y_vals) in exp_series.items():
+        # ── Render exp series — only for quantities listed in $plot y ───────
+        _plot_y_set = set(plot_y_names) if plot_y_names else None
+        _eq_main_excl = st.session_state.get("_outliers_main", {})
+        for display_name, (exp_x, plot_y_vals, src_col, src_indices) in exp_series.items():
+            if _plot_y_set is not None and display_name not in _plot_y_set:
+                continue
             color = trace_colors.get(display_name, "#888888")
-            fig.add_trace(go.Scatter(
-                x=exp_x, y=plot_y_vals,
-                mode="markers", name=f"{display_name} (exp)",
-                marker=dict(color=color, size=7, symbol="circle",
-                            line=dict(width=1, color="white")),
-                showlegend=True,
-            ))
+            # Chained / derived series: no per-point exclusion, render as before
+            if src_col is None or src_indices is None:
+                fig.add_trace(go.Scatter(
+                    x=exp_x, y=plot_y_vals,
+                    mode="markers", name=f"{display_name} (exp)",
+                    marker=dict(color=color, size=7, symbol="circle",
+                                line=dict(width=1, color="white")),
+                    showlegend=True,
+                ))
+                continue
+            _excl_set = _eq_main_excl.get(src_col, set())
+            _inc = [j for j, oi in enumerate(src_indices) if oi not in _excl_set]
+            _exc = [j for j, oi in enumerate(src_indices) if oi in _excl_set]
+            if _inc:
+                fig.add_trace(go.Scatter(
+                    x=exp_x[_inc], y=np.asarray(plot_y_vals)[_inc],
+                    mode="markers", name=f"{display_name} (exp)",
+                    customdata=[[src_col, src_indices[j]] for j in _inc],
+                    marker=dict(color=color, size=7, symbol="circle",
+                                line=dict(width=1, color="white")),
+                    showlegend=True,
+                ))
+            if _exc:
+                fig.add_trace(go.Scatter(
+                    x=exp_x[_exc], y=np.asarray(plot_y_vals)[_exc],
+                    mode="markers", name=f"_outlier_{src_col}",
+                    customdata=[[src_col, src_indices[j]] for j in _exc],
+                    marker=dict(color=color, size=7, symbol="circle-open",
+                                line=dict(width=1.5, color=color)),
+                    showlegend=False,
+                ))
 
     # ── NMR back-calculated concentration dots on main plot ───────
     # Correct formula: at each exp point j, for each signal k:
@@ -2061,7 +2476,8 @@ with col1:
             _nmr_suffix_shift = "(NMR/shift)" if nmr_cfg_main.get("mode") == "mixed" else "(NMR)"
             _plot_backcalc_dots(fig, c_bc_eq_shift, plot_y_names,
                                 parsed.get("variables", {}), network["all_species"],
-                                trace_colors, label_suffix=_nmr_suffix_shift)
+                                trace_colors, label_suffix=_nmr_suffix_shift,
+                                excl_rows=_nmr_excl_intersection(nmr_data_main))
 
     # ── NMR integration back-calculated concentrations ───────────
     # After fitting in integration mode, sp_concs contains per-signal
@@ -2075,16 +2491,23 @@ with col1:
     if (nmr_cfg_integ is not None and
             nmr_cfg_integ["mode"] in ("integration", "mixed") and
             nmr_data_integ and sp_concs_integ):
-        # ── Post-fit: show back-calculated concentrations ──────────
-        _bc_post = {}
-        for sp, arr_list in sp_concs_integ.items():
-            x_ref = arr_list[0][0]
-            c_avg = np.mean([np.interp(x_ref, xa, ca) for xa, ca in arr_list], axis=0)
-            _bc_post[sp] = (x_ref, c_avg)
+        # ── Post-fit: back-calc concentrations from raw integrals (no K needed).
+        # The integration back-calc is K-independent — pre-fit and post-fit values
+        # are identical. We therefore always render from the FULL unfiltered data
+        # so original row indices are preserved in customdata, allowing hollow
+        # markers to be toggled correctly after fitting.
         _nmr_suffix_integ = "(NMR/integration)" if nmr_cfg_integ.get("mode") == "mixed" else "(NMR)"
-        _plot_backcalc_dots(fig, _bc_post, plot_y_names,
+        _eqi_nh   = nmr_cfg_integ.get("n_H_list", [])
+        _eqi_ni   = nmr_cfg_integ.get("n_integ", len(_eqi_nh))
+        _eqi_cols = [c for c in nmr_data_integ if not c.startswith("_")][:_eqi_ni]
+        _eqi_data = {c: nmr_data_integ[c] for c in _eqi_cols}
+        _eqi_full = _nmr_integration_backCalc(
+            _eqi_data, _eqi_nh[:_eqi_ni], params, network, x_expr, parsed,
+            x_col_header=nmr_data_integ.get("_x_col_header", ""))
+        _plot_backcalc_dots(fig, _eqi_full, plot_y_names,
                             parsed.get("variables", {}), network["all_species"],
-                            trace_colors, label_suffix=_nmr_suffix_integ)
+                            trace_colors, label_suffix=_nmr_suffix_integ,
+                            excl_rows=_nmr_excl_intersection(nmr_data_integ))
 
     elif (nmr_cfg_integ is not None and
             nmr_cfg_integ["mode"] in ("integration", "mixed") and
@@ -2104,7 +2527,8 @@ with col1:
         _nmr_suffix_pre = "(NMR/integration)" if nmr_cfg_integ.get("mode") == "mixed" else "(NMR)"
         _plot_backcalc_dots(fig, _bc_pre_pairs, plot_y_names,
                             parsed.get("variables", {}), network["all_species"],
-                            trace_colors, label_suffix=_nmr_suffix_pre)
+                            trace_colors, label_suffix=_nmr_suffix_pre,
+                            excl_rows=_nmr_excl_intersection(nmr_data_integ))
 
     # ── UV-Vis spectra back-calculated concentrations ───────────
     fit_stats_sp = st.session_state.get("_fit_stats", {})
@@ -2116,15 +2540,17 @@ with col1:
         C_back_sp    = fit_stats_sp.get("C_back", None)
         if E_final_sp is not None and len(_x_raw_sp_bc) > 0:
             try:
-                # Recompute C_back from A using current E_final so y-values
-                # are consistent with current cage0 (sidebar value).
+                # Recompute C_back from A using E_absorbed = E_final * path_cm so
+                # concentrations are correct regardless of path length.
                 _A_sp_bc   = _sd_bc.get("A", None)
                 _wl_fit_sp = fit_stats_sp.get("wavelengths_fit", np.array([]))
+                _path_sp   = float(fit_stats_sp.get("path_cm", 1.0))
                 if _A_sp_bc is not None and len(_wl_fit_sp) > 0:
-                    _wl_all_bc = _sd_bc.get("wavelengths", np.array([]))
+                    _wl_all_bc  = _sd_bc.get("wavelengths", np.array([]))
                     _wl_mask_bc = (_wl_all_bc >= _wl_fit_sp[0]) & (_wl_all_bc <= _wl_fit_sp[-1])
                     _A_fit_bc   = _A_sp_bc[:, _wl_mask_bc]
-                    _Cb_raw, _, _, _ = np.linalg.lstsq(E_final_sp.T, _A_fit_bc.T, rcond=None)
+                    _E_absorbed = E_final_sp * max(_path_sp, 1e-12)
+                    _Cb_raw, _, _, _ = np.linalg.lstsq(_E_absorbed.T, _A_fit_bc.T, rcond=None)
                     C_back_sp = np.clip(_Cb_raw.T, 0.0, None)
             except Exception:
                 pass  # fall back to stored C_back
@@ -2136,19 +2562,43 @@ with col1:
             _bc_uvvis = {sp: (x_exp_sp, C_back_sp[:, j]) for j, sp in enumerate(absorbers_sp)}
             _plot_backcalc_dots(fig, _bc_uvvis, plot_y_names,
                                 parsed.get("variables", {}), network["all_species"],
-                                trace_colors, label_suffix="(UV-Vis)")
+                                trace_colors, label_suffix="(UV-Vis)",
+                                excl_rows=st.session_state.get("_outliers_spectra", set()),
+                                bc_tag="__uvvis_bc__")
 
+    _eq_y_label   = _infer_y_label(plot_y_names, parsed, network)
+    _eq_rangemode = None if _has_log_units(plot_y_names, parsed, network) else "tozero"
+    _eq_yaxis = dict(title=_eq_y_label)
+    if _eq_rangemode is None:
+        _eq_yaxis["autorange"] = True   # log quantities: let Plotly range freely
+    else:
+        _eq_yaxis["rangemode"] = _eq_rangemode
     fig.update_layout(
         height=500,
         margin=dict(l=40, r=20, t=40, b=80),
         xaxis=dict(title=x_label, range=[0, xmax]),
-        yaxis=dict(title=_infer_y_label(plot_y_names, parsed, network), rangemode="tozero"),
+        yaxis=_eq_yaxis,
         template="plotly_dark",
         showlegend=True,
         legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
     )
-    st.plotly_chart(fig, width='stretch')
-    _pub_download_button(fig, "equilibrium_main", y_label=_infer_y_label(plot_y_names, parsed, network))
+    _eq_ver_main = st.session_state.get("_outlier_ver__outliers_main", 0)
+    fig.update_traces(
+        unselected=dict(marker=dict(opacity=1.0)),
+        selected=dict(marker=dict(opacity=1.0, size=10)),
+        selector=dict(mode="markers"),
+    )
+    _eq_main_event = st.plotly_chart(
+        fig, width='stretch',
+        on_select="rerun", selection_mode="points",
+        key=f"_eq_main_chart_{_eq_ver_main}",
+    )
+    if _process_outlier_event(_eq_main_event, "_outliers_main",
+                               nmr_bc_cols=[c for c in st.session_state.get("_nmr_data", {})
+                                            if not c.startswith("_")]):
+        st.rerun()
+    _outlier_bar("eq_main", "_outliers_main", "_outliers_nmr", "_outliers_spectra")
+    _pub_download_button(fig, "equilibrium_main", y_label=_eq_y_label)
     st.session_state["_current_figure"] = fig
     st.session_state.pop("_eq_snapshot_data", None)
 
@@ -2183,17 +2633,39 @@ with col1:
                 return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
 
             fig_sp = go.Figure()
+            _eq_sp_excl = st.session_state.get("_outliers_spectra", set())
             for _i in range(_n_sp):
                 _col = _rainbow(_i, _n_sp)
                 _lbl = f"{_x_unit}={_x_sp[_i]:.3g}"
+                _is_excl = _i in _eq_sp_excl
+                # Visual line — dashed+dim when excluded
                 fig_sp.add_trace(go.Scatter(
                     x=_wl_plot,
                     y=_A_plot[_i],
                     mode="lines",
-                    line=dict(color=_col, width=1.5),
-                    name=_lbl,
+                    line=dict(color=_col, width=1.5,
+                              dash="dash" if _is_excl else "solid"),
+                    opacity=0.75 if _is_excl else 1.0,
+                    name=f"_outlier_{_i}" if _is_excl else _lbl,
                     showlegend=False,
-                    hovertemplate=f"{_lbl}<br>λ=%{{x:.0f}} nm<br>A=%{{y:.4f}}<extra></extra>",
+                    hoverinfo="skip",
+                ))
+                # Full-line click surface: markers at every wavelength point, near-invisible.
+                # This makes the entire line clickable, not just the peak.
+                _n_wl_sp = len(_wl_plot)
+                fig_sp.add_trace(go.Scatter(
+                    x=_wl_plot, y=_A_plot[_i], mode="markers",
+                    name=f"_outlier_{_i}" if _is_excl else f"_sp_sel_{_i}",
+                    showlegend=False,
+                    customdata=[[_i]] * _n_wl_sp,
+                    marker=dict(
+                        color=_col,
+                        size=6,
+                        opacity=0.01,   # near-invisible but still hit-testable by Plotly
+                        symbol="circle-open" if _is_excl else "circle",
+                        line=dict(width=0),
+                    ),
+                    hovertemplate=f"{'[excluded — click to restore] ' if _is_excl else '[click to exclude] '}{_lbl}<br>λ=%{{x:.0f}} nm<br>A=%{{y:.4f}}<extra></extra>",
                 ))
 
             # Colorbar-style annotation: first and last label
@@ -2213,9 +2685,23 @@ with col1:
                 yaxis=dict(title="Absorbance", rangemode="tozero"),
                 template="plotly_dark",
                 showlegend=False,
-                title=dict(text="UV-Vis spectra", font=dict(size=13), x=0.5),
+                title=dict(text="UV-Vis spectra — click anywhere on a spectrum to exclude/restore", font=dict(size=13), x=0.5),
             )
-            st.plotly_chart(fig_sp, width='stretch')
+            _eq_ver_sp = st.session_state.get("_outlier_ver__outliers_spectra", 0)
+            # Suppress selection highlighting on marker traces only
+            fig_sp.update_traces(
+                unselected=dict(marker=dict(opacity=1.0)),
+                selected=dict(marker=dict(opacity=1.0)),
+                selector=dict(mode="markers"),
+            )
+            _eq_sp_event = st.plotly_chart(
+                fig_sp, width='stretch',
+                on_select="rerun", selection_mode="points",
+                key=f"_eq_sp_chart_{_eq_ver_sp}",
+            )
+            if _process_outlier_event(_eq_sp_event, "_outliers_spectra", is_spectra=True):
+                st.rerun()
+            _outlier_bar("eq_sp", "_outliers_spectra")
             _pub_download_button(fig_sp, "equilibrium_spectra", x_label="Wavelength [nm]", y_label="Absorbance")
 
             # ── Pure species spectra (only shown after a successful fit) ──
@@ -2226,7 +2712,7 @@ with col1:
                 _absorbers = _fit_stats_sp.get("absorbers", [])
 
                 if _E_final is not None and len(_absorbers) > 0:
-                    # Assign a consistent color per species (match main plot palette)
+                    _path_disp = float(_fit_stats_sp.get("path_cm", 1.0))
                     _PALETTE = [
                         "#636EFA", "#EF553B", "#00CC96", "#AB63FA",
                         "#FFA15A", "#19D3F3", "#FF6692", "#B6E880",
@@ -2241,22 +2727,22 @@ with col1:
                             mode="lines",
                             line=dict(color=_col_p, width=2),
                             name=_sp,
-                            hovertemplate=f"{_sp}<br>λ=%{{x:.0f}} nm<br>ε=%{{y:.4f}} mM⁻¹<extra></extra>",
+                            hovertemplate=f"{_sp}<br>λ=%{{x:.0f}} nm<br>ε=%{{y:.4f}} mM⁻¹ cm⁻¹<extra></extra>",
                         ))
 
                     fig_pure.update_layout(
                         height=350,
                         margin=dict(l=40, r=20, t=40, b=60),
                         xaxis=dict(title="Wavelength [nm]"),
-                        yaxis=dict(title="ε [mM⁻¹, path length absorbed]", rangemode="tozero"),
+                        yaxis=dict(title="ε [mM⁻¹ cm⁻¹]", rangemode="tozero"),
                         template="plotly_dark",
                         showlegend=True,
                         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                                     xanchor="left", x=0),
-                        title=dict(text="Pure species spectra", font=dict(size=13), x=0.5),
+                        title=dict(text=f"Pure species spectra  (path = {_path_disp} cm)", font=dict(size=13), x=0.5),
                     )
                     st.plotly_chart(fig_pure, width='stretch')
-                    _pub_download_button(fig_pure, "equilibrium_spectra_species", x_label="Wavelength [nm]", y_label="ε [mM⁻¹]")
+                    _pub_download_button(fig_pure, "equilibrium_spectra_species", x_label="Wavelength [nm]", y_label="ε [mM⁻¹ cm⁻¹]")
 
     # ── NMR chemical shift plot ───────────────────────────────────
     nmr_cfg  = parsed.get("nmr")
@@ -2293,6 +2779,7 @@ with col1:
         # ── Experimental Δδ dots ─────────────────────────────────────
         _nmr_hdr_plot = nmr_data.get("_x_col_header", "")
         shown_tgt_legend = set()
+        _eq_nmr_excl = st.session_state.get("_outliers_nmr", {})
         for col in _shift_cols_plot:
             col_data = nmr_data[col]
             exp_x  = convert_exp_x(col_data["v_add_mL"], x_expr, parsed, params, network,
@@ -2303,14 +2790,30 @@ with col1:
             color  = nmr_target_colors.get(tgt, "#888888")
             show_in_legend = tgt not in shown_tgt_legend
             shown_tgt_legend.add(tgt)
-            fig_nmr.add_trace(go.Scatter(
-                x=exp_x, y=delta_obs_rel,
-                mode="markers",
-                name=tgt if show_in_legend else col,
-                legendgroup=tgt,
-                showlegend=show_in_legend,
-                marker=dict(color=color, size=6, symbol="circle"),
-            ))
+            _excl_set_e = _eq_nmr_excl.get(col, set())
+            _inc_e = [i for i in range(len(delta_obs_rel)) if i not in _excl_set_e]
+            _exc_e = [i for i in range(len(delta_obs_rel)) if i in _excl_set_e]
+            if _inc_e:
+                fig_nmr.add_trace(go.Scatter(
+                    x=exp_x[_inc_e], y=delta_obs_rel[_inc_e],
+                    mode="markers",
+                    name=tgt if show_in_legend else col,
+                    legendgroup=tgt,
+                    showlegend=show_in_legend,
+                    customdata=[[col, i] for i in _inc_e],
+                    marker=dict(color=color, size=6, symbol="circle"),
+                ))
+            if _exc_e:
+                fig_nmr.add_trace(go.Scatter(
+                    x=exp_x[_exc_e], y=delta_obs_rel[_exc_e],
+                    mode="markers",
+                    name=f"_outlier_{col}",
+                    legendgroup=tgt,
+                    showlegend=False,
+                    customdata=[[col, i] for i in _exc_e],
+                    marker=dict(color=color, size=6, symbol="circle-open",
+                                line=dict(width=1.5, color=color)),
+                ))
 
         # ── Theoretical Δδ curves — only shown after a fit has been run ─────
         # Pre-fit curves are meaningless (they reflect the current K slider value,
@@ -2367,7 +2870,20 @@ with col1:
             legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
             title=dict(text="NMR Chemical Shift Changes", x=0.5, font=dict(size=13)),
         )
-        st.plotly_chart(fig_nmr, width='stretch')
+        _eq_ver_nmr = st.session_state.get("_outlier_ver__outliers_nmr", 0)
+        fig_nmr.update_traces(
+            unselected=dict(marker=dict(opacity=1.0)),
+            selected=dict(marker=dict(opacity=1.0, size=9)),
+            selector=dict(mode="markers"),
+        )
+        _eq_nmr_event = st.plotly_chart(
+            fig_nmr, width='stretch',
+            on_select="rerun", selection_mode="points",
+            key=f"_eq_nmr_chart_{_eq_ver_nmr}",
+        )
+        if _process_outlier_event(_eq_nmr_event, "_outliers_nmr"):
+            st.rerun()
+        _outlier_bar("eq_nmr", "_outliers_nmr")
         _pub_download_button(fig_nmr, "equilibrium_nmr", y_label="Δδ [ppm]")
 
 
@@ -2390,13 +2906,11 @@ with col2:
     has_spectra = parsed.get("spectra") is not None and bool(spectra_data)
     has_exp_data = bool(exp_data) or has_nmr or has_spectra
 
-    # Get which parameters are marked for fitting
-    fit_keys = []
-    for eq in parsed["equilibria"]:
-        kname = eq["kname"]
-        fit_key = f"fit_logK_{kname}"
-        if st.session_state.get(fit_key, False):
-            fit_keys.append(kname)
+    # Get which parameters are marked for fitting (deduplicated for shared knames)
+    fit_keys = list(dict.fromkeys(
+        eq["kname"] for eq in parsed["equilibria"]
+        if st.session_state.get(f"fit_logK_{eq['kname']}", False)
+    ))
 
     # Render Tol/Timeout BEFORE the button so they are always rendered
     # before any st.rerun() call — prevents Streamlit from garbage-collecting
@@ -2454,7 +2968,8 @@ with col2:
             script_text = st.session_state.get("_script_text", "")
             excel_data, filename = export_to_excel(curve, x_vals, parsed, params, network, script_text, logK_vals,
                                                     script_path=st.session_state.get("_script_filename"),
-                                                    input_path=st.session_state.get("_input_filename"))
+                                                    input_path=st.session_state.get("_input_filename"),
+                                                    fit_stats=st.session_state.get("_fit_stats", {}))
             st.download_button(
                 label="💾 Export data",
                 data=excel_data,
@@ -2550,6 +3065,7 @@ with col2:
             if parsed.get("spectra") is not None:
                 _loaded = load_spectra_data(_uploaded.read())
                 st.session_state["_spectra_data"] = _loaded
+                st.session_state.pop("_outliers_spectra", None)
                 # Override xmax with the x-value of the last data point
                 if _loaded:
                     _x_last_mL = float(_loaded["x_vals"][-1])
@@ -2561,6 +3077,7 @@ with col2:
             elif nmr_cfg is not None:
                 _loaded = load_experimental_data(_uploaded.read())
                 st.session_state["_nmr_data"] = _loaded
+                st.session_state.pop("_outliers_nmr", None)
                 # Update xmax from last data point (x-axis in mL, converted via x_expr)
                 _eq_nmr_cols = [c for c in _loaded if not c.startswith("_")]
                 if _eq_nmr_cols:
@@ -2573,7 +3090,7 @@ with col2:
             else:
                 _loaded = load_experimental_data(_uploaded.read())
                 st.session_state["_exp_data"] = _loaded
-                # Update xmax from last data point
+                st.session_state.pop("_outliers_main", None)
                 _eq_cols = [c for c in _loaded if not c.startswith("_")]
                 if _eq_cols:
                     _x_last_mL_eq = float(_loaded[_eq_cols[0]]["v_add_mL"][-1])

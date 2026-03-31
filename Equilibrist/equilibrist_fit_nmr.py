@@ -422,27 +422,33 @@ def fit_nmr_shifts(parsed: dict, network: dict, nmr_data: dict,
     _n_k   = len(fit_keys)
     _n_c   = len(fit_conc_keys)
 
+    # ── Global timer starts here — covers Phase 0 AND the re-fit loop ───
+    _global_start  = time.time()
+
     # ── Phase 0: warm-start logK before loop ────────────────────────────
     if fitting_concs and _n_k > 0:
         _sp0 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                           for i in range(_n_k)])
+        class _TimeoutP0(Exception): pass
+        def _ph0_obj(lk, _t0=_global_start, _tlim=timeout_s):
+            if time.time() - _t0 > _tlim * 0.4:  # use at most 40% of budget on warm-start
+                raise _TimeoutP0()
+            return objective(np.concatenate([lk, x0[_n_k:]]))
         try:
-            _r0 = minimize(lambda lk: objective(np.concatenate([lk, x0[_n_k:]])),
-                           x0[:_n_k], method="Nelder-Mead",
-                           options={"maxiter": maxiter//2, "xatol": tolerance,
+            _r0 = minimize(_ph0_obj, x0[:_n_k], method="Nelder-Mead",
+                           options={"maxiter": maxiter//10, "xatol": tolerance,
                                     "fatol": tolerance * 1e-4, "adaptive": True,
                                     "initial_simplex": _sp0})
             x0 = np.concatenate([_r0.x, x0[_n_k:]])
-        except Exception:
-            pass
+        except (_TimeoutP0, Exception):
+            pass  # use whatever x0 we have
 
     # ── Re-fit loop ──────────────────────────────────────────────────────
-    n_passes       = 10_000 if fitting_concs else 1
+    n_passes       = 200 if fitting_concs else 1
     best_x_global  = x0.copy()
     _total_nit     = 0
     _any_timed_out = False
     result         = None
-    _global_start  = time.time()
 
     for _pass in range(n_passes):
         _elapsed   = time.time() - _global_start
@@ -450,13 +456,19 @@ def fit_nmr_shifts(parsed: dict, network: dict, nmr_data: dict,
         if _remaining <= 0.5:
             _any_timed_out = True; break
 
-        _pass_steps  = _make_simplex_steps_nmr()
+        # After the warm-start pass, K is near its optimum. Use a tight K step
+        # (0.1 log-units) so subsequent passes refine concentrations without
+        # wastefully re-exploring K space from scratch every time.
+        _base_steps = _make_simplex_steps_nmr()
+        if _pass > 0 and fitting_concs:
+            _base_steps[:_n_k] = 0.1
+        _pass_steps  = _base_steps
         init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _pass_steps[i]
                                          for i in range(n_p)])
         class _Timeout(Exception): pass
         _bt = {"x": x0.copy(), "f": np.inf, "start": time.time(), "nit": 0}
 
-        def _obj_timed(trial, _tracker=_bt, _t0=_bt["start"], _tlim=_remaining):
+        def _obj_timed(trial, _tracker=_bt, _t0=_global_start, _tlim=timeout_s):
             _tracker["nit"] += 1
             f = objective(trial)
             if f < _tracker["f"]: _tracker["f"] = f; _tracker["x"] = trial.copy()
@@ -982,28 +994,34 @@ def fit_nmr_integration(parsed: dict, network: dict, nmr_data: dict,
     _n_k = len(fit_keys)
     _n_c = len(fit_conc_keys)
 
+    # ── Global timer starts here — covers Phase 0 AND the re-fit loop ───
+    _global_start  = time.time()
+
     # ── Phase 0: warm-start logK before loop ────────────────────────────
     if fitting_concs and _n_k > 0:
         _bc_ph0 = _get_bc(_make_params_nmr(x0) if fitting_concs else params)
         _sp0 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                           for i in range(_n_k)])
+        class _TimeoutP0(Exception): pass
+        def _ph0_obj(lk, _t0=_global_start, _tlim=timeout_s, _bc=_bc_ph0):
+            if time.time() - _t0 > _tlim * 0.4:
+                raise _TimeoutP0()
+            return objective(np.concatenate([lk, x0[_n_k:]]), _bc)
         try:
-            _r0 = minimize(lambda lk: objective(np.concatenate([lk, x0[_n_k:]]), _bc_ph0),
-                           x0[:_n_k], method="Nelder-Mead",
-                           options={"maxiter": maxiter//2, "xatol": tolerance,
+            _r0 = minimize(_ph0_obj, x0[:_n_k], method="Nelder-Mead",
+                           options={"maxiter": maxiter//10, "xatol": tolerance,
                                     "fatol": tolerance * 1e-4, "adaptive": True,
                                     "initial_simplex": _sp0})
             x0 = np.concatenate([_r0.x, x0[_n_k:]])
-        except Exception:
+        except (_TimeoutP0, Exception):
             pass
 
     # ── Re-fit loop ──────────────────────────────────────────────────────
-    n_passes       = 10_000 if fitting_concs else 1
+    n_passes       = 200 if fitting_concs else 1
     best_x_global  = x0.copy()
     _total_nit     = 0
     _any_timed_out = False
     result         = None
-    _global_start  = time.time()
 
     for _pass in range(n_passes):
         _elapsed   = time.time() - _global_start
@@ -1013,14 +1031,17 @@ def fit_nmr_integration(parsed: dict, network: dict, nmr_data: dict,
 
         _p_x0    = _make_params_nmr(x0) if fitting_concs else params
         bc_pass  = _get_bc(_p_x0)
-        _pass_steps  = _make_simplex_steps_nmr()
+        _base_steps = _make_simplex_steps_nmr()
+        if _pass > 0 and fitting_concs:
+            _base_steps[:_n_k] = 0.1
+        _pass_steps  = _base_steps
         init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _pass_steps[i]
                                          for i in range(n_p)])
         class _Timeout(Exception): pass
         _bt = {"x": x0.copy(), "f": np.inf, "start": time.time(), "nit": 0}
 
         def _obj_timed(trial, _tracker=_bt, _bc=bc_pass,
-                        _t0=_bt["start"], _tlim=_remaining):
+                        _t0=_global_start, _tlim=timeout_s):
             _tracker["nit"] += 1
             f = objective(trial, _bc)
             if f < _tracker["f"]: _tracker["f"] = f; _tracker["x"] = trial.copy()
@@ -1404,28 +1425,34 @@ def fit_nmr_mixed(parsed: dict, network: dict, nmr_data: dict,
     _n_k = len(fit_keys)
     _n_c = len(fit_conc_keys)
 
+    # ── Global timer starts here — covers Phase 0 AND the re-fit loop ───
+    _global_start  = time.time()
+
     # ── Phase 0: warm-start logK before loop ────────────────────────────
     if fitting_concs and _n_k > 0:
         _bc_ph0 = _get_bc_mixed(_make_params_nmr(x0) if fitting_concs else params)
         _sp0 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                           for i in range(_n_k)])
+        class _TimeoutP0(Exception): pass
+        def _ph0_obj(lk, _t0=_global_start, _tlim=timeout_s, _bc=_bc_ph0):
+            if time.time() - _t0 > _tlim * 0.4:
+                raise _TimeoutP0()
+            return objective(np.concatenate([lk, x0[_n_k:]]), _bc)
         try:
-            _r0 = minimize(lambda lk: objective(np.concatenate([lk, x0[_n_k:]]), _bc_ph0),
-                           x0[:_n_k], method="Nelder-Mead",
-                           options={"maxiter": maxiter//2, "xatol": tolerance,
+            _r0 = minimize(_ph0_obj, x0[:_n_k], method="Nelder-Mead",
+                           options={"maxiter": maxiter//10, "xatol": tolerance,
                                     "fatol": tolerance * 1e-4, "adaptive": True,
                                     "initial_simplex": _sp0})
             x0 = np.concatenate([_r0.x, x0[_n_k:]])
-        except Exception:
+        except (_TimeoutP0, Exception):
             pass
 
     # ── Re-fit loop ──────────────────────────────────────────────────────
-    n_passes       = 10_000 if fitting_concs else 1
+    n_passes       = 200 if fitting_concs else 1
     best_x_global  = x0.copy()
     _total_nit     = 0
     _any_timed_out = False
     result         = None
-    _global_start  = time.time()
 
     for _pass in range(n_passes):
         _elapsed   = time.time() - _global_start
@@ -1435,14 +1462,17 @@ def fit_nmr_mixed(parsed: dict, network: dict, nmr_data: dict,
 
         _p_x0    = _make_params_nmr(x0) if fitting_concs else params
         bc_pass  = _get_bc_mixed(_p_x0)
-        _pass_steps  = _make_simplex_steps_nmr()
+        _base_steps = _make_simplex_steps_nmr()
+        if _pass > 0 and fitting_concs:
+            _base_steps[:_n_k] = 0.1
+        _pass_steps  = _base_steps
         init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _pass_steps[i]
                                          for i in range(n_p)])
         class _Timeout(Exception): pass
         _bt = {"x": x0.copy(), "f": np.inf, "start": time.time(), "nit": 0}
 
         def _obj_timed(trial, _tracker=_bt, _bc=bc_pass,
-                        _t0=_bt["start"], _tlim=_remaining):
+                        _t0=_global_start, _tlim=timeout_s):
             _tracker["nit"] += 1
             f = objective(trial, _bc)
             if f < _tracker["f"]: _tracker["f"] = f; _tracker["x"] = trial.copy()

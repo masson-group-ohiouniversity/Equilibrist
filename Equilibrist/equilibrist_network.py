@@ -80,6 +80,19 @@ def _sanitise_expr(expr: str, pct_names: set) -> str:
             result = _re.sub(r"%" + _re.escape(name[1:]) + r"(?!\w)", safe, result)
     return result
 
+import math as _math
+
+_MATH_NS = {
+    "log":   _math.log10,   # chemistry convention: log = log₁₀  (pH = -log H)
+    "log10": _math.log10,
+    "ln":    _math.log,     # natural logarithm
+    "exp":   _math.exp,
+    "sqrt":  _math.sqrt,
+    "abs":   abs,
+    "pi":    _math.pi,
+}
+
+
 def evaluate_variable_expression(expr: str, species_values: dict, variable_values: dict) -> float:
     """
     Evaluate a mathematical expression with species and variable substitution.
@@ -98,15 +111,30 @@ def evaluate_variable_expression(expr: str, species_values: dict, variable_value
     safe_vars     = {_sanitise_pct(k): v for k, v in variable_values.items()}
     safe_expr     = _sanitise_expr(expr, all_pct)
 
+    # Preprocess "log X", "ln X" (without parens) → "log(X)", "ln(X)"
+    # so that chemistry-style notation like "pH = -log H" works.
+    import re as _re_ev
+    safe_expr = _re_ev.sub(
+        r'\b(log10|log|ln|exp|sqrt|abs)\s+([A-Za-z_]\w*)',
+        r'\1(\2)',
+        safe_expr
+    )
+
     namespace = {}
+    namespace.update(_MATH_NS)
     namespace.update(safe_species)
     namespace.update(safe_vars)
 
     try:
         result = eval(safe_expr, {"__builtins__": {}}, namespace)
-        return float(result) if np.isfinite(result) else 0.0
+        result = float(result)
+        return result if np.isfinite(result) else np.nan
+    except (ValueError, ZeroDivisionError):
+        # Math domain errors (log of zero/negative, division by zero) → NaN
+        # These appear as gaps in the plot rather than misleading zeros
+        return np.nan
     except Exception:
-        return 0.0
+        return np.nan
 
 
 def compute_variable_curve(var_name: str, variables: dict, curve: dict, network: dict, x_vals: np.ndarray) -> np.ndarray:
@@ -124,32 +152,23 @@ def compute_variable_curve(var_name: str, variables: dict, curve: dict, network:
         Array of variable values for each titration point
     """
     n_points = len(x_vals)
-    result = np.zeros(n_points)
-    
+    result = np.full(n_points, np.nan)
+
     try:
-        # Get variable evaluation order
         var_order = resolve_variable_dependencies(variables)
-        
-        # Compute variable for each titration point
         for i in range(n_points):
-            # Get species concentrations at this point
             species_values = {}
             for sp in network["all_species"]:
                 species_values[sp] = curve.get(sp, np.zeros(n_points))[i]
-            
-            # Compute variables in dependency order
             variable_values = {}
             for v_name in var_order:
                 expr = variables[v_name]
                 var_value = evaluate_variable_expression(expr, species_values, variable_values)
                 variable_values[v_name] = var_value
-            
             result[i] = variable_values.get(var_name,
-                          variable_values.get(_sanitise_pct(var_name), 0.0))
-            
+                          variable_values.get(_sanitise_pct(var_name), np.nan))
     except Exception:
-        # If computation fails, return zeros
-        result[:] = 0.0
+        pass  # return NaN array — gaps in plot, not misleading zeros
         
     return result
 
@@ -295,25 +314,11 @@ def build_network(parsed: dict) -> dict:
     all_species  = sorted(all_sp_set)
     free_species = sorted(all_sp_set - products_set)
 
-    # Detect duplicate product names — two reactions producing the same species
-    # would silently overwrite each other.  Raise a clear error instead.
-    from collections import Counter
-    product_counts = Counter()
-    for eq in equilibria:
-        if "products" in eq:
-            for prod_coeff, prod_species in eq["products"]:
-                product_counts[prod_species] += 1
-        elif "product" in eq:
-            product_counts[eq["product"][1]] += 1
-    duplicates = [p for p, n in product_counts.items() if n > 1]
-    if duplicates:
-        raise ValueError(
-            f"Duplicate product name(s) in $reactions: {duplicates}. "
-            "Each product must have a unique name. "
-            "Check for typos (e.g. 'Q + M = QM' not 'Q + M = GM')."
-        )
-
-    # Create product-to-equilibrium mapping (simplified for multiple products)
+    # Create product-to-equilibrium mapping for the fallback recursive evaluator.
+    # When a species is produced by more than one reaction (e.g. H+ from acid
+    # dissociation AND water autoionisation), the rigorous solver handles it
+    # correctly via the stoichiometric matrix.  The fallback prod_to_eq just
+    # picks one reaction per product; the rigorous path always takes priority.
     prod_to_eq = {}
     for eq in equilibria:
         if "products" in eq:
@@ -476,9 +481,14 @@ def solve_equilibria_general(totals_M, equilibria, all_species, logK_vals,
 
     # ── Residual function ────────────────────────────────────────────────
     def residuals(y):
-        c      = np.exp(y)
-        eq_res = lnK_vec - (nu @ y)       # equilibrium  (linear in y)
-        mb_res = (Lambda @ c) - T_cons    # mass balance (nonlinear)
+        # Suppress overflow/invalid warnings: the optimizer routinely probes
+        # extreme y values where exp(y) overflows to inf and inf propagates
+        # into the matmul as NaN.  These are expected and handled by the
+        # solver (large residual -> step rejected); printing them is noise.
+        with np.errstate(over="ignore", invalid="ignore"):
+            c      = np.exp(y)
+            eq_res = lnK_vec - (nu @ y)       # equilibrium  (linear in y)
+            mb_res = (Lambda @ c) - T_cons    # mass balance (nonlinear)
         return np.concatenate([eq_res, mb_res])
 
     # ── Cold-start initial guess ─────────────────────────────────────────

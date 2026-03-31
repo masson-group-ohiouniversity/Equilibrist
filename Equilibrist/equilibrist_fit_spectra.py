@@ -257,13 +257,48 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
       The optimal range is returned in stats as "opt_wl_min" / "opt_wl_max".
     """
 
-    def _solve_E(C_mat, A_mat):
-        """Solve C @ E ≈ A for E, respecting allow_negative_eps flag."""
-        if allow_negative_eps:
-            E, _, _, _ = np.linalg.lstsq(C_mat, A_mat, rcond=None)
-            return E
-        return np.column_stack([_nnls(C_mat, A_mat[:, _j])[0]
-                                for _j in range(A_mat.shape[1])])
+    def _solve_E(C_mat, A_mat, known_E_rows=None):
+        """
+        Solve C @ E ≈ A for E (E in absorbed units: mM⁻¹, path absorbed).
+
+        If known_E_rows is provided ({sp: eps_absorbed_array}), those rows are
+        pinned column-by-column.  A NaN value in eps_absorbed_array at column j
+        means "no data at this wavelength" — the species is solved freely there
+        instead of being pinned, so empty cells in the user's spectrum sheet
+        never masquerade as ε = 0.
+        """
+        n_wl = A_mat.shape[1]
+        if not known_E_rows:
+            # ── Original path (no known spectra) ──────────────────────────
+            if allow_negative_eps:
+                E, _, _, _ = np.linalg.lstsq(C_mat, A_mat, rcond=None)
+                return E
+            return np.column_stack([_nnls(C_mat, A_mat[:, _j])[0]
+                                    for _j in range(n_wl)])
+
+        # ── Per-wavelength column solve with partial pinning ───────────────
+        E = np.zeros((len(absorbers), n_wl))
+        for j in range(n_wl):
+            # Determine which species have a finite known ε at this wavelength
+            k_idx_j = [i for i, sp in enumerate(absorbers)
+                       if sp in known_E_rows and np.isfinite(known_E_rows[sp][j])]
+            u_idx_j = [i for i in range(len(absorbers)) if i not in k_idx_j]
+            # Pin the known species
+            for i in k_idx_j:
+                E[i, j] = known_E_rows[absorbers[i]][j]
+            # Solve for the remaining species
+            if u_idx_j:
+                a_col = A_mat[:, j]
+                if k_idx_j:
+                    a_col = a_col - C_mat[:, k_idx_j] @ E[k_idx_j, j]
+                C_unk = C_mat[:, u_idx_j]
+                if allow_negative_eps:
+                    sol, _, _, _ = np.linalg.lstsq(C_unk, a_col, rcond=None)
+                else:
+                    sol, _ = _nnls(C_unk, a_col)
+                for li, gi in enumerate(u_idx_j):
+                    E[gi, j] = sol[li]
+        return E
 
     from scipy.optimize import minimize
     from scipy.linalg import null_space as _null_space
@@ -284,6 +319,49 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
 
     if not absorbers:
         return False, {}, {}, "All species are transparent — nothing to fit"
+
+    # ── Known spectra (read: species whose ε is provided in sheet 2) ─────────
+    _path_cm_known  = float(spectra_cfg.get("path_cm", 1.0))
+    _read_species   = set(spectra_cfg.get("read", []))
+    _raw_known_sp   = spectra_data.get("known_spectra_raw", {})
+
+    def _known_eps_for_mask(wl_mask):
+        """Return {sp: E_absorbed_row} for known absorbers, interpolated to wl_mask.
+        Values are NaN at wavelengths where the provided spectrum has no data
+        (empty cells). _solve_E treats NaN as "free" at that wavelength."""
+        wl_target = wavelengths[wl_mask]
+        out = {}
+        for sp in absorbers:
+            if sp not in _read_species or sp not in _raw_known_sp:
+                continue
+            wl_k, eps_k = _raw_known_sp[sp]
+            # Only interpolate between finite points; gaps stay NaN.
+            # Build a finite-only grid for interpolation so NaN values in
+            # the source don't propagate incorrectly via np.interp.
+            finite_mask = np.isfinite(eps_k)
+            if not np.any(finite_mask):
+                continue
+            wl_fin  = wl_k[finite_mask]
+            eps_fin = eps_k[finite_mask]
+            # Interpolate; mark wavelengths outside the finite data range as NaN
+            eps_interp = np.interp(wl_target, wl_fin, eps_fin,
+                                   left=np.nan, right=np.nan)
+            # Also NaN out target wavelengths that fall in internal gaps of the
+            # known spectrum (between two NaN-valued source points).
+            # Strategy: a target wl is "in a gap" if both its nearest left and
+            # right finite source neighbours are far apart relative to the local
+            # source spacing.  Simpler: re-interpolate a gap indicator.
+            if not np.all(finite_mask):
+                # Build a 0/1 "is finite" signal on the source grid and
+                # interpolate it; values < 0.999 indicate a gap region.
+                finite_flag = finite_mask.astype(float)
+                flag_interp = np.interp(wl_target, wl_k, finite_flag,
+                                        left=np.nan, right=np.nan)
+                eps_interp = np.where(
+                    np.isfinite(flag_interp) & (flag_interp > 0.999),
+                    eps_interp, np.nan)
+            out[sp] = eps_interp * max(_path_cm_known, 1e-12)
+        return out
 
     def _mask(lo, hi):
         return (wavelengths >= lo) & (wavelengths <= hi)
@@ -391,10 +469,11 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
             lk[j] = logk_trial[i]
         return lk
 
-    def _run_fit(A_fit):
+    def _run_fit(A_fit, known_E_rows=None):
         """Run Nelder-Mead with timeout and best-so-far tracking.
         If fit_conc_keys / fit_titrant_keys are set, concentrations are appended
-        to the parameter vector and c0_arr / T_arr are recomputed at each step."""
+        to the parameter vector and c0_arr / T_arr are recomputed at each step.
+        known_E_rows: {sp: E_absorbed_array} for species with fixed spectra."""
         import time
 
         class _Timeout(Exception):
@@ -522,7 +601,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
                 lk = _build_lnK(logk_trial)
                 C  = _fast_solve_all(lk)
 
-            E = _solve_E(C, A_fit)
+            E = _solve_E(C, A_fit, known_E_rows)
             f  = float(np.sum((A_fit - C @ E) ** 2))
             cp = constraints_penalty(constraints or [], {**logK_vals, **lk_dict}, ssr_scale=f)
             f_total = f + cp
@@ -570,7 +649,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
                     return 1e9
             lk = _build_lnK(logk_trial)
             C  = _fast_solve_all(lk)
-            E = _solve_E(C, A_fit)
+            E = _solve_E(C, A_fit, known_E_rows)
             f_safe = float(np.sum((A_fit - C @ E) ** 2))
             cp_safe = constraints_penalty(constraints or [], {**logK_vals, **lk_dict}, ssr_scale=f_safe)
             return f_safe + cp_safe
@@ -625,7 +704,8 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
     if A_fit1.shape[1] == 0:
         return False, {}, {}, "No wavelengths in selected range"
 
-    result1, _obj1 = _run_fit(A_fit1)
+    _known1  = _known_eps_for_mask(wl_mask1)
+    result1, _obj1 = _run_fit(A_fit1, _known1)
     fitted_logKs   = {fit_keys[i]: result1.x[i] for i in range(len(fit_keys))}
     # Extract fitted concentrations/titrant from extended vector
     _n_k = len(fit_keys)
@@ -637,7 +717,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
     # Compute E from pass-1 result (needed for range optimisation)
     lk1 = _build_lnK(result1.x)
     C1  = _get_C_from_logKs(lk1)
-    E1 = _solve_E(C1, A_fit1)
+    E1 = _solve_E(C1, A_fit1, _known1)
 
     opt_wl_min, opt_wl_max = wl_min, wl_max
 
@@ -648,7 +728,8 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
         wl_mask2 = _mask(opt_wl_min, opt_wl_max)
         A_fit2   = A_full[:, wl_mask2]
         if A_fit2.shape[1] > 0:
-            result2, _obj2 = _run_fit(A_fit2)
+            _known2  = _known_eps_for_mask(wl_mask2)
+            result2, _obj2 = _run_fit(A_fit2, _known2)
             fitted_logKs   = {fit_keys[i]: result2.x[i] for i in range(len(fit_keys))}
             fitted_concs_sp    = {fit_conc_keys[i]: float(result2.x[_n_k+i])
                                   for i in range(len(fit_conc_keys))}
@@ -660,6 +741,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
     wl_mask_f = _mask(opt_wl_min, opt_wl_max)
     wl_fit_f  = wavelengths[wl_mask_f]
     A_fit_f   = A_full[:, wl_mask_f]
+    _known_f  = _known_eps_for_mask(wl_mask_f)
 
     lk_final     = _build_lnK(result1.x)
 
@@ -678,11 +760,16 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
         y_cache[:] = np.log(np.maximum(c0_arr, 1e-20))
 
     C_final      = _get_C_from_logKs(lk_final)
-    E_final = _solve_E(C_final, A_fit_f)
-    A_calc_final = C_final @ E_final
+    E_absorbed   = _solve_E(C_final, A_fit_f, _known_f)
+    A_calc_final = C_final @ E_absorbed
 
-    C_back, _, _, _ = np.linalg.lstsq(E_final.T, A_fit_f.T, rcond=None)
+    # C_back: back-project concentrations from absorbance using E_absorbed
+    C_back, _, _, _ = np.linalg.lstsq(E_absorbed.T, A_fit_f.T, rcond=None)
     C_back = np.clip(C_back.T, 0.0, None)
+
+    # Divide by path length to get true molar absorptivity ε [mM⁻¹ cm⁻¹]
+    path_cm = float((parsed.get("spectra") or {}).get("path_cm", 1.0))
+    E_final = E_absorbed / max(path_cm, 1e-12)
 
     x_exp = convert_exp_x(x_raw, x_expr, parsed, _fin_params, network)
 
@@ -702,7 +789,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
     def _obj_final(logk_trial):
         lk = _build_lnK(logk_trial)
         C  = _get_C_from_logKs(lk)
-        E = _solve_E(C, A_fit_f)
+        E = _solve_E(C, A_fit_f, _known_f)
         return float(np.sum((A_fit_f - C @ E) ** 2))
 
     _err_idx     = _hessian_errors(_obj_final, result1.x, ssr, len(residuals), len(fit_keys))
@@ -726,6 +813,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
         "x_exp":           x_exp,
         "C_back":          C_back,
         "E_final":         E_final,
+        "path_cm":         path_cm,
         "wavelengths_fit": wl_fit_f,
         "opt_wl_min":      opt_wl_min,
         "opt_wl_max":      opt_wl_max,

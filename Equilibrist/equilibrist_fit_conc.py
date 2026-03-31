@@ -263,7 +263,13 @@ def fit_parameters(parsed, network, exp_data, params, logK_vals, fit_keys, x_exp
                 result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds,
                                   options={'maxiter': maxiter, 'ftol': tolerance,
                                            'gtol': tolerance})
-                if np.isfinite(objective(result.x)) and objective(result.x) < obj_start * 0.999:
+                # Accept "no worse than 0.1% above start" as improved.
+                # This catches the common case where x0 is already at the global
+                # minimum (e.g. after a previous fit) and L-BFGS-B terminates in
+                # 0 steps returning objective ≈ obj_start with small float noise.
+                # Without this, improved=False triggers the wide Nelder-Mead
+                # (step=1.5) which can escape the correct minimum when data is sparse.
+                if np.isfinite(objective(result.x)) and objective(result.x) < obj_start * 1.001:
                     best_x = result.x.copy(); improved = True
             if use_neldermead and not improved:
                 result = _nm_fp(objective, x0, np.full(len(x0), 1.5))

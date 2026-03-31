@@ -606,13 +606,16 @@ def parse_script(text: str) -> dict:
         "plot_xmax":        3.0,
         "plot_x_expr":      None,
         "plot_y":           [],
+        "plot_ylabel":      None,
         "nmr":              None,   # None | {"mode": "shift"|"integration", "targets": [str]}
         "spectra":          None,   # None | {"transparent": [str]}
         "constraints":      [],     # parsed constraint objects (populated after knames known)
         "temperature_K":    298.15, # default 298.15 K; overridden by $temperature section
         "warnings":         [],     # non-fatal issues collected during parsing
+        "is_acid_base":     False,  # True when $reactions acid-base section is used
     }
     _raw_constraint_lines = []   # collected during section pass, parsed after all knames known
+    _acid_base_lines = []        # collected from $reactions acid-base section
 
     section = None
     for raw_line in text.splitlines():
@@ -628,6 +631,9 @@ def parse_script(text: str) -> dict:
             if section_raw.startswith("titrant"):
                 section = "titrant"
                 result["titrant_is_solid"] = "solid" in section_raw
+            elif section_raw == "reactions acid-base" or section_raw == "reactions acid-base solid":
+                section = "acid-base"
+                result["is_acid_base"] = True
             elif section_raw == "reactions":
                 section = "equilibria"   # map new name to internal key
             elif section_raw == "temperature":
@@ -635,7 +641,7 @@ def parse_script(text: str) -> dict:
             elif section_raw == "spectra":
                 section = "spectra"
                 if result["spectra"] is None:
-                    result["spectra"] = {"transparent": []}  # init on section entry
+                    result["spectra"] = {"transparent": [], "path_cm": 1.0, "read": []}  # init on section entry
             else:
                 section = section_raw
             continue
@@ -829,6 +835,7 @@ def parse_script(text: str) -> dict:
                         "logK_hi":    None,
                         "input_mode": "dg",
                         "dg_kcal":    _dg,
+                        "kname_auto": True,
                     })
 
                 elif rxn_type == "reversible_kinetic":
@@ -868,6 +875,7 @@ def parse_script(text: str) -> dict:
                         "input_mode": "dg",
                         "dg_act_kcal": _dg_act,
                         "dg_rxn_kcal": _dg_rxn,
+                        "kname_auto": True,
                     })
 
                 else:  # irreversible
@@ -892,6 +900,7 @@ def parse_script(text: str) -> dict:
                         "log_k":       _log_kf,
                         "input_mode":  "dg",
                         "dg_act_kcal": _dg_act,
+                        "kname_auto":  True,
                     })
 
             elif rxn_type == "equilibrium":
@@ -984,15 +993,18 @@ def parse_script(text: str) -> dict:
                 result["variables"][varname] = expression
 
         elif section == "plot":
-            m_xmax = re.match(rf"xmax\s*=\s*({num_re})", line)
-            m_x    = re.match(r"x\s*=\s*(.+)",           line)
-            m_y    = re.match(r"y\s*=\s*(.+)",           line)
+            m_xmax   = re.match(rf"xmax\s*=\s*({num_re})", line)
+            m_x      = re.match(r"x\s*=\s*(.+)",           line)
+            m_y      = re.match(r"y\s*=\s*(.+)",           line)
+            m_ylabel = re.match(r"ylabel\s*=\s*(.+)",       line)
             if m_xmax:
                 result["plot_xmax"] = float(m_xmax.group(1))
             if m_x and not m_xmax:   # "x = expr" but not "xmax = ..."
                 result["plot_x_expr"] = m_x.group(1).strip()
-            if m_y:
+            if m_y and not m_ylabel:
                 result["plot_y"] = [s.strip() for s in m_y.group(1).split(",") if s.strip()]
+            if m_ylabel:
+                result["plot_ylabel"] = m_ylabel.group(1).strip()
 
         elif section == "nmr":
             # "shift: Gtot"           -> fast-exchange chemical shift mode
@@ -1024,21 +1036,158 @@ def parse_script(text: str) -> dict:
 
         elif section == "spectra":
             # "transparent: H, X"  → species with zero absorbance everywhere
-            # Also accept "transparent:" with no species (all species absorb)
-            m_trans = re.match(r"transparent\s*:(.*)", line, re.IGNORECASE)
+            # "non-emissive: H, X" → synonym for transparent:
+            # "path = 0.2"         → path length in cm (default 1.0)
+            # "read: cage, G"      → species whose spectra are read from a second sheet
+            m_trans = re.match(r"(?:transparent|non-emissive)\s*:(.*)", line, re.IGNORECASE)
+            m_path  = re.match(r"path\s*=\s*(.+)", line, re.IGNORECASE)
+            m_read  = re.match(r"read\s*:(.*)", line, re.IGNORECASE)
             if m_trans:
                 raw = m_trans.group(1).strip()
                 transparent = [t.strip() for t in raw.split(",") if t.strip()] if raw else []
                 if result["spectra"] is None:
-                    result["spectra"] = {"transparent": transparent}
+                    result["spectra"] = {"transparent": transparent, "path_cm": 1.0, "read": []}
                 else:
                     result["spectra"]["transparent"] = transparent
+            elif m_read:
+                raw = m_read.group(1).strip()
+                read_sp = [s.strip() for s in raw.split(",") if s.strip()] if raw else []
+                if result["spectra"] is None:
+                    result["spectra"] = {"transparent": [], "path_cm": 1.0, "read": read_sp}
+                else:
+                    result["spectra"]["read"] = read_sp
+            elif m_path:
+                try:
+                    path_val = float(m_path.group(1).strip())
+                    if path_val <= 0:
+                        raise ValueError("path length must be positive")
+                    if result["spectra"] is None:
+                        result["spectra"] = {"transparent": [], "path_cm": path_val, "read": []}
+                    else:
+                        result["spectra"]["path_cm"] = path_val
+                except ValueError as _e:
+                    pass  # silently ignore bad path values in fast parse
 
         elif section == "constraints":
             # Collect raw lines; parsed after all parameter names are known
             _raw_constraint_lines.append(line)
 
-    # ── Deduplicate knames across both equilibria and kinetics ───────────────
+        elif section == "acid-base":
+            # Collect raw lines; processed after main loop
+            _acid_base_lines.append(line)
+
+    # ── $reactions acid-base post-processing ────────────────────────────────
+    def _is_num(s):
+        try: float(s); return True
+        except ValueError: return False
+
+    if _acid_base_lines:
+        _kw_already = any(
+            "H2O" in [sp for _, sp in eq["reactants"]] and
+            any(sp == "OH" for _, sp in eq["products"])
+            for eq in result["equilibria"]
+        )
+        # Auto-inject Kw reaction if not already present
+        if not _kw_already:
+            result["equilibria"].append({
+                "type":      "equilibrium",
+                "reactants": [(1, "H2O")],
+                "products":  [(1, "H"), (1, "OH")],
+                "kname":     "Kw",
+                "logK":      -14.0,
+                "logK_lo":   None,
+                "logK_hi":   None,
+            })
+        # Auto-inject H2O0 if not in concentrations
+        if "H2O0" not in result["concentrations"]:
+            result["concentrations"]["H2O0"] = 1000.0   # 1 M in mM
+        # Auto-inject pH variable if not already defined
+        if "pH" not in result["variables"]:
+            result["variables"]["pH"] = "-log(H * 1e-3)"
+
+        # Parse each acid-base line
+        for _ab_line in _acid_base_lines:
+            _parts = [p.strip() for p in _ab_line.split(";")]
+
+            # ── Detect compact ladder: last part is comma-separated pKa list ──
+            # e.g. "H3PO4; H2PO4; HPO4; PO4; 2.15, 7.20, 12.35"
+            _last = _parts[-1] if _parts else ""
+            _pka_candidates = [s.strip() for s in _last.split(",")]
+            _is_ladder = (len(_pka_candidates) > 1 and
+                          all(_is_num(s) for s in _pka_candidates))
+
+            if _is_ladder:
+                _species_ladder = _parts[:-1]   # all but the last (pKa) part
+                _pkas_ladder    = [float(s) for s in _pka_candidates]
+                if len(_species_ladder) - 1 != len(_pkas_ladder):
+                    result["warnings"].append(
+                        f"Ladder acid-base line '{_ab_line}': "
+                        f"{len(_species_ladder)} species but {len(_pkas_ladder)} pKa values — "
+                        f"expected {len(_species_ladder)-1} pKa values "
+                        f"(one per dissociation step).")
+                    continue
+                for _i in range(len(_pkas_ladder)):
+                    _a = _species_ladder[_i]
+                    _b = _species_ladder[_i + 1]
+                    result["equilibria"].append({
+                        "type":      "equilibrium",
+                        "reactants": [(1, _a)],
+                        "products":  [(1, _b), (1, "H")],
+                        "kname":     f"K_{_a}",
+                        "logK":      -_pkas_ladder[_i],
+                        "logK_lo":   None,
+                        "logK_hi":   None,
+                    })
+                continue
+
+            if len(_parts) == 2:
+                # Acid; pKa  → conjugate base = strip trailing H
+                _acid, _pka_str = _parts
+                if _acid == "OH":
+                    result["warnings"].append(
+                        f"'OH' is the hydroxide ion, not an acid. "
+                        f"In acid-base mode, NaOH titrations use '$titrant OHt = 10 mM' — "
+                        f"OH is already present from the water autoionization equilibrium.")
+                    continue
+                if not _acid.endswith("H"):
+                    result["warnings"].append(
+                        f"Acid-base line '{_ab_line}': '{_acid}' does not end in 'H'. "
+                        f"Specify the conjugate base explicitly, e.g. '{_acid}; ConjugateBase; {_pka_str}'.")
+                    continue
+                _base = _acid[:-1]
+            elif len(_parts) == 3:
+                # Acid; ConjugateBase; pKa
+                _acid, _base, _pka_str = _parts
+            else:
+                result["warnings"].append(
+                    f"Cannot parse acid-base line: '{_ab_line}'. "
+                    f"Expected 'Acid; pKa', 'Acid; ConjugateBase; pKa', "
+                    f"or 'A; B; C; D; pKa1, pKa2, pKa3' (ladder).")
+                continue
+            try:
+                _pka = float(_pka_str)
+            except ValueError:
+                result["warnings"].append(
+                    f"Cannot parse pKa value '{_pka_str}' in acid-base line: '{_ab_line}'.")
+                continue
+            _kname = f"K_{_acid}"
+            result["equilibria"].append({
+                "type":      "equilibrium",
+                "reactants": [(1, _acid)],
+                "products":  [(1, _base), (1, "H")],
+                "kname":     _kname,
+                "logK":      -_pka,
+                "logK_lo":   None,
+                "logK_hi":   None,
+            })
+
+    # ── Shared vs accidental kname collisions ───────────────────────────────
+    # If a user explicitly writes the same kname on two reactions they want
+    # them to share one parameter (e.g. "log K1 = 4.0" on both).
+    # Only auto-generated DG-mode names (tagged kname_auto=True) can collide
+    # by accident and need renaming.  User-typed names that appear on multiple
+    # reactions are intentional — leave them alone; the solver naturally uses
+    # the same logK_vals entry for both.
     from collections import Counter
     all_knames = ([eq["kname"] for eq in result["equilibria"]] +
                   [r["kname"]  for r in result["kinetics"]] +
@@ -1047,14 +1196,14 @@ def parse_script(text: str) -> dict:
     kname_seen   = Counter()
     for eq in result["equilibria"]:
         kn = eq["kname"]
-        if kname_counts[kn] > 1:
+        if kname_counts[kn] > 1 and eq.get("kname_auto", False):
             kname_seen[kn] += 1
             eq["kname"] = f"{kn}{kname_seen[kn]}"
     for rxn in result["kinetics"]:
         for attr in ("kname", "krname"):
             if attr in rxn:
                 kn = rxn[attr]
-                if kname_counts[kn] > 1:
+                if kname_counts[kn] > 1 and rxn.get("kname_auto", False):
                     kname_seen[kn] += 1
                     rxn[attr] = f"{kn}{kname_seen[kn]}"
 
@@ -1096,6 +1245,7 @@ def check_script_syntax(text: str) -> list:
 
     errors  = []
     section = None
+    _has_acid_base_section = False
 
     # ── Cross-section tracking (populated during line pass) ──────────────
     defined_concs         = {}   # name -> (lineno, raw)
@@ -1130,12 +1280,15 @@ def check_script_syntax(text: str) -> list:
             base = sec_raw.split()[0]
             if base == "titrant":
                 section = "titrant"
+            elif sec_raw == "reactions acid-base":
+                section = "acid-base"
+                _has_acid_base_section = True
             elif base in VALID_SECTIONS:
                 section = base
                 if "solid" in sec_raw and base != "titrant":
                     err(lineno, raw_line, f"'solid' modifier is only valid for $titrant, not ${base}.")
             else:
-                err(lineno, raw_line, f"Unknown section '${sec_raw}'. Valid sections: {', '.join('$'+s for s in sorted(VALID_SECTIONS))}.")
+                err(lineno, raw_line, f"Unknown section '${sec_raw}'. Valid sections: {', '.join('$'+s for s in sorted(VALID_SECTIONS))} or '$reactions acid-base'.")
                 section = None
             continue
 
@@ -1356,15 +1509,15 @@ def check_script_syntax(text: str) -> list:
                     err(lineno, raw_line, "Variable expression is empty.")
                 else:
                     defined_vars[m.group(1)] = (lineno, raw_line)
-                    for _tok in (_re.findall(r"[A-Za-z_]\w*", expr) +
+                    for _tok in (_re.findall(r"(?<!\d)[A-Za-z_]\w*", expr) +
                                  _re.findall(r"%\w+", expr)):
                         var_expr_refs.append((lineno, raw_line, _tok))
 
         # ── $plot ─────────────────────────────────────────────────────
         elif section == "plot":
-            m = _re.match(r"^(xmax|x|y)\s*=\s*(.+)$", line, _re.IGNORECASE)
+            m = _re.match(r"^(xmax|x|y|ylabel)\s*=\s*(.+)$", line, _re.IGNORECASE)
             if not m:
-                err(lineno, raw_line, "Expected one of: xmax = value, x = expression, y = species1, species2, …")
+                err(lineno, raw_line, "Expected one of: xmax = value, x = expression, y = species1, species2, …, ylabel = label")
             else:
                 key, val = m.group(1).lower(), m.group(2).strip()
                 if key == "xmax" and not is_number(val):
@@ -1372,11 +1525,10 @@ def check_script_syntax(text: str) -> list:
                 elif key == "y":
                     for _name in [n.strip() for n in val.split(",") if n.strip()]:
                         plot_y_refs.append((lineno, raw_line, _name))
-                        # Also register %name in defined_vars if not already there
-                        # so the cross-section check doesn't flag it as undefined
                 elif key == "x":
                     for _tok in _re.findall(r"[A-Za-z_]\w*", val):
                         plot_x_tokens.append((lineno, raw_line, _tok))
+                # ylabel: free-form string, no validation needed
 
         # ── $nmr ─────────────────────────────────────────────────────
         elif section == "nmr":
@@ -1395,9 +1547,59 @@ def check_script_syntax(text: str) -> list:
 
         # ── $spectra ──────────────────────────────────────────────────
         elif section == "spectra":
-            m = _re.match(r"^transparent\s*:\s*(.*)$", line, _re.IGNORECASE)
+            m = _re.match(r"^((?:transparent|non-emissive)\s*:|path\s*=|read\s*:)\s*(.*)$", line, _re.IGNORECASE)
             if not m:
-                err(lineno, raw_line, "Only 'transparent: Species1, Species2, …' is valid inside $spectra (or leave the section body empty).")
+                err(lineno, raw_line, "Only 'transparent: Species1, …', 'read: Species1, …', or 'path = value' are valid inside $spectra (or leave the section body empty).")
+            elif m.group(1).lower().startswith("path"):
+                val = m.group(2).strip()
+                if not is_number(val):
+                    err(lineno, raw_line, f"path length value '{val}' is not a valid number.")
+                elif float(val) <= 0:
+                    err(lineno, raw_line, f"path length must be positive (got {val} cm).")
+
+        # ── $reactions acid-base ───────────────────────────────────────
+        elif section == "acid-base":
+            _ab_parts = [p.strip() for p in line.split(";")]
+            # Detect compact ladder: last part is comma-separated pKa list
+            _last_ab = _ab_parts[-1] if _ab_parts else ""
+            _pka_cands = [s.strip() for s in _last_ab.split(",")]
+            _is_ladder_ab = (len(_pka_cands) > 1 and
+                             all(is_number(s) for s in _pka_cands))
+            if _is_ladder_ab:
+                _sp_ladder = _ab_parts[:-1]
+                if len(_sp_ladder) - 1 != len(_pka_cands):
+                    err(lineno, raw_line,
+                        f"Ladder format: {len(_sp_ladder)} species but {len(_pka_cands)} pKa values — "
+                        f"expected {len(_sp_ladder)-1} pKa values (one per dissociation step).")
+                else:
+                    for _sp in _sp_ladder:
+                        reaction_species.update([_sp, "H", "H2O", "OH"])
+            elif len(_ab_parts) == 2:
+                _acid, _pka_str = _ab_parts
+                if _acid == "OH":
+                    err(lineno, raw_line,
+                        "'OH' is the hydroxide ion, not an acid. "
+                        "In acid-base mode, NaOH titrations use '$titrant OHt = 10 mM' — "
+                        "OH is already present from the water autoionization equilibrium.")
+                elif not _acid.endswith("H"):
+                    err(lineno, raw_line,
+                        f"Acid '{_acid}' does not end in 'H'. "
+                        f"Specify the conjugate base explicitly, e.g. '{_acid}; ConjugateBase; {_pka_str}'.")
+                elif not is_number(_pka_str):
+                    err(lineno, raw_line, f"pKa value '{_pka_str}' is not a valid number.")
+                else:
+                    _base = _acid[:-1]
+                    reaction_species.update([_acid, _base, "H", "H2O", "OH"])
+            elif len(_ab_parts) == 3:
+                _acid, _base, _pka_str = _ab_parts
+                if not is_number(_pka_str):
+                    err(lineno, raw_line, f"pKa value '{_pka_str}' is not a valid number.")
+                else:
+                    reaction_species.update([_acid, _base, "H", "H2O", "OH"])
+            else:
+                err(lineno, raw_line,
+                    "Expected 'Acid; pKa', 'Acid; ConjugateBase; pKa', "
+                    "or 'A; B; C; D; pKa1, pKa2, pKa3' (ladder).")
 
     # ── Cross-section validation ──────────────────────────────────────────
     # Each 'X0' in $concentrations implicitly defines 'X' as a free species
@@ -1408,12 +1610,15 @@ def check_script_syntax(text: str) -> list:
     for _tkey in defined_titrant:
         _tfree = _tkey[:-1] if _tkey.endswith('t') else _tkey
         titrant_x0_names.add(_tfree + '0')
+    # $reactions acid-base auto-injects H2O0, pH, H, OH, H2O into the namespace
+    _ab_auto_names = {"H2O0", "H2O", "H", "OH", "pH"} if _has_acid_base_section else set()
     valid_names = (reaction_species
                    | set(defined_concs)
                    | set(defined_titrant)
                    | set(defined_vars)
                    | implicit_species
-                   | titrant_x0_names)
+                   | titrant_x0_names
+                   | _ab_auto_names)
     vol_names   = set(defined_vols)
 
     # Concentrations defined but never used in any reaction, plot x, plot y, or variable expression
@@ -1442,8 +1647,13 @@ def check_script_syntax(text: str) -> list:
             err(_ln, _raw,
                 f"'{_name}' in '$plot y' is not defined as a species, concentration, titrant, or variable.")
 
+    # Math function names available in expressions — not species/variables
+    _MATH_NAMES = {"log", "log10", "ln", "exp", "sqrt", "abs", "pi"}
+
     # All identifier tokens in $plot x expression must be defined
     for _ln, _raw, _tok in plot_x_tokens:
+        if _tok in _MATH_NAMES:
+            continue   # built-in math function — always valid
         if _tok in vol_names:
             err(_ln, _raw,
                 f"'{_tok}' is a volume ($volumes) and cannot be used in a '$plot x' expression.")
@@ -1459,6 +1669,8 @@ def check_script_syntax(text: str) -> list:
 
     # All identifier tokens in $variables expressions must be defined
     for _ln, _raw, _tok in var_expr_refs:
+        if _tok in _MATH_NAMES:
+            continue   # built-in math function — always valid
         if _tok in vol_names:
             err(_ln, _raw,
                 f"'{_tok}' is a volume ($volumes) and cannot be used in a '$variables' expression.")

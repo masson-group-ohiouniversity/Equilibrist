@@ -331,20 +331,26 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
 
     x0  = np.concatenate([np.array([logk_dict[k] for k in fit_keys]), _x0_c])
     n_p = len(x0)
+    # Global timer starts here — covers Phase 1 AND main optimisation
+    _fit_start = time.time()
+
     # Phase 1: warm-start logK before joint optimisation
     if _n_c > 0 and _n_k > 0:
-        def _phase1_obj_p(lk_vec):
+        class _TimeoutP1(Exception): pass
+        def _phase1_obj_p(lk_vec, _t0=_fit_start, _tlim=timeout_s):
+            if time.time() - _t0 > _tlim * 0.4:
+                raise _TimeoutP1()
             return objective(np.concatenate([lk_vec, x0[_n_k:]]))
         _sp1 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                          for i in range(_n_k)])
         try:
             _r1 = minimize(_phase1_obj_p, x0[:_n_k], method="Nelder-Mead",
-                           options={"maxiter": maxiter//2,
+                           options={"maxiter": maxiter//10,
                                     "xatol": tolerance,
                                     "fatol": tolerance * 1e-4,
                                     "adaptive": True, "initial_simplex": _sp1})
             x0 = np.concatenate([_r1.x, x0[_n_k:]])
-        except Exception:
+        except (_TimeoutP1, Exception):
             pass
 
     _steps = np.array([1.5] * _n_k + [max(abs(_x0_c[i]) * 0.1, 0.05)
@@ -353,7 +359,7 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
                                      for i in range(n_p)])
 
     class _Timeout(Exception): pass
-    best_tracker = {"x": x0.copy(), "f": np.inf, "start": time.time(), "nit": 0}
+    best_tracker = {"x": x0.copy(), "f": np.inf, "start": _fit_start, "nit": 0}
 
     def _obj_timed(logk_trial):
         best_tracker["nit"] += 1
@@ -595,21 +601,27 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
 
     x0  = np.concatenate([np.array([logk_dict[k] for k in fit_keys]), _x0_c])
     n_p = len(x0)
+    # Global timer starts here — covers Phase 1 AND the re-fit loop
+    _global_start  = time.time()
+
     # Phase 1: warm-start logK before joint optimisation (run once, outside the re-fit loop)
     if _n_c > 0 and _n_k > 0:
-        def _phase1_obj_p(lk_vec):
+        class _TimeoutP1(Exception): pass
+        def _phase1_obj_p(lk_vec, _t0=_global_start, _tlim=timeout_s):
+            if time.time() - _t0 > _tlim * 0.4:
+                raise _TimeoutP1()
             _bc_ph1 = _get_bc(x0)  # frozen for this warm-start pass
             return objective(np.concatenate([lk_vec, x0[_n_k:]]), _bc_ph1)
         _sp1 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                          for i in range(_n_k)])
         try:
             _r1 = minimize(_phase1_obj_p, x0[:_n_k], method="Nelder-Mead",
-                           options={"maxiter": maxiter//2,
+                           options={"maxiter": maxiter//10,
                                     "xatol": tolerance,
                                     "fatol": tolerance * 1e-4,
                                     "adaptive": True, "initial_simplex": _sp1})
             x0 = np.concatenate([_r1.x, x0[_n_k:]])
-        except Exception:
+        except (_TimeoutP1, Exception):
             pass
 
     # ── Quick R² helper (no full stats overhead) ──────────────────────────────
@@ -646,13 +658,13 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
     # Stopping: global timeout OR max passes. No convergence heuristic — each
     # near-converged pass is very fast so running all _MAX_REFIT costs little.
     # When _n_c == 0, n_passes = 1 (constants-only, original behaviour).
-    n_passes   = 10_000 if _n_c > 0 else 1  # timeout is the real limit
+    n_passes   = 50 if _n_c > 0 else 1  # timeout is real limit; convergence exits early
 
     best_x_global  = x0.copy()
     _total_nit     = 0
     _any_timed_out = False
     result         = None
-    _global_start  = time.time()
+    # _global_start already set before Phase 1 — do not reset here
 
     for _pass in range(n_passes):
         # ── Time budget ──────────────────────────────────────────────────────
@@ -665,7 +677,10 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
         # ── Freeze bc from current x0 for this entire pass ──────────────────
         bc_pass = _get_bc(x0)
 
-        _pass_steps  = _make_simplex_steps()
+        _base_steps = _make_simplex_steps()
+        if _pass > 0 and _n_c > 0:
+            _base_steps[:_n_k] = 0.1  # K near optimum after pass 0; stay local
+        _pass_steps  = _base_steps
         init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _pass_steps[i]
                                          for i in range(n_p)])
 
@@ -673,7 +688,7 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
         _bt = {"x": x0.copy(), "f": np.inf, "start": time.time(), "nit": 0}
 
         def _obj_timed(params_trial, _tracker=_bt, _bc=bc_pass,
-                        _t0=_bt["start"], _tlim=_remaining):
+                        _t0=_global_start, _tlim=timeout_s):
             _tracker["nit"] += 1
             f = objective(params_trial, _bc)
             if f < _tracker["f"]:
@@ -961,29 +976,34 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
     x0  = np.concatenate([np.array([logk_dict[k] for k in fit_keys]), _x0_c])
     n_p = len(x0)
 
+    # Global timer starts here — covers Phase 1 AND the re-fit loop
+    _global_start  = time.time()
+
     # Phase 1: warm-start logK before joint optimisation
     if _n_c > 0 and _n_k > 0:
         _bc_ph1 = _get_bc_mixed(x0)
-        def _phase1_obj_p(lk_vec):
-            return objective(np.concatenate([lk_vec, x0[_n_k:]]), _bc_ph1)
+        class _TimeoutP1(Exception): pass
+        def _phase1_obj_p(lk_vec, _t0=_global_start, _tlim=timeout_s, _bc=_bc_ph1):
+            if time.time() - _t0 > _tlim * 0.4:
+                raise _TimeoutP1()
+            return objective(np.concatenate([lk_vec, x0[_n_k:]]), _bc)
         _sp1 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                          for i in range(_n_k)])
         try:
             _r1 = minimize(_phase1_obj_p, x0[:_n_k], method="Nelder-Mead",
-                           options={"maxiter": maxiter//2, "xatol": tolerance,
+                           options={"maxiter": maxiter//10, "xatol": tolerance,
                                     "fatol": tolerance * 1e-4, "adaptive": True,
                                     "initial_simplex": _sp1})
             x0 = np.concatenate([_r1.x, x0[_n_k:]])
-        except Exception:
+        except (_TimeoutP1, Exception):
             pass
 
     # ── Re-fit loop ─────────────────────────────────────────────────────────
-    n_passes       = 10_000 if _n_c > 0 else 1
+    n_passes       = 200 if _n_c > 0 else 1
     best_x_global  = x0.copy()
     _total_nit     = 0
     _any_timed_out = False
     result         = None
-    _global_start  = time.time()
 
     for _pass in range(n_passes):
         _elapsed   = time.time() - _global_start
@@ -993,7 +1013,10 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
             break
 
         bc_pass      = _get_bc_mixed(x0)
-        _pass_steps  = _make_simplex_steps()
+        _base_steps = _make_simplex_steps()
+        if _pass > 0 and _n_c > 0:
+            _base_steps[:_n_k] = 0.1  # K near optimum after pass 0; stay local
+        _pass_steps  = _base_steps
         init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _pass_steps[i]
                                          for i in range(n_p)])
 
@@ -1001,7 +1024,7 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
         _bt = {"x": x0.copy(), "f": np.inf, "start": time.time(), "nit": 0}
 
         def _obj_timed(params_trial, _tracker=_bt, _bc=bc_pass,
-                        _t0=_bt["start"], _tlim=_remaining):
+                        _t0=_global_start, _tlim=timeout_s):
             _tracker["nit"] += 1
             f = objective(params_trial, _bc)
             if f < _tracker["f"]:

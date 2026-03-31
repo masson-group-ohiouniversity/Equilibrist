@@ -30,13 +30,40 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
     C(t) from ODE integration; E solved analytically by lstsq; k optimised by Nelder-Mead.
     """
 
-    def _solve_E(C_mat, A_mat):
-        """Solve C @ E ≈ A for E, respecting allow_negative_eps flag."""
-        if allow_negative_eps:
-            E, _, _, _ = np.linalg.lstsq(C_mat, A_mat, rcond=None)
-            return E
-        return np.column_stack([_nnls(C_mat, A_mat[:, _j])[0]
-                                for _j in range(A_mat.shape[1])])
+    def _solve_E(C_mat, A_mat, known_E_rows=None):
+        """Solve C @ E ≈ A for E, respecting allow_negative_eps flag.
+        If known_E_rows is provided ({sp: eps_absorbed_array}), those rows are
+        pinned column-by-column.  A NaN value at column j means "no data at
+        this wavelength" — the species is solved freely there rather than
+        being pinned to ε = 0."""
+        n_wl = A_mat.shape[1]
+        if not known_E_rows:
+            if allow_negative_eps:
+                E, _, _, _ = np.linalg.lstsq(C_mat, A_mat, rcond=None)
+                return E
+            return np.column_stack([_nnls(C_mat, A_mat[:, _j])[0]
+                                    for _j in range(n_wl)])
+
+        # ── Per-wavelength column solve with partial pinning ───────────────
+        E = np.zeros((len(absorbers), n_wl))
+        for j in range(n_wl):
+            k_idx_j = [i for i, sp in enumerate(absorbers)
+                       if sp in known_E_rows and np.isfinite(known_E_rows[sp][j])]
+            u_idx_j = [i for i in range(len(absorbers)) if i not in k_idx_j]
+            for i in k_idx_j:
+                E[i, j] = known_E_rows[absorbers[i]][j]
+            if u_idx_j:
+                a_col = A_mat[:, j]
+                if k_idx_j:
+                    a_col = a_col - C_mat[:, k_idx_j] @ E[k_idx_j, j]
+                C_unk = C_mat[:, u_idx_j]
+                if allow_negative_eps:
+                    sol, _, _, _ = np.linalg.lstsq(C_unk, a_col, rcond=None)
+                else:
+                    sol, _ = _nnls(C_unk, a_col)
+                for li, gi in enumerate(u_idx_j):
+                    E[gi, j] = sol[li]
+        return E
 
     from scipy.optimize import minimize
     import time
@@ -98,10 +125,44 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
     if not absorbers:
         return False, {}, {}, "All species are transparent — nothing to fit"
 
+    # ── Known spectra (read: species whose ε is provided in sheet 2) ─────────
+    _path_cm_known = float(spectra_cfg.get("path_cm", 1.0))
+    _read_species  = set(spectra_cfg.get("read", []))
+    _raw_known_sp  = spectra_data.get("known_spectra_raw", {})
+
+    def _known_eps_for_mask(wl_mask_k):
+        """Return {sp: E_absorbed_row} for known absorbers, interpolated to wl_mask_k.
+        Values are NaN at wavelengths where the provided spectrum has no data
+        (empty cells). _solve_E treats NaN as "free" at that wavelength."""
+        wl_target = wavelengths[wl_mask_k]
+        out = {}
+        for sp in absorbers:
+            if sp not in _read_species or sp not in _raw_known_sp:
+                continue
+            wl_k, eps_k = _raw_known_sp[sp]
+            finite_mask = np.isfinite(eps_k)
+            if not np.any(finite_mask):
+                continue
+            wl_fin  = wl_k[finite_mask]
+            eps_fin = eps_k[finite_mask]
+            eps_interp = np.interp(wl_target, wl_fin, eps_fin,
+                                   left=np.nan, right=np.nan)
+            if not np.all(finite_mask):
+                finite_flag = finite_mask.astype(float)
+                flag_interp = np.interp(wl_target, wl_k, finite_flag,
+                                        left=np.nan, right=np.nan)
+                eps_interp = np.where(
+                    np.isfinite(flag_interp) & (flag_interp > 0.999),
+                    eps_interp, np.nan)
+            out[sp] = eps_interp * max(_path_cm_known, 1e-12)
+        return out
+
     wl_mask = (wavelengths >= wl_min) & (wavelengths <= wl_max)
     A_fit   = A_full[:, wl_mask]
     if A_fit.shape[1] == 0:
         return False, {}, {}, "No wavelengths in selected range"
+
+    _known = _known_eps_for_mask(wl_mask)
 
     n_pts  = len(t_exp)
 
@@ -132,7 +193,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         if curve is None:
             return 1e12
         C = _build_C(curve)
-        E = _solve_E(C, A_fit)
+        E = _solve_E(C, A_fit, _known)
         ssr = float(np.sum((A_fit - C @ E) ** 2))
         cp = constraints_penalty(constraints or [], lk, ssr_scale=ssr)
         return ssr + cp
@@ -143,7 +204,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         if curve is None:
             return 1e12
         C = _build_C(curve)
-        E = _solve_E(C, A_fit)
+        E = _solve_E(C, A_fit, _known)
         return float(np.sum((A_fit - C @ E) ** 2))
 
     class _Timeout(Exception):
@@ -246,11 +307,12 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         _curve1 = _simulate(result.x)
         if _curve1 is not None:
             _C1 = _build_C(_curve1)
-            _E1 = _solve_E(_C1, A_fit)
+            _E1 = _solve_E(_C1, A_fit, _known)
             wl_fit_now = wavelengths[wl_mask]
             wl_min, wl_max = _optimal_spectral_range(wl_fit_now, _E1, min_width_nm=50.0)
             wl_mask = (wavelengths >= wl_min) & (wavelengths <= wl_max)
             A_fit   = A_full[:, wl_mask]
+            _known  = _known_eps_for_mask(wl_mask)
             if A_fit.shape[1] > 0:
                 best_tracker["x"] = result.x.copy()
                 best_tracker["f"] = np.inf
@@ -279,11 +341,15 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
 
     C_final = _build_C(curve_final)
     wl_fit  = wavelengths[wl_mask]
-    E_final = _solve_E(C_final, A_fit)
-    A_calc  = C_final @ E_final
+    E_absorbed = _solve_E(C_final, A_fit, _known)
+    A_calc  = C_final @ E_absorbed
 
-    C_back, _, _, _ = np.linalg.lstsq(E_final.T, A_fit.T, rcond=None)
+    C_back, _, _, _ = np.linalg.lstsq(E_absorbed.T, A_fit.T, rcond=None)
     C_back = np.clip(C_back.T, 0.0, None)
+
+    # Divide by path length to get true molar absorptivity ε [mM⁻¹ cm⁻¹]
+    path_cm = float((parsed.get("spectra") or {}).get("path_cm", 1.0))
+    E_final = E_absorbed / max(path_cm, 1e-12)
 
     residuals = (A_fit - A_calc).ravel()
     ssr  = float(np.sum(residuals ** 2))
@@ -326,6 +392,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         "x_exp":           t_exp,
         "C_back":          C_back,
         "E_final":         E_final,
+        "path_cm":         path_cm,
         "wavelengths_fit": wl_fit,
         "opt_wl_min":      wl_min,
         "opt_wl_max":      wl_max,

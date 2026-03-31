@@ -10,19 +10,57 @@ from equilibrist_network import compute_variable_curve
 from equilibrist_kinetics import _collect_all_kinetic_species
 from equilibrist_curve import convert_exp_x
 
-__all__ = ['export_to_excel', 'generate_parameters_text', 'generate_kinetics_parameters_text', 'text_to_image', 'create_snapshot', '_export_kinetics_excel', 'load_experimental_data', 'load_spectra_data', '_pub_tight_bounds', '_pub_figure_bytes', '_pub_axis_range', '_pub_download_button', '_plot_backcalc_dots', '_infer_unit', '_infer_y_label',
+__all__ = ['export_to_excel', 'generate_parameters_text', 'generate_kinetics_parameters_text', 'text_to_image', 'create_snapshot', '_export_kinetics_excel', 'load_experimental_data', 'load_spectra_data', '_pub_tight_bounds', '_pub_figure_bytes', '_pub_axis_range', '_pub_download_button', '_plot_backcalc_dots', '_infer_unit', '_infer_y_label', '_has_log_units',
            'Image', 'ImageDraw', 'ImageFont']
 
 
-def export_to_excel(curve, x_vals, parsed, params, network, script_text, logK_vals,
-                    script_path=None, input_path=None):
+def _build_spectra_df(fit_stats: dict, all_species: list, parsed: dict):
     """
-    Export titration data to timestamped Excel file with 3 tabs.
+    Build a DataFrame for the 'spectra' export tab from post-fit data.
+
+    Layout (matches the pure-species spectra plot):
+      - Row 1  (header):  wavelength values in nm  → B1, C1, D1 …
+      - Col A  (index):   species names             → A2, A3, A4 …
+      - Body:             ε [mM⁻¹ cm⁻¹]; zeros for transparent / non-absorbing species
+
+    Returns None when no valid spectra-fit data is present in fit_stats.
+    """
+    fit_mode = fit_stats.get("fit_mode", "")
+    if fit_mode not in ("spectra", "kinetics_spectra"):
+        return None
+
+    absorbers   = fit_stats.get("absorbers", [])
+    E_final     = fit_stats.get("E_final")       # (n_absorbers, n_wl)  mM⁻¹ cm⁻¹
+    wavelengths = fit_stats.get("wavelengths_fit")
+
+    if E_final is None or wavelengths is None or not absorbers:
+        return None
+
+    absorber_map = {sp: E_final[i] for i, sp in enumerate(absorbers)}
+
+    # Include every species that appears in the model; transparent ones get zeros
+    rows = {}
+    for sp in all_species:
+        rows[sp] = absorber_map[sp] if sp in absorber_map else np.zeros(len(wavelengths))
+
+    # Columns = wavelengths (rounded to 2 dp for readability), index = species names
+    wl_cols = [round(float(w), 2) for w in wavelengths]
+    df = pd.DataFrame(rows, index=wl_cols).T
+    df.index.name = None   # keeps A1 empty
+    return df
+
+
+def export_to_excel(curve, x_vals, parsed, params, network, script_text, logK_vals,
+                    script_path=None, input_path=None, fit_stats=None):
+    """
+    Export titration data to timestamped Excel file with 3–4 tabs.
     
     Tabs:
-    1. "data": Simulation results (volume, x-axis, species, variables)  
-    2. "script": Original input script (one line per row)
+    1. "data":       Simulation results (volume, x-axis, species, variables)
+    2. "script":     Original input script (one line per row)
     3. "parameters": Current parameter values in script format (includes fitted values)
+    4. "spectra":    Pure-species molar absorptivities [mM⁻¹ cm⁻¹] — only when a
+                     UV-Vis spectra fit has been performed (fit_stats provided).
     """
     from io import BytesIO
     import openpyxl
@@ -129,6 +167,8 @@ def export_to_excel(curve, x_vals, parsed, params, network, script_text, logK_va
                 lines.append(f"x = {parsed['plot_x_expr']}")
             if parsed.get("plot_y"):
                 lines.append(f"y = {', '.join(parsed['plot_y'])}")
+            if parsed.get("plot_ylabel"):
+                lines.append(f"ylabel = {parsed['plot_ylabel']}")
         elif section == "nmr" and parsed.get("nmr"):
             nmr = parsed["nmr"]
             lines.append("$nmr")
@@ -170,6 +210,21 @@ def export_to_excel(curve, x_vals, parsed, params, network, script_text, logK_va
         df_data.to_excel(writer, sheet_name='data', index=False)
         df_script.to_excel(writer, sheet_name='script', index=False)
         df_parameters.to_excel(writer, sheet_name='parameters', index=False)
+
+        # ── TAB 4: SPECTRA (pure-species ε after a UV-Vis fit) ────────────────
+        _fs = fit_stats or {}
+        _df_sp = _build_spectra_df(_fs, network["all_species"], parsed)
+        if _df_sp is not None:
+            _df_sp.to_excel(writer, sheet_name='spectra', index=True)
+            _ws_sp = writer.book['spectra']
+            _ws_sp['A1'] = 'λ [nm]'
+            # Column-A width: widest species name
+            _max_sp = max((len(str(s)) for s in _df_sp.index), default=8)
+            _ws_sp.column_dimensions['A'].width = min(_max_sp + 2, 30)
+            # Uniform narrow width for wavelength columns
+            from openpyxl.utils import get_column_letter as _gcl
+            for _ci in range(2, _df_sp.shape[1] + 2):
+                _ws_sp.column_dimensions[_gcl(_ci)].width = 9
 
         wb = writer.book
 
@@ -274,12 +329,14 @@ def generate_parameters_text(parsed, params, logK_vals, xmax=None):
         param_lines.append("")
         param_lines.append("$plot")
         _xmax_s = xmax if xmax is not None else params['maxEquiv']
-        param_lines.append(f"xmax = {_xmax_s:.4f}")  # xmax first
+        param_lines.append(f"xmax = {_xmax_s:.4f}")
         if parsed.get("plot_x_expr"):
-            param_lines.append(f"x = {parsed['plot_x_expr']}")  # x second
+            param_lines.append(f"x = {parsed['plot_x_expr']}")
         if parsed.get("plot_y"):
             y_targets = ", ".join(parsed["plot_y"])
-            param_lines.append(f"y = {y_targets}")             # y third
+            param_lines.append(f"y = {y_targets}")
+        if parsed.get("plot_ylabel"):
+            param_lines.append(f"ylabel = {parsed['plot_ylabel']}")
     
     return "\n".join(param_lines)
 
@@ -324,6 +381,8 @@ def generate_kinetics_parameters_text(parsed, logk_dict, script_text="", xmax=No
             lines.append(f"xmax = {_xmax_k:.4f}")
             if parsed.get("plot_y"):
                 lines.append(f"y = {', '.join(parsed['plot_y'])}")
+            if parsed.get("plot_ylabel"):
+                lines.append(f"ylabel = {parsed['plot_ylabel']}")
         elif section == "nmr" and parsed.get("nmr"):
             nmr = parsed["nmr"]
             lines.append("$nmr")
@@ -472,6 +531,9 @@ def create_snapshot(fig, parsed, params, logK_vals, xmax=None,
     _cc = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     _ci = 0
     for trace in fig.data:
+        # Outlier traces (hollow markers) are excluded from publication figures
+        if getattr(trace, "name", "").startswith("_outlier_") or getattr(trace, "name", "").startswith("_sp_sel_"):
+            continue
         xs = list(trace.x) if trace.x is not None else []
         ys = list(trace.y) if trace.y is not None else []
         if not xs or not ys:
@@ -537,7 +599,8 @@ def create_snapshot(fig, parsed, params, logK_vals, xmax=None,
 # ─────────────────────────────────────────────
 
 def _export_kinetics_excel(kin_curve, t_vals, plot_y_names, parsed, logk_dict,
-                            script_text, variables, script_path=None, input_path=None):
+                            script_text, variables, script_path=None, input_path=None,
+                            fit_stats=None):
     """Export kinetics simulation results to Excel bytes."""
     from io import BytesIO
     import openpyxl
@@ -569,6 +632,19 @@ def _export_kinetics_excel(kin_curve, t_vals, plot_y_names, parsed, logk_dict,
         df_data.to_excel(writer, sheet_name="Data", index=False)
         df_script.to_excel(writer, sheet_name="Script", index=False)
         df_params.to_excel(writer, sheet_name="Parameters", index=False)
+
+        # ── TAB 4: SPECTRA (pure-species ε after a UV-Vis kinetics fit) ───────
+        _fs = fit_stats or {}
+        _df_sp = _build_spectra_df(_fs, all_sp, parsed)
+        if _df_sp is not None:
+            _df_sp.to_excel(writer, sheet_name="Spectra", index=True)
+            _ws_sp = writer.book["Spectra"]
+            _ws_sp['A1'] = 'λ [nm]'
+            _max_sp = max((len(str(s)) for s in _df_sp.index), default=8)
+            _ws_sp.column_dimensions['A'].width = min(_max_sp + 2, 30)
+            from openpyxl.utils import get_column_letter as _gcl
+            for _ci in range(2, _df_sp.shape[1] + 2):
+                _ws_sp.column_dimensions[_gcl(_ci)].width = 9
 
         wb = writer.book
 
@@ -656,15 +732,22 @@ def load_spectra_data(file_bytes) -> dict:
     """
     Read UV-Vis spectral data from an Excel file.
 
-    Format:
+    Sheet 1 (required) — experimental absorbance data:
       Row 0: col A = label (e.g. "V"), cols B+ = wavelength values (nm, floats)
       Rows 1+: col A = volume of titrant added (mL), cols B+ = absorbance
 
+    Sheet 2 (optional) — known pure-species spectra (same layout as the
+      exported "spectra" tab):
+      Row 0: col A = "λ [nm]" (or any label), cols B+ = wavelength values (nm)
+      Rows 1+: col A = species name, cols B+ = ε [mM⁻¹ cm⁻¹]
+      Stored under key "known_spectra_raw" as {species: (wl_arr, eps_arr)}.
+
     Returns:
       {
-        "wavelengths": np.ndarray (n_wavelengths,),
-        "x_vals":      np.ndarray (n_spectra,),   # volume added in mL
-        "A":           np.ndarray (n_spectra, n_wavelengths),
+        "wavelengths":       np.ndarray (n_wavelengths,),
+        "x_vals":            np.ndarray (n_spectra,),
+        "A":                 np.ndarray (n_spectra, n_wavelengths),
+        "known_spectra_raw": {species: (wl_arr, eps_arr)},   # may be empty
       }
     or {} on failure.
     """
@@ -688,12 +771,42 @@ def load_spectra_data(file_bytes) -> dict:
             return {}
 
         x_col_header = str(df.iloc[0, 0]) if df.shape[1] >= 1 else ""
-        return {
-            "wavelengths":   wavelengths[wl_valid],
-            "x_vals":        x_raw[valid],
-            "A":             A_raw[np.ix_(valid, wl_valid)],
-            "x_col_header":  x_col_header,
+        result = {
+            "wavelengths":       wavelengths[wl_valid],
+            "x_vals":            x_raw[valid],
+            "A":                 A_raw[np.ix_(valid, wl_valid)],
+            "x_col_header":      x_col_header,
+            "known_spectra_raw": {},
         }
+
+        # ── Sheet 2: optional known pure-species spectra ─────────────────────
+        try:
+            df2 = pd.read_excel(_io.BytesIO(file_bytes), header=None, sheet_name=1)
+            if df2.shape[0] >= 2 and df2.shape[1] >= 2:
+                wl2 = pd.to_numeric(pd.Series(df2.iloc[0, 1:].values), errors="coerce").values.astype(float)
+                wl2_valid = np.isfinite(wl2)
+                wl2_arr = wl2[wl2_valid]
+                known = {}
+                for row_idx in range(1, df2.shape[0]):
+                    sp_name = str(df2.iloc[row_idx, 0]).strip()
+                    if not sp_name or sp_name.lower() == "nan":
+                        continue
+                    eps_row = pd.to_numeric(
+                        pd.Series(df2.iloc[row_idx, 1:].values), errors="coerce"
+                    ).values.astype(float)
+                    eps_arr = eps_row[wl2_valid]
+                    # Only store rows that have at least one finite ε value.
+                    # NaNs are preserved: empty cells mean "no data at this
+                    # wavelength", not ε = 0.  The solver skips pinning at
+                    # wavelengths where ε is NaN.
+                    if len(wl2_arr) > 0 and np.any(np.isfinite(eps_arr)):
+                        known[sp_name] = (wl2_arr, eps_arr)
+                result["known_spectra_raw"] = known
+        except Exception:
+            pass  # no second sheet or unreadable — silently ignored
+
+        return result
+
     except Exception:
         return {}
 
@@ -703,6 +816,8 @@ def _pub_tight_bounds(plotly_fig):
     """Compute tight data bounds (xmin, xmax, ymin, ymax) from all traces."""
     xs_all, ys_all = [], []
     for trace in plotly_fig.data:
+        if getattr(trace, "name", "").startswith("_outlier_") or getattr(trace, "name", "").startswith("_sp_sel_"):
+            continue
         if trace.x is not None:
             xs_all.extend([v for v in trace.x if v is not None])
         if trace.y is not None:
@@ -753,6 +868,9 @@ def _pub_figure_bytes(plotly_fig, x_label: str = "", y_label: str = "",
     _cc = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     _ci = 0
     for trace in plotly_fig.data:
+        # Outlier traces (hollow markers) are excluded from publication figures
+        if getattr(trace, "name", "").startswith("_outlier_") or getattr(trace, "name", "").startswith("_sp_sel_"):
+            continue
         xs = list(trace.x) if trace.x is not None else []
         ys = list(trace.y) if trace.y is not None else []
         if not xs or not ys:
@@ -832,6 +950,8 @@ def _pub_axis_range(plotly_fig):
     # (so dots outside xmax don't inflate the y scale)
     ys_in_range = []
     for trace in plotly_fig.data:
+        if getattr(trace, "name", "").startswith("_outlier_") or getattr(trace, "name", "").startswith("_sp_sel_"):
+            continue
         if trace.x is None or trace.y is None:
             continue
         for xi, yi in zip(trace.x, trace.y):
@@ -869,7 +989,14 @@ def _pub_download_button(plotly_fig, key: str,
 
 def _plot_backcalc_dots(fig, c_bc_pairs: dict, plot_y_names: list,
                         variables: dict, all_species: list, trace_colors: dict,
-                        label_suffix: str = "(NMR)"):
+                        label_suffix: str = "(NMR)",
+                        excl_rows: set = None,
+                        bc_tag: str = "__nmr_bc__",
+                        excl_only: bool = False):
+    # excl_only=True: skip solid (included) markers, only render hollow (excluded) ones.
+    # Use this when the included points are already rendered from a different array
+    # (e.g. post-fit sp_concs) and you only want hollow markers from a full pre-fit
+    # array at the correct original row indices.
     """
     Add back-calculated concentration dots to `fig` for every quantity in
     `plot_y_names`.
@@ -923,20 +1050,37 @@ def _plot_backcalc_dots(fig, c_bc_pairs: dict, plot_y_names: list,
             continue   # not representable from back-calc data
 
         color = trace_colors.get(name, "#AAAAAA")
-        fig.add_trace(go.Scatter(
-            x=x_ref, y=y_arr,
-            mode="markers", name=f"{name} {label_suffix}",
-            marker=dict(color=color, size=6, symbol="circle"),
-            showlegend=True,
-        ))
+        x_ref_np = np.asarray(x_ref)
+        y_arr_np = np.asarray(y_arr)
+        excl = excl_rows or set()
+        inc = [i for i in range(n_pts) if i not in excl]
+        exc = [i for i in range(n_pts) if i in excl]
+        if inc and not excl_only:
+            fig.add_trace(go.Scatter(
+                x=x_ref_np[inc], y=y_arr_np[inc],
+                mode="markers", name=f"{name} {label_suffix}",
+                customdata=[[bc_tag, i] for i in inc],
+                marker=dict(color=color, size=6, symbol="circle"),
+                showlegend=True,
+            ))
+        if exc:
+            fig.add_trace(go.Scatter(
+                x=x_ref_np[exc], y=y_arr_np[exc],
+                mode="markers", name=f"_outlier_{name}_{label_suffix}",
+                customdata=[[bc_tag, i] for i in exc],
+                marker=dict(color=color, size=6, symbol="circle-open",
+                            line=dict(width=1.5, color=color)),
+                showlegend=False,
+            ))
 
 def _infer_unit(name, variables, species_set, _seen=None):
     """
     Infer the unit of a variable or species.
-    Returns: "mM", "fraction", or "unknown".
+    Returns: "mM", "fraction", "log", or "unknown".
     Species concentrations → "mM".
     Ratios of same-unit expressions → "fraction".
     Sums/differences of mM terms → "mM".
+    Expressions starting with log/ln → "log".
     """
     if _seen is None:
         _seen = set()
@@ -955,6 +1099,12 @@ def _infer_unit(name, variables, species_set, _seen=None):
         return "unknown"
 
     expr = variables[name].strip()
+
+    # Detect log/ln at top level → dimensionless log quantity
+    import re as _re_u
+    if _re_u.match(r"^-?\s*(?:log|log10|ln)\s*\(", expr, _re_u.IGNORECASE) or \
+       _re_u.match(r"^-?\s*(?:log|log10|ln)\s+\S", expr, _re_u.IGNORECASE):
+        return "log"
 
     # Try to detect division at the top level (not inside parens)
     depth = 0
@@ -1005,8 +1155,22 @@ def _infer_unit(name, variables, species_set, _seen=None):
     return "unknown"
 
 
+def _has_log_units(plot_y_names, parsed, network):
+    """Return True if any plotted quantity is a log-scale variable."""
+    variables   = parsed.get("variables", {})
+    all_species = set(network.get("all_species", []))
+    return any(_infer_unit(n, variables, all_species) == "log"
+               for n in plot_y_names)
+
+
 def _infer_y_label(plot_y_names, parsed, network):
-    """Return appropriate y-axis label based on the units of the plotted quantities."""
+    """Return appropriate y-axis label based on the units of the plotted quantities.
+    If parsed['plot_ylabel'] is set by the user, it always takes priority."""
+    # User-specified ylabel always wins
+    user_ylabel = parsed.get("plot_ylabel")
+    if user_ylabel:
+        return user_ylabel
+
     variables   = parsed.get("variables", {})
     all_species = set(network.get("all_species", []))
 
@@ -1015,12 +1179,16 @@ def _infer_y_label(plot_y_names, parsed, network):
         u = _infer_unit(name, variables, all_species)
         units.add(u)
 
+    if units <= {"log"}:
+        return "log (concentration / M)"
     if units <= {"fraction"}:
         return "Fraction"
     if units <= {"mM"}:
         return "Concentration [mM]"
     if "fraction" in units and "mM" in units:
         return "Concentration [mM] / Fraction"
+    if "log" in units:
+        return "log (concentration / M)"
     return "Concentration [mM]"
 
 
