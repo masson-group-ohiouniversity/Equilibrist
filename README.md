@@ -1,4 +1,4 @@
-# Equilibrist
+# Equilibrist v1.0
 
 A browser-based thermodynamic and kinetic solver built with Python and Streamlit.  
 Define a chemical system in a plain-text script, simulate titration or time-resolved curves, and fit binding or rate constants to experimental data.  
