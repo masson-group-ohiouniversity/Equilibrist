@@ -10,18 +10,18 @@ Runs entirely on your local machine — no data is sent anywhere.
 
 - **titrations** — arbitrary reaction networks, any stoichiometry, multiple products per reaction
 - **Kinetics simulations** — irreversible (`>`) and reversible (`<>`) steps, mixed equilibrium/kinetics scripts
-- **Free-energy input** — reactions defined via ΔG° (van 't Hoff) and ΔG‡ (Eyring) in kcal/mol
-- **Acid-base mode** — accepts pKa values directly; water equilibrium, water concentration, and a `pH` variable are injected automatically; ladder syntax for polyprotic acids
+- **Free-energy input** — reactions defined via free energy terms ΔG° and ΔG‡ in kcal/mol
+- **Acid-base mode** — accepts pKa values directly; ion product constant, water activity, and a `pH` variable are injected automatically; ladder syntax for polyprotic acids
 - **Solution and solid titrant modes** — volume-based dilution, or solid addition with fixed cell volume
-- **UV-Vis global spectral fitting** — Beer–Lambert analysis; molar absorptivities solved analytically (variable projection); known spectra for individual species can be provided in a second sheet of the data file via `read:` in `$spectra`, pinning those species' ε(λ) during the fit
+- **UV-Vis global spectral fitting** — Beer–Lambert analysis; molar absorptivities solved analytically (variable projection); known spectra for individual species can be provided in a second sheet of the data file, pinning those species' ε(λ) during the fit
 - **NMR fitting** — fast-exchange chemical shift, slow-exchange integration, and simultaneous mixed-mode
 - **Concentration fitting** — direct fitting of measured species concentrations (mM)
 - **Dual optimizer** — L-BFGS-B warm-start followed by Nelder-Mead; user-selectable per run
 - **Thermodynamic constraints** — inter-parameter relationships enforced as soft or hard penalties
 - **Thermodynamic cycle detection** — automatic warning on inconsistent K values
 - **Outlier flagging** — click any experimental data point to exclude it from fitting; excluded points are absent from all exported figures
-- **Excel export** — timestamped workbook with data, script, and parameters tabs; a fourth **spectra** tab (pure-species ε in mM⁻¹ cm⁻¹) is added automatically after any UV-Vis fit and can be reused directly as known-spectra input for a subsequent fit
-- **Publication-quality PDF export** — vector text, Arial 9 pt, inward ticks, editable in Illustrator
+- **Excel export** — timestamped workbook with data, script, and parameters tabs, and spectra of pure species
+- **Publication-quality PDF export** — vector text, editable in Illustrator
 - **In-app script editor** — edit and re-run without leaving the browser
 
 ---
