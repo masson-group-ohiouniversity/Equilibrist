@@ -1,0 +1,26 @@
+$concentrations
+H3PO40 = 1.0 mM
+H2O0 = 1 M
+
+$volumes
+V0 = 1.0 mL
+
+$titrant
+OHt = 10 mM
+R3Nt = 5.0 mM
+
+$reactions
+H3PO4 = H2PO4 + H;  log K1  = -2.15
+H2PO4 = HPO4  + H;  log K2  = -7.20
+HPO4  = PO4   + H;  log K3  = -12.35
+R3NH  = R3N   + H;  log K4  = -9.0
+H     + OH    = H2O; log Kw = 14.0
+
+$variables
+pH = -log10(H * 1e-3)
+
+$plot
+xmax = 4.0
+x = OH0/H3PO40
+y = pH
+ylabel = pH

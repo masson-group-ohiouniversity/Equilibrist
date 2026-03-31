@@ -1,0 +1,26 @@
+$concentrations
+CH3COOH0 = 1.0 mM
+H2O0 = 1 M
+
+$volumes
+V0 = 1.0 mL
+
+$titrant
+Et3Nt = 10 mM
+
+$reactions
+CH3COOH = CH3COO + H; log Kacid = -4.76
+Et3NH = Et3N + H; log Kamine = -10.0
+H2O = H + OH; log Kw = -14
+
+$variables
+pH = -log(H * 1e-3)
+
+
+$plot
+xmax = 3.0
+x = Et3N0/CH3COOH0
+y = pH
+ylabel = pH
+
+
