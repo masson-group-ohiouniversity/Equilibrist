@@ -11,7 +11,7 @@ Runs entirely on your local machine — no data is sent anywhere.
 - **Equilibrium titrations** — arbitrary reaction networks, any stoichiometry, multiple products per reaction
 - **Kinetics simulations** — irreversible (`>`) and reversible (`<>`) steps, mixed equilibrium/kinetics scripts
 - **Free-energy input** — reactions defined via ΔG° (van 't Hoff) and ΔG‡ (Eyring) in kcal/mol
-- **Acid-base mode** — `$reactions acid-base` accepts pKa values directly; water equilibrium, water concentration, and a `pH` variable are injected automatically; ladder syntax for polyprotic acids
+- **Acid-base mode** — accepts pKa values directly; water equilibrium, water concentration, and a `pH` variable are injected automatically; ladder syntax for polyprotic acids
 - **Solution and solid titrant modes** — volume-based dilution, or solid addition with fixed cell volume
 - **UV-Vis global spectral fitting** — Beer–Lambert analysis; molar absorptivities solved analytically (variable projection); known spectra for individual species can be provided in a second sheet of the data file via `read:` in `$spectra`, pinning those species' ε(λ) during the fit
 - **NMR fitting** — fast-exchange chemical shift, slow-exchange integration, and simultaneous mixed-mode
