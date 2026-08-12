@@ -941,7 +941,8 @@ def bootstrap_kinetics(parsed, exp_data, logk_dict, fit_keys, *,
     Each iteration re-integrates the ODE system, so we keep the default
     ``n_bootstrap`` at 500 (raise it when running with ``n_jobs > 1``).
     """
-    from equilibrist_kinetics import fit_kinetics, compute_kinetics_curve
+    from equilibrist_kinetics import (fit_kinetics, compute_kinetics_curve,
+                                      _augment_curve_with_variables)
 
     t0 = time.perf_counter()
     fit_conc_keys = list(fit_conc_keys or [])
@@ -965,6 +966,9 @@ def bootstrap_kinetics(parsed, exp_data, logk_dict, fit_keys, *,
     # Run the model forward at fitted parameters to get y_calc per species
     final_logk = dict(logk_dict); final_logk.update(fitted_logks)
     sim_curve = compute_kinetics_curve(parsed, final_logk, t_max, n_pts)
+    # Data columns may name $variables ('%GH') rather than raw species; without
+    # this the per-species match below finds nothing and the bootstrap aborts.
+    sim_curve = _augment_curve_with_variables(parsed, sim_curve)
     t_grid = np.asarray(sim_curve.get("t", []), dtype=float)
 
     # Per-species (species_name → (t_obs, y_obs, y_calc))

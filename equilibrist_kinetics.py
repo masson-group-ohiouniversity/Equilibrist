@@ -6,10 +6,10 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
 from scipy.optimize import minimize
-from equilibrist_network import solve_equilibria_general
+from equilibrist_network import solve_equilibria_general, compute_variable_curve
 from equilibrist_parser import constraints_penalty
 
-__all__ = ['_kinetics_reaction_label', '_rate_constant_units', '_equilibrium_constant_units', '_collect_all_kinetic_species', 'build_kinetics_logk_dict', 'compute_kinetics_curve', 'fit_kinetics']
+__all__ = ['_kinetics_reaction_label', '_rate_constant_units', '_equilibrium_constant_units', '_collect_all_kinetic_species', 'build_kinetics_logk_dict', 'compute_kinetics_curve', '_augment_curve_with_variables', 'fit_kinetics']
 
 
 def _kinetics_reaction_label(rxn: dict) -> str:
@@ -217,6 +217,42 @@ def compute_kinetics_curve(parsed: dict, logk_dict: dict, t_max: float, n_pts: i
     return out
 
 
+def _augment_curve_with_variables(parsed: dict, curve: dict) -> dict:
+    """
+    Add ``$variables`` columns to a curve returned by ``compute_kinetics_curve``.
+
+    ``compute_kinetics_curve`` emits raw species concentrations only ('G', 'GH',
+    ...).  Experimental data columns, however, are very often expression
+    variables such as '%GH = 100 * GH/(G+GH)'.  Without this step, residual code
+    that looks a column up by name in the curve dict silently finds nothing.
+
+    Evaluation is delegated to ``compute_variable_curve`` so that dependency
+    ordering, %-name sanitisation and the chemistry math namespace (log = log10,
+    ln, exp, sqrt) behave exactly as they do everywhere else in Equilibrist.
+
+    The curve dict is modified in place and also returned.  Real species are
+    never shadowed: a variable whose name collides with a species is skipped.
+    """
+    variables = parsed.get("variables") or {}
+    if curve is None or not variables:
+        return curve
+
+    t_vals = curve.get("t")
+    if t_vals is None:
+        return curve
+
+    network = {"all_species": _collect_all_kinetic_species(parsed)}
+    for var_name in variables:
+        if var_name in curve:
+            continue   # a real species of the same name wins
+        try:
+            curve[var_name] = compute_variable_curve(
+                var_name, variables, curve, network, np.asarray(t_vals))
+        except Exception:
+            pass       # leave the column absent rather than inventing values
+    return curve
+
+
 def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
                  t_max: float, n_pts: int, tolerance: float, maxiter: int,
                  timeout_s: float = 30.0, constraints=None, fit_conc_keys=None,
@@ -297,6 +333,23 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
     if len(exp_points) < n_p:
         return False, {}, {}, "Too few data points"
 
+    # ── Guard: every experimental column must map to a simulated quantity ────
+    # A column that matches neither a species nor a $variables entry can never
+    # contribute a residual.  Left unchecked this produced an empty residual
+    # list, a constant objective (no optimisation at all) and SSR = 0 → R² = 1,
+    # i.e. a silent "perfect fit" on data that was never used.
+    _sim_names = set(_collect_all_kinetic_species(parsed)) \
+               | set((parsed.get("variables") or {}).keys())
+    _exp_cols  = [c for c in exp_data if not str(c).startswith("_")]
+    _unmatched = [c for c in _exp_cols if c not in _sim_names]
+    if len(_unmatched) == len(_exp_cols):
+        return False, {}, {}, (
+            "No experimental column matches a simulated quantity — nothing to "
+            f"fit. Data columns: {', '.join(map(str, _exp_cols)) or '(none)'}. "
+            f"Available: {', '.join(sorted(_sim_names))}. Check that the column "
+            "headers in your data file match the species or $variables names in "
+            "the script.")
+
     def _simulate(params_vec):
         lk_vec, conc_d = _unpack_concs(params_vec)
         current_logk = dict(logk_dict)
@@ -305,7 +358,9 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
         cur_parsed = _patched_parsed(conc_d) if conc_d else parsed
         try:
             curve = compute_kinetics_curve(cur_parsed, current_logk, t_max, n_pts)
-            return curve
+            # Experimental columns may name $variables ('%GH'), not just raw
+            # species — evaluate them so residuals can actually be formed.
+            return _augment_curve_with_variables(cur_parsed, curve)
         except Exception:
             return None
 
@@ -416,9 +471,16 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
     residuals = np.array(residuals)
     y_obs     = np.array(y_obs)
     ssr  = float(np.sum(residuals ** 2))
-    sst  = float(np.sum((y_obs - y_obs.mean()) ** 2)) if len(y_obs) > 1 else 1.0
-    r2   = 1.0 - ssr / max(sst, 1e-30)
-    rmse = float(np.sqrt(ssr / len(residuals))) if len(residuals) > 0 else 0.0
+    if len(y_obs) > 1:
+        sst = float(np.sum((y_obs - y_obs.mean()) ** 2))
+        r2  = 1.0 - ssr / max(sst, 1e-30)
+    else:
+        # Fewer than two usable points: R² is undefined.  Reporting 1.0 here
+        # (the old fallback of sst = 1.0 with ssr = 0.0) claimed a perfect fit
+        # for a fit that never happened.
+        sst = float("nan")
+        r2  = float("nan")
+    rmse = float(np.sqrt(ssr / len(residuals))) if len(residuals) > 0 else float("nan")
 
     # Jacobian-based parameter errors (relative step, covers logK and conc params).
     # Skipped when compute_hessian=False (bootstrap workers).
@@ -486,6 +548,14 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
                             for c, v in _per_col_yc.items()},
     }
 
+    if n_d == 0:
+        return False, fitted_logks, stats, (
+            "Fit produced no usable residuals — the simulated curve could not be "
+            "evaluated at any experimental point.")
+
     _conv = result.success or ssr < 1e-6 or (not timed_out and _r2 >= 0.99)
     _msg  = "Kinetics fit complete"
+    if _unmatched:
+        _msg += (" (ignored unmatched data column(s): "
+                 + ", ".join(map(str, _unmatched)) + ")")
     return _conv or not timed_out, fitted_logks, stats, _msg
