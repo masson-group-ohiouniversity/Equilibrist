@@ -159,7 +159,7 @@ Press **Ctrl + C** to stop any running instance, then relaunch with `streamlit r
 
 ## Citation
 
-If Equilibrist contributes to a publication, please cite the Equilibrist paper: *J. Chem. Inf. Model.* **2026**, DOI [10.1021/acs.jcim.6c01004](https://doi.org/10.1021/acs.jcim.6c01004).
+If Equilibrist contributes to a publication, please cite: E. Masson, *Equilibrist: A Browser-Based Platform for Fitting Equilibrium and Rate Constants from Optical and NMR Data*, *J. Chem. Inf. Model.* **2026**, *66*, 9976–9988, DOI [10.1021/acs.jcim.6c01004](https://doi.org/10.1021/acs.jcim.6c01004) (open access, CC BY 4.0). The PDF is attached to each GitHub release.
 
 ---
 
