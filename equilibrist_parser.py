@@ -626,6 +626,226 @@ def _eval_kspace_expr(expr_str, logK_dict, param_names):
         raise ValueError(f"Cannot evaluate K-space expression '{expr_str}': {exc}") from exc
 
 
+class FitTrace:
+    """Records the trial points of one fit so that the app can say how the
+    fit ended: number of evaluations, elapsed time, and how much the
+    constants were still moving among the last trial points (``final_spread``,
+    in the units of the parameter vector — log K for constants).
+
+    Usage:  _trace = FitTrace()  before the objective;  _trace(x)  as the
+    first line of the objective;  stats.update(_trace.summary(result,
+    timed_out, tolerance))  when the stats are assembled."""
+
+    def __init__(self):
+        import collections
+        self.n = 0
+        self.recent = collections.deque(maxlen=64)
+        self._deque_cls = collections.deque
+        self.t0 = __import__("time").time()
+
+    def __call__(self, x):
+        import numpy as _np
+        try:
+            xa = _np.asarray(x, dtype=float).ravel()
+        except Exception:
+            return
+        if self.n == 0:
+            # the final Nelder-Mead simplex has n+1 vertices: keep about that many
+            self.recent = self._deque_cls(maxlen=max(3, xa.size + 2))
+        self.n += 1
+        self.recent.append(xa.copy())
+
+    def summary(self, result, timed_out, tolerance) -> dict:
+        import numpy as _np
+        try:
+            spread = (float(_np.max(_np.ptp(_np.array(list(self.recent)), axis=0)))
+                      if len(self.recent) > 1 else None)
+        except Exception:
+            spread = None
+        reason = ("timeout" if timed_out else
+                  ("tolerance" if getattr(result, "success", False) else "maxiter"))
+        return {"n_evals": int(self.n), "stop_reason": reason, "final_spread": spread,
+                "elapsed_s": __import__("time").time() - self.t0,
+                "tolerance": float(tolerance)}
+
+
+import threading as _threading
+import contextlib as _contextlib
+
+_SIMPLEX = _threading.local()
+
+
+def simplex_step(default: float) -> float:
+    """Initial Nelder-Mead step (log units) for the constants.
+
+    ``default`` (1.5) is right for a cold start from user guesses.  Refits
+    that begin next to an optimum -- the RMSE profiles -- set a much
+    smaller step through :func:`simplex_step_override`; without it the
+    simplex is first thrown 1.5 log units away and rarely finds its way
+    back within the time limit, which shows as a jagged profile with a
+    single spike at the fitted value.
+    """
+    v = getattr(_SIMPLEX, "value", None)
+    return float(v) if v else float(default)
+
+
+@_contextlib.contextmanager
+def simplex_step_override(value):
+    """``with simplex_step_override(0.15): ...`` -- None leaves the default."""
+    old = getattr(_SIMPLEX, "value", None)
+    _SIMPLEX.value = float(value) if value else None
+    try:
+        yield
+    finally:
+        _SIMPLEX.value = old
+
+
+def equality_ties(constraints, names, x0, fixed=None):
+    """Linear log-space equality $constraints ('=') among the fitted ``names``,
+    to be solved EXACTLY by the optimiser instead of through the penalty.
+
+    Enforced by the penalty alone, a tie such as K_a = K_b freezes both
+    constants: a Nelder-Mead vertex that moves one of them costs ~1e5 x the
+    misfit, every such move is rejected and the simplex collapses in those
+    directions (the Pd cage ladder, where four tied K's never left their start).
+    Here the ties define an affine subspace x = x_part + N z; the simplex moves
+    in z and tied constants move together.
+
+    ``fixed`` supplies the values of constants that appear in a tie but are not
+    fitted.  Returns None when no such tie applies, else a dict with
+    ``expand`` (z -> x), ``z0``, ``z_steps`` (x-steps -> z-steps), ``tied``
+    (names) and ``x_start`` (x0 projected onto the ties).
+    Inequalities and K-space constraints are left to the penalty."""
+    import numpy as _np
+    names = list(names)
+    x0 = _np.asarray(x0, dtype=float)
+    if not constraints or x0.size == 0:
+        return None
+    rows, rhs, seen = [], [], set()
+    for c in constraints:
+        if c.get("mode", "log") != "log" or c.get("op", "=") != "=":
+            continue
+        coeffs = {k: float(v) for k, v in (c.get("coeffs") or {}).items() if float(v) != 0.0}
+        key = (tuple(sorted(coeffs.items())), float(c.get("const") or 0.0))
+        if not coeffs or key in seen:
+            continue
+        seen.add(key)
+        row, r, ok = _np.zeros(x0.size), -float(c.get("const") or 0.0), True
+        for k, v in coeffs.items():
+            if k in names:
+                row[names.index(k)] += v
+            elif fixed is not None and k in fixed:
+                r -= v * float(fixed[k])
+            else:
+                ok = False
+                break
+        if ok and _np.any(row != 0.0):
+            rows.append(row); rhs.append(r)
+    if not rows:
+        return None
+    A, b = _np.vstack(rows), _np.asarray(rhs, dtype=float)
+    keep = []
+    for i in range(A.shape[0]):
+        if _np.linalg.matrix_rank(A[keep + [i]]) == len(keep) + 1:
+            keep.append(i)
+    A, b = A[keep], b[keep]
+    tied = [j for j in range(x0.size) if _np.any(A[:, j] != 0.0)]
+    free = [j for j in range(x0.size) if j not in tied]
+    At = A[:, tied]
+    _, s, Vt = _np.linalg.svd(At)
+    rank = int(_np.sum(s > 1e-10 * max(float(s.max()), 1.0)))
+    N = Vt[rank:].T                                   # null-space basis of the tied block
+    xp = x0.copy()
+    xp[tied] = x0[tied] - _np.linalg.pinv(At) @ (At @ x0[tied] - b)
+
+    def expand(z):
+        z = _np.asarray(z, dtype=float)
+        x = xp.copy()
+        x[free] = z[:len(free)]
+        x[tied] = xp[tied] + N @ z[len(free):]
+        return x
+
+    def z_steps(steps):
+        steps = _np.asarray(steps, dtype=float)
+        return _np.concatenate([steps[free], _np.full(N.shape[1], float(_np.max(steps[tied])))])
+
+    return {"expand": expand, "z0": _np.concatenate([x0[free], _np.zeros(N.shape[1])]),
+            "z_steps": z_steps, "tied": [names[j] for j in tied], "x_start": xp}
+
+
+def tied_minimize(fun, x0, *, names, constraints, fixed=None, method="Nelder-Mead",
+                  options=None, **kw):
+    """``scipy.optimize.minimize`` for the fits, with the linear log-space
+    equality $constraints among ``names`` solved exactly (see
+    :func:`equality_ties`).  Without such a tie, or for a method other than
+    Nelder-Mead, this is plain ``minimize``.  The caller's ``initial_simplex``
+    (x-space) sets the step of every coordinate; the result's ``x`` is in
+    x-space, so callers need not know about the reduction."""
+    from scipy.optimize import minimize as _minimize, OptimizeResult as _OR
+    import numpy as _np
+    opts = dict(options or {})
+    x0 = _np.asarray(x0, dtype=float)
+    ties = equality_ties(constraints, names, x0, fixed) if method == "Nelder-Mead" else None
+    if ties is None:
+        return _minimize(fun, x0, method=method, options=opts, **kw)
+    simplex = opts.pop("initial_simplex", None)
+    if simplex is not None:
+        d = _np.asarray(simplex, dtype=float)[1:] - _np.asarray(simplex, dtype=float)[0]
+        steps = _np.array([float(_np.max(_np.abs(d[i]))) if i < d.shape[0] else 0.05
+                           for i in range(x0.size)])
+    else:
+        steps = _np.where(x0 != 0.0, 0.05 * _np.abs(x0), 0.00025)
+    steps = _np.where(steps > 0.0, steps, 1e-9)
+    z0, expand = ties["z0"], ties["expand"]
+    if z0.size == 0:                       # every parameter pinned by the ties
+        x = expand(z0)
+        return _OR(x=x, fun=float(fun(x)), success=True, nit=0, nfev=1, status=0,
+                   message="all parameters fixed by $constraints")
+    zst = ties["z_steps"](steps)
+    opts["initial_simplex"] = _np.vstack([z0] + [z0 + _np.eye(z0.size)[i] * zst[i]
+                                                 for i in range(z0.size)])
+    res = _minimize(lambda z: fun(expand(z)), z0, method=method, options=opts, **kw)
+    res.x = expand(_np.asarray(res.x, dtype=float))
+    if "final_simplex" in res:
+        try:
+            verts, vals = res["final_simplex"]
+            res["final_simplex"] = (_np.vstack([expand(v) for v in verts]), vals)
+        except Exception:
+            pass
+    return res
+
+
+class PenaltyScale:
+    """Fixed reference scale for the constraint penalty of ONE fit.
+
+    The penalty is expressed relative to the size of the data term so that
+    it works for any kind of data.  That reference must stay FIXED during
+    the fit.  If the trial point's own SSR is used instead, the objective
+    becomes SSR × (1 + W·h(v)): a multiplicative form in which lowering the
+    violation and lowering the misfit trade off in *relative* terms, and a
+    constraint on well-determined constants is never reached — the optimizer
+    walks away from it because the misfit rises faster than the violation
+    falls.  Anchoring the scale to the first evaluation (the starting point)
+    restores the intended additive penalty  SSR + W·SSR₀·h(v).
+
+    Usage inside an objective:  cp = constraints_penalty(cons, lk,
+    ssr_scale=_pscale(ssr))  with  _pscale = PenaltyScale()  created once
+    before the objective is defined.
+    """
+
+    def __init__(self):
+        self.value = None
+
+    def __call__(self, current):
+        if self.value is None:
+            try:
+                c = float(current)
+            except (TypeError, ValueError):
+                c = 1.0
+            self.value = c if (c > 0 and c == c and c < 1e300) else 1.0
+        return self.value
+
+
 def constraints_penalty(constraints, logK_dict, ssr_scale: float = 1.0):
     """
     Compute total penalty for all violated constraints.
@@ -782,6 +1002,11 @@ def parse_script(text: str) -> dict:
 
         elif section == "concentrations":
             m = re.match(r"(\w+)\s*=\s*(.+)", line)
+            _bare = re.match(r"^(\w+)$", line) if not m else None
+            if _bare and not m:
+                # ITC placeholder: bare name, value to be filled from file
+                name = _bare.group(1)
+                result["concentrations"][name] = None
             if m:
                 name = m.group(1)
                 rest = m.group(2).strip()
@@ -812,6 +1037,11 @@ def parse_script(text: str) -> dict:
 
         elif section == "volumes":
             m = re.match(r"(\w+)\s*=\s*(.+)", line)
+            _bare = re.match(r"^(\w+)$", line) if not m else None
+            if _bare and not m:
+                # ITC placeholder: bare name, value to be filled from file
+                name = _bare.group(1)
+                result["volumes"][name] = None
             if m:
                 name = m.group(1)
                 value_str = m.group(2).strip()
@@ -824,7 +1054,16 @@ def parse_script(text: str) -> dict:
                     raise ValueError(f"Error parsing volume '{line}': {e}")
 
         elif section == "titrant":
-            if result["titrant_is_solid"]:
+            # ITC placeholder: bare name with no value.
+            # Liquid mode only — in solid mode a bare name is pre-existing valid
+            # syntax ("Mt" = solid titrant with implicit ratio 1.0). The March
+            # ITC build omitted this guard and silently dropped the ratio.
+            if (not result["titrant_is_solid"]
+                    and re.match(r"^\w+$", line)
+                    and "=" not in line and ";" not in line):
+                tkey = line.strip()
+                result["titrant"][tkey] = None
+            elif result["titrant_is_solid"]:
                 # Solid syntax: "Mt" or "Mt; 1.3"
                 parts = line.split(";")
                 tkey  = parts[0].strip()
@@ -1037,12 +1276,25 @@ def parse_script(text: str) -> dict:
                 _num_pat  = r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?"
                 _bound_lo = None
                 _bound_hi = None
+                _dH_fixed = None          # user-supplied enthalpy (kcal/mol)
                 for _bp in k_parts[1:]:
                     _bp = _bp.strip()
                     _m_from_to = re.match(
                         rf"from\s+({_num_pat})\s+to\s+({_num_pat})", _bp, re.IGNORECASE)
                     _m_from    = re.match(rf"from\s+({_num_pat})$", _bp, re.IGNORECASE)
                     _m_to      = re.match(rf"to\s+({_num_pat})$",   _bp, re.IGNORECASE)
+                    # Optional fixed enthalpy: "dH = -3.5" (kcal/mol).
+                    # Required for displacement/competition ITC: the
+                    # competitor's dH is known from a separate experiment and
+                    # must be held fixed, or its design-matrix column is
+                    # collinear with the q_offset column and neither is
+                    # identifiable.
+                    _m_dh = re.match(
+                        rf"(?:d\s*h|delta\s*_?\s*h)\s*=\s*({_num_pat})$",
+                        _bp, re.IGNORECASE)
+                    if _m_dh:
+                        _dH_fixed = float(_m_dh.group(1))
+                        continue
                     if _m_from_to:
                         _lo = float(_m_from_to.group(1))
                         _hi = float(_m_from_to.group(2))
@@ -1061,6 +1313,7 @@ def parse_script(text: str) -> dict:
                     "products":  products,
                     "kname":     kname,
                     "logK":      logK,
+                    "dH_fixed":  _dH_fixed,
                     "logK_lo":   _bound_lo,
                     "logK_hi":   _bound_hi,
                 })
@@ -1135,7 +1388,31 @@ def parse_script(text: str) -> dict:
             m_integ = re.match(r"integration\s*:\s*(.+)", line, re.IGNORECASE)
             m_read  = re.match(r"read\s*:\s*(.*)$",     line, re.IGNORECASE)
             m_noref = re.match(r"noref\s*$",            line, re.IGNORECASE)
-            if m_shift:
+            m_pool  = re.match(r"pool\s*:\s*(.+)$",     line, re.IGNORECASE)
+            m_std   = re.match(r"(?:standard|std)\s*:\s*([0-9.eE+-]+)\s*(mM|uM|µM|M)?\s*$", line, re.IGNORECASE)
+            if m_std:
+                # "standard: 1.0 mM" -> internal standard; data columns headed Std (or
+                # Standard) hold its integrals and normalise the columns that follow them,
+                # up to the next Std column, so 19F and 1H blocks become commensurable
+                val = float(m_std.group(1)); unit = (m_std.group(2) or "mM").lower()
+                if unit in ("um", "µm"): val *= 1e-3
+                elif unit == "m": val *= 1e3
+                if result["nmr"] is None:
+                    result["nmr"] = {"mode": None, "targets": [], "n_H_list": [],
+                                     "n_integ": 0, "read": [], "noref": False}
+                result["nmr"]["standard_mM"] = val
+            elif m_pool:
+                # "pool: LLL, DDD" -> the integrated signals belong to complexes that each
+                # contain exactly one unit of this pool of components (their totals are
+                # summed, with dilution and titrant addition), instead of the first
+                # component of $concentrations.  Needed when the complexes are not all
+                # built on that component, e.g. ligand scrambling between LLL and DDD.
+                pool = [t.strip() for t in m_pool.group(1).split(",") if t.strip()]
+                if result["nmr"] is None:
+                    result["nmr"] = {"mode": None, "targets": [], "n_H_list": [],
+                                     "n_integ": 0, "read": [], "noref": False}
+                result["nmr"]["pool"] = pool
+            elif m_shift:
                 targets = [t.strip() for t in m_shift.group(1).split(",") if t.strip()]
                 if result["nmr"] is None:
                     result["nmr"] = {"mode": "shift", "targets": targets,
@@ -1429,6 +1706,7 @@ def check_script_syntax(text: str) -> list:
     VALID_SECTIONS = {
         "concentrations", "volumes", "titrant", "reactions", "equilibria",
         "variables", "plot", "nmr", "spectra", "constraints", "temperature",
+        "itc",  # accepted but ignored — ITC mode is detected from uploaded file
     }
     CONC_UNITS  = {"m", "mm", "um", "µm"}
     VOL_UNITS   = {"l", "ml", "ul", "µl"}
@@ -1492,6 +1770,9 @@ def check_script_syntax(text: str) -> list:
         # ── $concentrations ──────────────────────────────────────────
         if section == "concentrations":
             m = _re.match(r"^(\w+)\s*=\s*(.+)$", line)
+            if not m and _re.match(r"^\w+$", line):
+                defined_concs[line.strip()] = (lineno, raw_line)
+                continue  # ITC placeholder bare name — valid
             if not m:
                 err(lineno, raw_line, "Expected format: Name = value [unit]  (e.g. G0 = 1.00 mM).")
                 continue
@@ -1511,6 +1792,9 @@ def check_script_syntax(text: str) -> list:
         # ── $volumes ─────────────────────────────────────────────────
         elif section == "volumes":
             m = _re.match(r"^(\w+)\s*=\s*(.+)$", line)
+            if not m and _re.match(r"^\w+$", line):
+                defined_vols[line.strip()] = (lineno, raw_line)
+                continue  # ITC placeholder bare name
             if not m:
                 err(lineno, raw_line, "Expected format: V0 = value [unit]  (e.g. V0 = 500 uL).")
                 continue
@@ -1729,14 +2013,24 @@ def check_script_syntax(text: str) -> list:
             if _re.match(r"^noref\s*$", line, _re.IGNORECASE):
                 pass
             else:
-                m = _re.match(r"^(shift|integration|read)\s*:\s*(.*)$", line, _re.IGNORECASE)
+                m = _re.match(r"^(shift|integration|read|pool|standard|std)\s*:\s*(.*)$", line, _re.IGNORECASE)
                 if not m:
                     err(lineno, raw_line,
                         "Expected: shift: TargetName  or  integration: n1, n2, …  "
-                        "or  read: Sp1, Sp2, …  or  noref")
+                        "or  read: Sp1, Sp2, …  or  pool: Comp1, Comp2, …  "
+                        "or  standard: 1.0 mM  or  noref")
                 else:
                     key, val = m.group(1).lower(), m.group(2).strip()
-                    if key == "integration" and val:
+                    if key in ("standard", "std"):
+                        if not _re.match(r"^[0-9.eE+-]+\s*(mM|uM|µM|M)?$", val, _re.IGNORECASE):
+                            err(lineno, raw_line, "standard: expects the internal standard's concentration, e.g. 'standard: 1.0 mM'.")
+                    elif key == "pool":
+                        if not val:
+                            err(lineno, raw_line, "pool: expects the components whose complexes are integrated, e.g. 'pool: LLL, DDD'.")
+                        for tok in [t.strip() for t in val.split(",") if t.strip()]:
+                            if not _re.match(r"^[A-Za-z_]\w*$", tok):
+                                err(lineno, raw_line, f"pool: '{tok}' is not a valid component name.")
+                    elif key == "integration" and val:
                         for tok in [t.strip() for t in val.split(",") if t.strip()]:
                             if not is_number(tok):
                                 err(lineno, raw_line, f"integration: expects numbers separated by commas; '{tok}' is not a valid number.")

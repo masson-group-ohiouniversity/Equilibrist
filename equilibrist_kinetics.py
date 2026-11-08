@@ -3,11 +3,12 @@
 import re
 import time
 import numpy as np
+import equilibrist_live as _live
 import pandas as pd
 from scipy.integrate import solve_ivp
 from scipy.optimize import minimize
 from equilibrist_network import solve_equilibria_general, compute_variable_curve
-from equilibrist_parser import constraints_penalty
+from equilibrist_parser import constraints_penalty, PenaltyScale, FitTrace, simplex_step, tied_minimize
 
 __all__ = ['_kinetics_reaction_label', '_rate_constant_units', '_equilibrium_constant_units', '_collect_all_kinetic_species', 'build_kinetics_logk_dict', 'compute_kinetics_curve', '_augment_curve_with_variables', 'fit_kinetics']
 
@@ -87,7 +88,34 @@ def build_kinetics_logk_dict(parsed: dict) -> dict:
     return d
 
 
-def compute_kinetics_curve(parsed: dict, logk_dict: dict, t_max: float, n_pts: int) -> dict:
+
+
+def kinetic_param_bounds(parsed: dict, names, eq_default=(-2.0, 14.0), rate_default=(-12.0, 12.0)):
+    """Soft log10 bounds of the fitted constants, one (lo, hi) pair per name.
+
+    A pre-equilibrium constant gets its own "from X to Y" bounds or ``eq_default``;
+    a rate constant its own bounds if the script gives any, else ``rate_default``,
+    which is as wide as the generic |log k| <= 12 penalty of the objectives, i.e.
+    no extra restriction.  Until 2026-10-20 every fitted name received the
+    equilibrium default (-2 .. 14), so a rate constant below 0.01 was pushed up
+    by a 1e6 x penalty and slow kinetics could not be fitted at all (the fit
+    ended on a flat line at the mean of the data, worse than its start)."""
+    eq = {e["kname"]: e for e in (parsed.get("equilibria") or []) if e.get("kname")}
+    kin = {}
+    for r in (parsed.get("kinetics") or []):
+        for key in ("kname", "krname"):
+            if r.get(key):
+                kin[r[key]] = r
+    lo, hi = [], []
+    for n in names:
+        entry, dflt = (eq[n], eq_default) if n in eq else (kin.get(n, {}), rate_default)
+        lo.append(float(entry["logK_lo"]) if entry.get("logK_lo") is not None else float(dflt[0]))
+        hi.append(float(entry["logK_hi"]) if entry.get("logK_hi") is not None else float(dflt[1]))
+    return np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
+
+
+def compute_kinetics_curve(parsed: dict, logk_dict: dict, t_max: float, n_pts: int,
+                           t_extra=None) -> dict:
     """
     Integrate the kinetics ODEs from t=0 to t_max.
 
@@ -198,6 +226,15 @@ def compute_kinetics_curve(parsed: dict, logk_dict: dict, t_max: float, n_pts: i
 
     # ── Integrate ─────────────────────────────────────────────────────────────
     t_eval = np.linspace(0.0, t_max, n_pts)
+    if t_extra is not None and len(t_extra):
+        # the fits pass the experimental times: the model is then evaluated exactly
+        # where the data are, instead of being interpolated from the n_pts grid
+        # (a sharp feature between two grid points, e.g. the spikes of an
+        # oscillating reaction, biased the rate constants by several per cent)
+        _te = np.asarray(t_extra, dtype=float)
+        _te = _te[np.isfinite(_te) & (_te >= 0.0) & (_te <= t_max)]
+        if len(_te):
+            t_eval = np.unique(np.concatenate([t_eval, _te]))
     sol = solve_ivp(
         ode_rhs, [0.0, t_max], y0,
         method="Radau",
@@ -256,7 +293,7 @@ def _augment_curve_with_variables(parsed: dict, curve: dict) -> dict:
 def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
                  t_max: float, n_pts: int, tolerance: float, maxiter: int,
                  timeout_s: float = 30.0, constraints=None, fit_conc_keys=None,
-                 *, compute_hessian: bool = True):
+                 *, compute_hessian: bool = True, _objective_only: bool = False):
     """
     Fit selected log10(k) values to experimental kinetic data.
     exp_data format: {species_name: {"v_add_mL": t_array, "y": y_array}}
@@ -332,6 +369,13 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
 
     if len(exp_points) < n_p:
         return False, {}, {}, "Too few data points"
+    _t_exp_all = np.unique(np.array([t for t, _, _ in exp_points], dtype=float))
+    # simulate to the last data point: a point beyond $plot xmax was compared
+    # with the model at xmax (np.interp clamps), as the NMR fits once did
+    _t_last = max(t for t, _, _ in exp_points)
+    if _t_last > t_max:
+        n_pts = int(min(4000, max(n_pts, round(n_pts * _t_last / max(t_max, 1e-12)))))
+        t_max = float(_t_last)
 
     # ── Guard: every experimental column must map to a simulated quantity ────
     # A column that matches neither a species nor a $variables entry can never
@@ -357,23 +401,21 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
             current_logk[name] = lk_vec[i]
         cur_parsed = _patched_parsed(conc_d) if conc_d else parsed
         try:
-            curve = compute_kinetics_curve(cur_parsed, current_logk, t_max, n_pts)
+            curve = compute_kinetics_curve(cur_parsed, current_logk, t_max, n_pts, t_extra=_t_exp_all)
             # Experimental columns may name $variables ('%GH'), not just raw
             # species — evaluate them so residuals can actually be formed.
             return _augment_curve_with_variables(cur_parsed, curve)
         except Exception:
             return None
 
-    # Per-K soft bounds: read from equilibria entries in mixed eq+kinetics scripts
-    _DEFAULT_LO_K_KIN, _DEFAULT_HI_K_KIN = -2.0, 14.0
-    _eq_by_kname_kin = {eq["kname"]: eq for eq in parsed.get("equilibria", [])}
-    def _resolve_k_bound_kin(k, attr, default):
-        v = _eq_by_kname_kin.get(k, {}).get(attr)
-        return float(v) if v is not None else float(default)
-    _k_lo_kin = np.array([_resolve_k_bound_kin(k, "logK_lo", _DEFAULT_LO_K_KIN) for k in fit_names])
-    _k_hi_kin = np.array([_resolve_k_bound_kin(k, "logK_hi", _DEFAULT_HI_K_KIN) for k in fit_names])
+    # Soft bounds per constant: pre-equilibria -2..14 (or their "from X to Y"),
+    # rate constants unrestricted beyond the generic |log k| <= 12 penalty
+    _k_lo_kin, _k_hi_kin = kinetic_param_bounds(parsed, fit_names)
 
+    _pscale = PenaltyScale()   # fixed reference for the constraint penalty (see equilibrist_parser)
+    _trace = FitTrace()   # how did the fit end? (see equilibrist_parser)
     def objective(params_vec):
+        _trace(params_vec)
         lk_vec, conc_d = _unpack_concs(params_vec)
         lk = dict(logk_dict)
         for i, name in enumerate(fit_names):
@@ -394,11 +436,24 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
         if not residuals:
             return 1e12
         ssr = sum(r ** 2 for r in residuals) + penalty
-        cp = constraints_penalty(constraints or [], lk, ssr_scale=ssr)
+        cp = constraints_penalty(constraints or [], lk, ssr_scale=_pscale(ssr))
+        _live.notify(lk, ssr + cp)
         return ssr + cp
 
     # ── Timeout-aware Nelder-Mead ────────────────────────────────────────
     class _Timeout(Exception): pass
+
+    # ── Objective handed out for a GLOBAL fit (equilibrist_global) ───────
+    if _objective_only:
+        
+        return {
+            "objective": (lambda t: float(objective(np.asarray(t, dtype=float)))),
+            "data_ssr":  None,
+            "x0": np.asarray(x0, dtype=float),
+            "names": list(fit_names) + list(fit_conc_keys),
+            "n_log_params": len(fit_keys),
+            "n_data": int(len(exp_points)),
+        }
     best_tracker = {"x": x0.copy(), "f": np.inf, "start": time.time(),
                     "timed_out": False, "nit": 0}
 
@@ -420,7 +475,7 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
         _sp1 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                          for i in range(_n_k)])
         try:
-            _r1 = minimize(_phase1_obj, x0[:_n_k], method="Nelder-Mead",
+            _r1 = tied_minimize(_phase1_obj, x0[:_n_k], names=list(fit_names), constraints=constraints or [], fixed=logk_dict,
                            options={"maxiter": maxiter//2,
                                     "xatol": tolerance,
                                     "fatol": tolerance * 1e-4,
@@ -430,12 +485,12 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
             pass
         best_tracker["start"] = time.time()  # reset timer after Phase 1
 
-    _steps = np.array([(1e-9 if maxiter <= 1 else 1.5)] * _n_k + [max(abs(_x0_c[i]) * 0.1, 0.05)
+    _steps = np.array([(1e-9 if maxiter <= 1 else simplex_step(1.5))] * _n_k + [max(abs(_x0_c[i]) * 0.1, 0.05)
                        for i in range(_n_c)])
     init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _steps[i]
                                      for i in range(n_p)])
     try:
-        result = minimize(_obj_timed, x0, method="Nelder-Mead",
+        result = tied_minimize(_obj_timed, x0, names=list(fit_names) + list(fit_conc_keys), constraints=constraints or [], fixed=logk_dict,
                           options={"maxiter": maxiter, "xatol": tolerance,
                                    "fatol": tolerance * 1e-4, "adaptive": True,
                                    "initial_simplex": init_simplex})
@@ -548,6 +603,16 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
                             for c, v in _per_col_yc.items()},
     }
 
+    stats.update(_trace.summary(result, best_tracker["timed_out"], tolerance))
+    # constants that ended on their soft range (the fit wanted to go further):
+    # {name: ("lower" | "upper", bound)} -- the app's message points them out
+    stats["at_bound"] = {}
+    for _nm, _lo, _hi in zip(fit_names, _k_lo_kin, _k_hi_kin):
+        _v = float(fitted_logks[_nm])
+        if _v <= _lo + 0.02:
+            stats["at_bound"][_nm] = ("lower", float(_lo))
+        elif _v >= _hi - 0.02:
+            stats["at_bound"][_nm] = ("upper", float(_hi))
     if n_d == 0:
         return False, fitted_logks, stats, (
             "Fit produced no usable residuals — the simulated curve could not be "

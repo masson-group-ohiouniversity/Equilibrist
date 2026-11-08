@@ -2719,6 +2719,52 @@ def _sample_nuisance_params(nominal: dict, specs: dict, rng) -> dict:
     return p
 
 
+def perturb_nmr_data(nmr_data: dict, nmr_cfg: dict, rng, integ_rel: float = 0.0,
+                     shift_ppm: float = 0.0) -> dict:
+    """Measurement noise for a Monte Carlo run: integration columns are
+    multiplied by ``1 + N(0, integ_rel)`` point by point, chemical-shift
+    columns get ``N(0, shift_ppm)`` added (ppm).  Which columns are which
+    follows ``$nmr``: in *integration* mode every column is an integral, in
+    *shift* mode every column is a shift, in *mixed* mode the first
+    ``n_integ`` columns are integrals.  Returns a shallow copy of the data."""
+    try:
+        integ_rel = float(integ_rel or 0.0); shift_ppm = float(shift_ppm or 0.0)
+    except Exception:
+        return nmr_data
+    if integ_rel <= 0 and shift_ppm <= 0:
+        return nmr_data
+    mode = (nmr_cfg or {}).get("mode", "shift")
+    cols = [c for c in nmr_data if not (isinstance(c, str) and c.startswith("_"))]
+    if mode == "integration":
+        integ_cols, shift_cols = cols, []
+    elif mode == "mixed":
+        n_i = int((nmr_cfg or {}).get("n_integ", len((nmr_cfg or {}).get("n_H_list", []) or [])))
+        integ_cols, shift_cols = cols[:n_i], cols[n_i:]
+    else:
+        integ_cols, shift_cols = [], cols
+    out = {}
+    for c, cd in nmr_data.items():
+        if (c not in integ_cols and c not in shift_cols) or not isinstance(cd, dict) or "y" not in cd:
+            out[c] = cd
+            continue
+        y = np.asarray(cd["y"], dtype=float).copy()
+        fin = np.isfinite(y)
+        if c in integ_cols and integ_rel > 0:
+            y[fin] = y[fin] * (1.0 + rng.normal(0.0, integ_rel, size=int(fin.sum())))
+        elif c in shift_cols and shift_ppm > 0:
+            y[fin] = y[fin] + rng.normal(0.0, shift_ppm, size=int(fin.sum()))
+        out[c] = {**cd, "y": y}
+    return out
+
+
+def _mc_nmr_data(nmr_data, parsed, specs, rng):
+    """The data an NMR Monte Carlo iteration fits: perturbed when the specs
+    carry ``nmr_integ_rel`` / ``nmr_shift_ppm``."""
+    sp = specs or {}
+    return perturb_nmr_data(nmr_data, (parsed or {}).get("nmr"), rng,
+                            sp.get("nmr_integ_rel", 0.0), sp.get("nmr_shift_ppm", 0.0))
+
+
 def _mc_empty(msg: str = "") -> dict:
     """Empty Monte Carlo result returned when the baseline fit fails."""
     return {"samples": {}, "mc_se": {}, "mc_median": {},
@@ -2799,9 +2845,10 @@ def monte_carlo_nmr_shift(parsed, network, nmr_data, params, logK_vals,
 
     def _worker(idx, rng):
         pp = _sample_nuisance_params(params, nuisance_specs, rng)
+        _d_i = _mc_nmr_data(nmr_data, parsed, nuisance_specs, rng)
         try:
             ok_b, logKs_b, stats_b, _ = fit_nmr_shifts(
-                parsed, network, nmr_data, pp, logK_vals, fit_keys, x_expr,
+                parsed, network, _d_i, pp, logK_vals, fit_keys, x_expr,
                 tolerance=tolerance, maxiter=maxiter, constraints=constraints,
                 fit_conc_keys=fit_conc_keys,
                 fit_titrant_keys=fit_titrant_keys, compute_hessian=False)
@@ -2862,9 +2909,10 @@ def monte_carlo_nmr_integration(parsed, network, nmr_data, params, logK_vals,
 
     def _worker(idx, rng):
         pp = _sample_nuisance_params(params, nuisance_specs, rng)
+        _d_i = _mc_nmr_data(nmr_data, parsed, nuisance_specs, rng)
         try:
             ok_b, logKs_b, stats_b, _ = fit_nmr_integration(
-                parsed, network, nmr_data, pp, logK_vals, fit_keys, x_expr,
+                parsed, network, _d_i, pp, logK_vals, fit_keys, x_expr,
                 tolerance=tolerance, maxiter=maxiter, constraints=constraints,
                 fit_conc_keys=fit_conc_keys,
                 fit_titrant_keys=fit_titrant_keys, compute_hessian=False)
@@ -2925,9 +2973,10 @@ def monte_carlo_nmr_mixed(parsed, network, nmr_data, params, logK_vals,
 
     def _worker(idx, rng):
         pp = _sample_nuisance_params(params, nuisance_specs, rng)
+        _d_i = _mc_nmr_data(nmr_data, parsed, nuisance_specs, rng)
         try:
             ok_b, logKs_b, stats_b, _ = fit_nmr_mixed(
-                parsed, network, nmr_data, pp, logK_vals, fit_keys, x_expr,
+                parsed, network, _d_i, pp, logK_vals, fit_keys, x_expr,
                 tolerance=tolerance, maxiter=maxiter, constraints=constraints,
                 fit_conc_keys=fit_conc_keys,
                 fit_titrant_keys=fit_titrant_keys, compute_hessian=False)
@@ -3278,9 +3327,10 @@ def monte_carlo_kinetics_nmr_shifts(parsed, logk_dict, nmr_data, fit_keys,
 
     def _worker(idx, rng):
         pp = _sample_nuisance_parsed(parsed, nuisance_specs, rng)
+        _d_i = _mc_nmr_data(nmr_data, parsed, nuisance_specs, rng)
         try:
             ok_b, logks_b, stats_b, _ = fit_kinetics_nmr_shifts(
-                pp, logk_dict, nmr_data, fit_keys, t_max, 200,
+                pp, logk_dict, _d_i, fit_keys, t_max, 200,
                 tolerance, maxiter, constraints=constraints,
                 fit_conc_keys=fit_conc_keys, compute_hessian=False)
             if not ok_b: return None
@@ -3340,9 +3390,10 @@ def monte_carlo_kinetics_nmr_integration(parsed, logk_dict, nmr_data, fit_keys,
 
     def _worker(idx, rng):
         pp = _sample_nuisance_parsed(parsed, nuisance_specs, rng)
+        _d_i = _mc_nmr_data(nmr_data, parsed, nuisance_specs, rng)
         try:
             ok_b, logks_b, stats_b, _ = fit_kinetics_nmr_integration(
-                pp, logk_dict, nmr_data, fit_keys, t_max, 200,
+                pp, logk_dict, _d_i, fit_keys, t_max, 200,
                 tolerance, maxiter, constraints=constraints,
                 fit_conc_keys=fit_conc_keys, compute_hessian=False)
             if not ok_b: return None
@@ -3402,9 +3453,10 @@ def monte_carlo_kinetics_nmr_mixed(parsed, logk_dict, nmr_data, fit_keys,
 
     def _worker(idx, rng):
         pp = _sample_nuisance_parsed(parsed, nuisance_specs, rng)
+        _d_i = _mc_nmr_data(nmr_data, parsed, nuisance_specs, rng)
         try:
             ok_b, logks_b, stats_b, _ = fit_kinetics_nmr_mixed(
-                pp, logk_dict, nmr_data, fit_keys, t_max, 200,
+                pp, logk_dict, _d_i, fit_keys, t_max, 200,
                 tolerance, maxiter, constraints=constraints,
                 fit_conc_keys=fit_conc_keys, compute_hessian=False)
             if not ok_b: return None
@@ -3494,3 +3546,328 @@ def monte_carlo_kinetics_spectra(parsed, logk_dict, spectra_data, fit_keys,
             "n_iter": n_iter, "n_success": n_ok, "n_failed": n_fail,
             "wall_seconds": time.perf_counter() - t0,
             "best_message": msg}
+
+
+# ---------------------------------------------------------------------------
+# ITC mode
+# ---------------------------------------------------------------------------
+
+def bootstrap_itc(parsed, network, q_exp, raw_itc, params, logK_vals, fit_keys,
+                  x_expr, *,
+                  n_bootstrap: int = 500,
+                  method: str = "residual",
+                  alpha: float = 0.05,
+                  n_jobs: int = 1,
+                  seed: Optional[int] = None,
+                  tolerance: float = 1e-8,
+                  maxiter: int = 100_000,
+                  timeout_s: float = 30.0,
+                  constraints=None,
+                  fit_conc_keys=None,
+                  q_offset_fixed=None,
+                  excl_set=None,
+                  progress_callback: Optional[Callable[[int, int], None]] = None
+                  ) -> dict:
+    """Bootstrap CIs for an ITC fit.
+
+    Simpler than the titration modes: ``q_exp`` is already a flat vector of
+    integrated heats and ``fit_itc`` returns ``q_theo`` directly, so the
+    forward pass needed to build residuals is just one fit.
+
+    Samples are collected for every floating quantity, not only the log K's:
+    fitted concentrations, the per-reaction ΔH (solved by lstsq inside the
+    objective) and q_offset are all recorded, so the CI block covers the
+    complete parameter set the user sees in the UI.
+    """
+    from equilibrist_itc import fit_itc
+
+    t0 = time.perf_counter()
+    fit_conc_keys = list(fit_conc_keys or [])
+    excl_set      = set(excl_set or set())
+    q_exp         = np.asarray(q_exp, dtype=float)
+
+    # ── 1. Original point estimate ──────────────────────────────────────
+    ok, fitted_logKs, best_stats, msg = fit_itc(
+        parsed, network, q_exp, raw_itc, params, logK_vals, fit_keys, x_expr,
+        tolerance=tolerance, maxiter=maxiter, timeout_s=timeout_s,
+        fit_conc_keys=fit_conc_keys, q_offset_fixed=q_offset_fixed,
+        constraints=constraints, excl_set=excl_set)
+
+    def _empty(message):
+        return {"samples": {}, "ci": {}, "bs_se": {},
+                "ci_levels": (alpha/2, 0.5, 1-alpha/2),
+                "method": method, "n_bootstrap": n_bootstrap,
+                "n_success": 0, "n_failed": n_bootstrap,
+                "best_fit": {}, "best_stats": best_stats,
+                "wall_seconds": time.perf_counter() - t0,
+                "best_message": message}
+
+    if not ok:
+        return _empty(msg)
+
+    q_theo = best_stats.get("q_theo")
+    if q_theo is None:
+        return _empty("Fit returned no q_theo — cannot form residuals")
+    q_theo = np.asarray(q_theo, dtype=float)
+    if q_theo.shape != q_exp.shape:
+        return _empty(f"q_theo shape {q_theo.shape} != q_exp shape {q_exp.shape}")
+
+    best_fit = dict(fitted_logKs)
+    best_fit.update(best_stats.get("fitted_concs", {}) or {})
+    for _kn, _dh in (best_stats.get("dH_values", {}) or {}).items():
+        best_fit[f"ΔH({_kn})"] = float(_dh)
+    if q_offset_fixed is None:
+        best_fit["q_offset"] = float(best_stats.get("q_offset", 0.0))
+
+    all_param_names = list(best_fit.keys())
+    residuals_full  = q_exp - q_theo
+
+    # ── 2. Bootstrap iteration ──────────────────────────────────────────
+    def _worker(i, rng):
+        try:
+            q_synth = q_theo + _resample_residuals(residuals_full, method, rng)
+            ok_b, logKs_b, stats_b, _ = fit_itc(
+                parsed, network, q_synth, raw_itc, params, logK_vals,
+                fit_keys, x_expr,
+                tolerance=tolerance, maxiter=maxiter, timeout_s=timeout_s,
+                fit_conc_keys=fit_conc_keys, q_offset_fixed=q_offset_fixed,
+                constraints=constraints, excl_set=excl_set)
+            if not ok_b:
+                return None
+            out = dict(logKs_b)
+            out.update(stats_b.get("fitted_concs", {}) or {})
+            for _kn, _dh in (stats_b.get("dH_values", {}) or {}).items():
+                out[f"ΔH({_kn})"] = float(_dh)
+            if q_offset_fixed is None:
+                out["q_offset"] = float(stats_b.get("q_offset", 0.0))
+            return out
+        except Exception:
+            return None
+
+    seed_seq = np.random.SeedSequence(seed)
+    raw_samples = _run_iter(_worker, (), n_bootstrap, n_jobs,
+                            progress_callback, seed_seq)
+    samples, n_ok, n_fail = _finalise_samples(raw_samples, all_param_names)
+
+    return {
+        "samples":     samples,
+        "ci":          _ci_block(samples, alpha),
+        "bs_se":       _se_block(samples),
+        "ci_levels":   (alpha/2, 0.5, 1 - alpha/2),
+        "method":      method,
+        "n_bootstrap": n_bootstrap,
+        "n_success":   n_ok,
+        "n_failed":    n_fail,
+        "best_fit":    best_fit,
+        "best_stats":  best_stats,
+        "wall_seconds": time.perf_counter() - t0,
+        "best_message": msg,
+    }
+
+
+def jackknife_itc(parsed, network, q_exp, raw_itc, params, logK_vals, fit_keys,
+                  x_expr, *,
+                  n_jobs: int = 1,
+                  tolerance: float = 1e-8,
+                  maxiter: int = 100_000,
+                  timeout_s: float = 30.0,
+                  constraints=None,
+                  fit_conc_keys=None,
+                  q_offset_fixed=None,
+                  excl_set=None,
+                  x_inj=None,
+                  progress_callback: Optional[Callable[[int, int], None]] = None
+                  ) -> dict:
+    """Leave-one-injection-out jackknife for an ITC fit.
+
+    Each step drops one injection. ``fit_itc`` already accepts ``excl_set``
+    for exactly this purpose, so the dropped injection is removed from the
+    heat vector AND flagged in the exclusion set — the latter matters because
+    dC[i] = C[i] - C[i-1] must still be computed across the full injection
+    sequence, otherwise dropping injection i corrupts injection i+1.
+
+    Influence values identify injections that individually move the fitted
+    parameters — typically the first real injection or a bubble artefact.
+    """
+    from equilibrist_itc import fit_itc
+
+    t0 = time.perf_counter()
+    fit_conc_keys = list(fit_conc_keys or [])
+    base_excl     = set(excl_set or set())
+    q_exp         = np.asarray(q_exp, dtype=float)
+
+    ok, fitted, best_stats, msg = fit_itc(
+        parsed, network, q_exp, raw_itc, params, logK_vals, fit_keys, x_expr,
+        tolerance=tolerance, maxiter=maxiter, timeout_s=timeout_s,
+        fit_conc_keys=fit_conc_keys, q_offset_fixed=q_offset_fixed,
+        constraints=constraints, excl_set=base_excl)
+    if not ok:
+        return _jackknife_empty(msg)
+
+    full_pd = dict(fitted)
+    full_pd.update(best_stats.get("fitted_concs", {}) or {})
+    for _kn, _dh in (best_stats.get("dH_values", {}) or {}).items():
+        full_pd[f"ΔH({_kn})"] = float(_dh)
+    if q_offset_fixed is None:
+        full_pd["q_offset"] = float(best_stats.get("q_offset", 0.0))
+    names  = list(full_pd.keys())
+    _kinds = _build_param_kinds(log_keys=fit_keys, fit_conc_keys=fit_conc_keys,
+                                fit_titrant_keys=[])
+
+    # Steps: one per retained injection, labelled by its molar-ratio x value
+    _x = x_inj if x_inj is not None else best_stats.get("x_inj")
+    _x = np.asarray(_x, dtype=float) if _x is not None else np.arange(len(q_exp))
+    steps = [(i, float(_x[i]) if i < len(_x) else float(i))
+             for i in range(len(q_exp))]
+    N = len(steps)
+    if N == 0:
+        return {**_jackknife_empty("no injections"), "best_fit": full_pd,
+                "wall_seconds": time.perf_counter() - t0}
+
+    # Map position in the (already filtered) q_exp back to absolute
+    # injection index, so excl_set entries stay meaningful.
+    _kept = [i for i in range(len(q_exp) + len(base_excl))
+             if i not in base_excl][:len(q_exp)]
+
+    def _worker(idx, _rng):
+        try:
+            drop_abs = _kept[idx] if idx < len(_kept) else idx
+            q_sub = np.delete(q_exp, idx)
+            ok_b, logKs_b, stats_b, _ = fit_itc(
+                parsed, network, q_sub, raw_itc, params, logK_vals,
+                fit_keys, x_expr,
+                tolerance=tolerance, maxiter=maxiter, timeout_s=timeout_s,
+                fit_conc_keys=fit_conc_keys, q_offset_fixed=q_offset_fixed,
+                constraints=constraints,
+                excl_set=base_excl | {drop_abs})
+            if not ok_b:
+                return None
+            out = dict(logKs_b)
+            out.update(stats_b.get("fitted_concs", {}) or {})
+            for _kn, _dh in (stats_b.get("dH_values", {}) or {}).items():
+                out[f"ΔH({_kn})"] = float(_dh)
+            if q_offset_fixed is None:
+                out["q_offset"] = float(stats_b.get("q_offset", 0.0))
+            return out
+        except Exception:
+            return None
+
+    raw_s = _run_iter(_worker, (), N, n_jobs, progress_callback,
+                      np.random.SeedSequence(42))
+    samples, jack_se, influence, n_ok, n_fail = _jackknife_finalise(
+        raw_s, names, full_pd)
+
+    return {"steps": steps, "samples": samples, "influence": influence,
+            "jack_se": jack_se, "best_fit": full_pd, "best_stats": best_stats,
+            "param_kinds": _kinds,
+            "n_jack": N, "n_success": n_ok, "n_failed": n_fail,
+            "wall_seconds": time.perf_counter() - t0,
+            "best_message": msg}
+
+
+def monte_carlo_itc(parsed, network, q_exp, raw_itc, params, logK_vals,
+                    fit_keys, x_expr, *,
+                    nuisance_specs: dict,
+                    n_iter: int = 500,
+                    n_jobs: int = 1,
+                    tolerance: float = 1e-8,
+                    maxiter: int = 100_000,
+                    timeout_s: float = 30.0,
+                    constraints=None,
+                    fit_conc_keys=None,
+                    q_offset_fixed=None,
+                    excl_set=None,
+                    seed: int = 42,
+                    progress_callback: Optional[Callable[[int, int], None]] = None
+                    ) -> dict:
+    """Nuisance Monte Carlo for an ITC fit.
+
+    Propagates stated uncertainty in the experimental setup - cell and
+    syringe concentrations and cell volume - into the fitted parameters.
+    This matters more for ITC than for most modes: the fitted K absorbs
+    concentration error directly, which is why floating the cell
+    concentration (or the titrant stock) is usually preferable to trusting
+    the nominal prep value.
+
+    ``nuisance_specs`` uses the shared syntax: ``"conc0:<name>"``,
+    ``"titrant:<name>"`` and ``"V0_mL"`` mapped to relative sigma.
+    """
+    from equilibrist_itc import fit_itc
+
+    t0 = time.perf_counter()
+    fit_conc_keys = list(fit_conc_keys or [])
+    excl_set      = set(excl_set or set())
+    q_exp         = np.asarray(q_exp, dtype=float)
+
+    ok, fitted, best_stats, msg = fit_itc(
+        parsed, network, q_exp, raw_itc, params, logK_vals, fit_keys, x_expr,
+        tolerance=tolerance, maxiter=maxiter, timeout_s=timeout_s,
+        fit_conc_keys=fit_conc_keys, q_offset_fixed=q_offset_fixed,
+        constraints=constraints, excl_set=excl_set)
+    if not ok:
+        return {"samples": {}, "mc_se": {}, "mc_median": {},
+                "mc_ci_lo": {}, "mc_ci_hi": {}, "best_fit": {},
+                "best_stats": best_stats, "param_kinds": {},
+                "nuisance_specs": dict(nuisance_specs), "n_iter": 0,
+                "n_success": 0, "n_failed": n_iter,
+                "wall_seconds": time.perf_counter() - t0,
+                "best_message": msg}
+
+    full_pd = dict(fitted)
+    full_pd.update(best_stats.get("fitted_concs", {}) or {})
+    for _kn, _dh in (best_stats.get("dH_values", {}) or {}).items():
+        full_pd[f"ΔH({_kn})"] = float(_dh)
+    if q_offset_fixed is None:
+        full_pd["q_offset"] = float(best_stats.get("q_offset", 0.0))
+    names  = list(full_pd.keys())
+    _kinds = _build_param_kinds(log_keys=fit_keys, fit_conc_keys=fit_conc_keys,
+                                fit_titrant_keys=[])
+
+    def _worker(i, rng):
+        try:
+            pp = _sample_nuisance_params(params, nuisance_specs, rng)
+            pp = dict(pp); pp["_itc_raw"] = raw_itc
+            ok_b, logKs_b, stats_b, _ = fit_itc(
+                parsed, network, q_exp, raw_itc, pp, logK_vals,
+                fit_keys, x_expr,
+                tolerance=tolerance, maxiter=maxiter, timeout_s=timeout_s,
+                fit_conc_keys=fit_conc_keys, q_offset_fixed=q_offset_fixed,
+                constraints=constraints, excl_set=excl_set)
+            if not ok_b:
+                return None
+            out = dict(logKs_b)
+            out.update(stats_b.get("fitted_concs", {}) or {})
+            for _kn, _dh in (stats_b.get("dH_values", {}) or {}).items():
+                out[f"ΔH({_kn})"] = float(_dh)
+            if q_offset_fixed is None:
+                out["q_offset"] = float(stats_b.get("q_offset", 0.0))
+            return out
+        except Exception:
+            return None
+
+    raw_s = _run_iter(_worker, (), n_iter, n_jobs, progress_callback,
+                      np.random.SeedSequence(seed))
+    samples, mc_se, mc_median, mc_ci_lo, mc_ci_hi, n_ok, n_fail = \
+        _mc_finalise(raw_s, names)
+    return {"samples": samples, "mc_se": mc_se,
+            "mc_median": mc_median, "mc_ci_lo": mc_ci_lo, "mc_ci_hi": mc_ci_hi,
+            "best_fit": full_pd, "best_stats": best_stats,
+            "param_kinds": _kinds, "nuisance_specs": dict(nuisance_specs),
+            "n_iter": n_iter, "n_success": n_ok, "n_failed": n_fail,
+            "wall_seconds": time.perf_counter() - t0,
+            "best_message": msg}
+
+
+# ── Cluster offload hook ─────────────────────────────────────────────────────
+# Wraps every public bootstrap / jackknife / Monte Carlo entry point so the
+# app can capture a call and submit it to a SLURM cluster instead of running
+# it here (see equilibrist_hpc.py).  A no-op unless a capture is armed.
+try:
+    from equilibrist_hpc import install_offloadable as _install_offloadable
+    _install_offloadable(
+        globals(),
+        [_n for _n in list(globals())
+         if _n.startswith(("bootstrap_", "jackknife_", "monte_carlo_"))],
+        "equilibrist_bootstrap")
+except ImportError:
+    pass

@@ -19,3 +19,7 @@ matplotlib>=3.7          # required for publication-quality PDF export
 # File I/O
 openpyxl>=3.1
 Pillow>=10.0
+
+# Supercomputer (SLURM) submission over SSH — only needed for that feature
+paramiko>=3.0
+nmrglue>=0.10           # NMR stack tool (nmr_stack.py): Bruker FID reading

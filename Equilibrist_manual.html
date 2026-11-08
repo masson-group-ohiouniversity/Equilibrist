@@ -100,7 +100,7 @@
 <body>
 
 <header>
-  <div class="badge">User Manual · v2.0</div>
+  <div class="badge">User Manual · v3.0 beta</div>
   <h1>Equilibrist</h1>
   <p class="subtitle">A thermodynamic and kinetic solver — with a full statistical-validation, identifiability and uncertainty-quantification layer</p>
   <span class="version">Python · Streamlit · Open Source</span>
@@ -146,6 +146,7 @@
   <a href="#data-spectra">UV-Vis Spectra Data</a>
   <a class="sub" href="#data-spectra-sheet2">Known spectra (sheet 2)</a>
   <a href="#data-kinetics">Kinetics Data Files</a>
+  <a href="#itc">ITC (.itc)</a>
 
   <span class="nav-section">Interface</span>
   <a href="#sidebar">Left Margin Controls</a>
@@ -162,8 +163,10 @@
   <a class="sub" href="#stats-ic-formulas">AIC / AICc / BIC</a>
   <a class="sub" href="#stats-ic-dw-sw">Durbin–Watson / Shapiro</a>
   <a href="#stats-residual-panel">Residual diagnostics figure</a>
+  <a href="#tabs-global">Tabs &amp; global fit</a>
   <a href="#stats-profile-1d">1D RMSE profile</a>
   <a href="#stats-profile-2d">2D RMSE profile</a>
+  <a href="#stats-trace">Profile trace</a>
   <a href="#stats-corr">Correlation heatmap</a>
   <a href="#stats-ident">Identifiability (sloppy spectrum)</a>
   <a href="#stats-ttest">Parameter t-tests</a>
@@ -176,12 +179,17 @@
   <a href="#stats-lst">Local sensitivity (ξ)</a>
   <a href="#stats-compare">Model comparison</a>
   <a href="#stats-rank">Rank analysis (EFA / TFA)</a>
+  <a href="#hpc">Running on a supercomputer</a>
+  <a href="#pyscript">Custom Python scripts</a>
 
   <span class="nav-section">Reproducibility</span>
   <a href="#export">Export &amp; Snapshot</a>
   <a href="#session">Save &amp; Load Session</a>
   <a href="#pubfig">Publication Figures</a>
   <a href="#cycle-detection">Cycle Detection</a>
+
+  <span class="nav-section">Tutorials</span>
+  <a href="#tutorials">Tutorial index</a>
 
   <span class="nav-section">Examples</span>
   <a href="#ex-1to1">1:1 Binding</a>
@@ -211,6 +219,16 @@
 <h2>Overview</h2><div class="section-line"></div>
 <p>Equilibrist is a browser-based scientific application built with Python and Streamlit. It runs locally on your machine. You define a chemical system via a plain-text script, simulate titration or time-resolved curves, and optionally fit binding or rate constants to experimental data.</p>
 
+<div class="callout success">
+<div class="callout-title">New in this revision (v3.0 beta, November 2026)</div>
+<ul>
+  <li><strong>Global fits across techniques.</strong> Tabs holding different kinds of data (NMR integrals with an internal standard, NMR shifts, UV-Vis, ITC, kinetic runs) are fitted together; the fit message and the Tabs list report each tab's share of the information on every shared constant; the residual diagnostics and the identifiability tools are available in every tab after a global fit (Tutorials 21 and 22).</li>
+  <li><strong>ITC documented.</strong> The calorimetry mode has its own chapter (<a href="#itc">ITC</a>); Tutorial 23 adds a three-step network with an endothermic step.</li>
+  <li><strong>Kinetics fits</strong> now compare the model with every data point at its own time, which removes a small bias on fast features such as oscillations (Tutorial 24).</li>
+  <li><strong>Tutorial index</strong> (<a href="#tutorials">Tutorials</a>) for the 24 tutorials and their variants.</li>
+</ul>
+</div>
+
 <h3>Key capabilities</h3>
 <ul>
   <li><strong>Arbitrary equilibrium networks</strong> — any number of species, reactions, stoichiometries, and multiple products per reaction.</li>
@@ -220,7 +238,10 @@
   <li><strong>UV-Vis global spectral fitting</strong> — Beer–Lambert analysis over any wavelength range; molar absorptivities solved analytically at each step.</li>
   <li><strong>NMR fitting</strong> — fast-exchange chemical shift, slow-exchange integration, and simultaneous mixed-mode fitting. Available in both equilibrium and kinetics modes.</li>
   <li><strong>Concentration fitting</strong> — direct fitting of measured species concentrations.</li>
-  <li><strong>Dual optimizer (concentration mode)</strong> — L-BFGS-B (fast, gradient-based) followed by Nelder-Mead (robust, gradient-free), user-selectable per fit run.</li>
+  <li><strong>Tabs and global fit</strong> — several experiments, of the same or different kinds (concentrations, NMR, UV-Vis, ITC, kinetics), fitted at once; constants shared by name, each tab weighted by its own misfit, diagnostics on all tabs or on one.</li>
+  <li><strong>ITC</strong> — MicroCal <code>.itc</code> thermograms integrated in the app; binding constants fitted with stepwise enthalpies and a heat offset; ΔG°, ΔH°, ΔS° table; competition experiments with fixed enthalpies.</li>
+  <li><strong>Supercomputer offload</strong> — fits and every statistical tool can be submitted to a SLURM cluster and collected later.</li>
+  <li><strong>Dual optimizer (concentration mode)</strong> — L-BFGS-B (fast, gradient-based) followed by Nelder-Mead (robust, gradient-free) when the first does not improve the fit.</li>
   <li><strong>User-defined soft bounds on K</strong> — restrict the optimizer to physically meaningful equilibrium constant ranges.</li>
   <li><strong>Free energy table</strong> — after fitting, ΔG° (equilibrium) and ΔG‡ (rate constants, Eyring) are reported in kcal/mol at the script temperature.</li>
   <li><strong>Publication-quality figure export</strong> — one-click PDF with vector text, Arial font, for subsequent editing in Adobe Illustrator.</li>
@@ -346,20 +367,36 @@ streamlit run app.py</code></pre>
 <h3>Equilibrist folder contents</h3>
 <p>The Equilibrist folder should contain the following files — nothing else is required:</p>
 <pre><code>Equilibrist/
-├── app.py                          ← main application entry point
-├── equilibrist_parser.py
-├── equilibrist_network.py
-├── equilibrist_kinetics.py
-├── equilibrist_kinetics_nmr.py
-├── equilibrist_kinetics_spectra.py
-├── equilibrist_curve.py
-├── equilibrist_fit_conc.py
-├── equilibrist_fit_nmr.py
-├── equilibrist_fit_spectra.py
-├── equilibrist_io.py
-├── requirements.txt                ← pip install list
-├── environment.yml                 ← conda environment definition
-└── README.md</code></pre>
+├── app.py                              ← main application entry point
+├── equilibrist_parser.py               ← script parser
+├── equilibrist_network.py              ← reaction network and equilibrium solver
+├── equilibrist_curve.py                ← titration curves
+├── equilibrist_fit_conc.py             ← concentration fits
+├── equilibrist_fit_nmr.py              ← NMR fits (shift, integration, mixed)
+├── equilibrist_fit_spectra.py          ← UV-Vis fits
+├── equilibrist_itc.py                  ← isothermal titration calorimetry
+├── equilibrist_kinetics.py             ← kinetics integrator and concentration fits
+├── equilibrist_kinetics_nmr.py         ← kinetics followed by NMR
+├── equilibrist_kinetics_spectra.py     ← kinetics followed by UV-Vis
+├── equilibrist_shift_constraints.py    ← NMR shift constraints
+├── equilibrist_diagnostics.py          ← statistical and identifiability layer
+├── equilibrist_bootstrap.py            ← bootstrap, jackknife, Monte Carlo
+├── equilibrist_global.py               ← global fit across tabs
+├── equilibrist_tabs.py                 ← tabs (workspaces)
+├── equilibrist_live.py                 ← live progress of running fits
+├── equilibrist_hpc.py                  ← SLURM cluster offload (also the driver run on the cluster)
+├── equilibrist_hpc_ui.py               ← supercomputer panel
+├── equilibrist_pyscript.py             ← custom Python script hook
+├── equilibrist_session.py              ← FAIR JSON session save and restore
+├── equilibrist_io.py                   ← data files, export, figures
+├── custom_script_example.py            ← starting point for a custom script (two more examples alongside)
+├── nmr_stack.py, nmr_stack_core.py     ← companion NMR stack tool
+├── TUTORIALS/                          ← 24 tutorials (scripts and data) and the generators of the synthetic ones
+├── .streamlit/config.toml              ← Streamlit settings used by the tabs
+├── requirements.txt                    ← pip install list
+├── environment.yml                     ← conda environment definition
+├── README.md
+└── Equilibrist_manual.html             ← this manual</code></pre>
 <p>A <code>__pycache__</code> folder may appear after first run — this is normal.</p>
 </section>
 
@@ -834,7 +871,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
   <p>Constraints are <strong>never active by default</strong>. The <strong>Activate constraints</strong> checkbox appears in the sidebar only when a <code>$constraints</code> section is present in the script. It is unchecked on every script load.</p>
 </div>
 
-<p>All modes support constraints: concentration, NMR (shift, integration, mixed), spectra, and kinetics (all variants). Equilibrium constants, forward rate constants, and reverse rate constants may all appear in the same constraint.</p>
+<p>All modes support constraints: concentration, NMR (shift, integration, mixed), spectra, and kinetics (all variants). Equilibrium constants, forward rate constants, and reverse rate constants may all appear in the same constraint. Equality constraints that are linear in log K (ties such as <code>K_a = K_b</code>, chained equalities, or <code>K_a = K_b + 1</code>) are solved exactly in every fit, single-tab and global: the tied constants move together during the fit and come out exactly tied. Inequalities and K-space products are enforced through a penalty.</p>
 
 <h3 id="constraints-logspace">Log-space syntax (default)</h3>
 <p>When the expression contains only multiplication, division, or isolated parameter names — no addition or subtraction between parameters — Equilibrist evaluates everything in log space.</p>
@@ -930,7 +967,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <!-- ═══════════════════════════════════════ DATA CONCENTRATION ═══════════════════════════════════════ -->
 <section id="data-conc">
 <h2>Concentration Data Files</h2><div class="section-line"></div>
-<p>Used in equilibrium mode when neither <code>$nmr</code> nor <code>$spectra</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as column headers.</p>
+<p>Used in equilibrium mode when neither <code>$nmr</code> nor <code>$spectra</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as column headers. A row whose column-A cell starts with <code>#</code> is a comment row: everything on that row is ignored, so proton labels or notes can sit under the header.</p>
 <table class="kw-table">
   <thead><tr><th>Column</th><th>Content</th></tr></thead>
   <tbody>
@@ -943,7 +980,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <!-- ═══════════════════════════════════════ DATA NMR ═══════════════════════════════════════ -->
 <section id="data-nmr">
 <h2>NMR Data Files</h2><div class="section-line"></div>
-<p>Used in equilibrium mode when <code>$nmr</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as headers. For kinetics NMR data see <a href="#data-kinetics">Kinetics Data Files</a>.</p>
+<p>Used in equilibrium mode when <code>$nmr</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as headers. For kinetics NMR data see <a href="#data-kinetics">Kinetics Data Files</a>. A row whose column-A cell starts with <code>#</code> is a comment row: everything on that row is ignored, so proton labels or notes can sit under the header.</p>
 <table class="kw-table">
   <thead><tr><th>Column</th><th>Shift mode</th><th>Integration mode</th></tr></thead>
   <tbody>
@@ -1025,7 +1062,48 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 
 <h3>UV-Vis spectra data ($spectra present)</h3>
 <p>Same format as equilibrium spectra data, but column A rows 2+ contain time in seconds instead of volume. See <a href="#data-spectra">UV-Vis Spectra Data Files</a> for the full layout.</p>
+<p>In every kinetics fit (concentrations, NMR, spectra) the model is integrated on a 200-point grid from 0 to the time maximum <em>plus every experimental time</em>, so the data are compared with the model exactly at their own times; the sidebar <em># points</em> only sets the plotted curve. A data point beyond <code>xmax</code> extends the simulation to it.</p>
 </section>
+
+<!-- ─────────────────────────── ITC ─────────────────────────── -->
+<section id="itc">
+<h2>ITC — isothermal titration calorimetry</h2><div class="section-line"></div>
+<p>ITC mode starts when a MicroCal <code>.itc</code> raw thermogram is dropped on the experimental-data uploader of an equilibrium script (no <code>$nmr</code>, no <code>$spectra</code>, no kinetic step). The app integrates the injection peaks itself, fits the binding constants to the integrated heats, and solves the reaction enthalpies and a heat offset linearly at every step, as it solves molar absorptivities in a UV-Vis fit.</p>
+
+<h3>Script</h3>
+<table class="kw-table">
+  <thead><tr><th>Section</th><th>Meaning in ITC mode</th></tr></thead>
+  <tbody>
+    <tr><td><code>$concentrations</code></td><td>The first entry is the species in the cell (<code>G0</code>). Further entries are other cell components (a competitor <code>M0</code>), diluted like the first.</td></tr>
+    <tr><td><code>$titrant</code></td><td>The species in the syringe and its stock concentration (<code>Ht</code>).</td></tr>
+    <tr><td><code>$volumes</code></td><td><code>V0</code> is the cell volume (iTC200 about 0.20 mL, VP-ITC 1.42 mL). It is not taken from the file: type it in the script or in the V₀ box.</td></tr>
+    <tr><td><code>$temperature</code></td><td>The temperature used for ΔG° and ΔS° (default 25 °C).</td></tr>
+    <tr><td><code>$reactions</code></td><td>Equilibria as usual, log K in M<sup>−1</sup>. <code>; dH = −3.5</code> on a reaction line holds that reaction's enthalpy (kcal/mol) fixed.</td></tr>
+  </tbody>
+</table>
+<p>The values may be left out (<code>G0</code>, <code>V0</code>, <code>Ht</code> as bare names, Tutorial 19B): the app then asks for the file first. When the file is loaded, its header sets the cell and syringe concentrations (overwriting values written in the script) and the x-axis maximum, estimated as the molar ratio reached by the last injection.</p>
+
+<h3>The .itc file</h3>
+<p>The parser reads the MicroCal raw format: a header with the injection table, the cell and syringe concentrations, the cell volume and the temperature, followed by the power trace (time in s, differential power in µcal/s) with an <code>@N</code> marker at every injection. Injection 0 is the dummy: it is integrated and displayed, its volume counts in the running concentrations, but it is never fitted. Files holding integrated heats only (spreadsheets, Origin exports) are not read.</p>
+
+<h3>Integration</h3>
+<p>Each injection window is corrected with a straight baseline from the plateau before the injection to the plateau before the next one (12 points each) and integrated from the injection to the point where the corrected signal has settled within 3.5 × the baseline noise, plus 8 further points (40 s at the usual 5 s interval). The thermogram plot shows the trace, the baselines and the integrated heats as dots on a right-hand axis (µcal); after a fit the calculated heats are added. Under <strong>⚙️ Adjust per-injection baselines</strong> the pre- and post-injection levels of every injection can be edited and the peaks re-integrated (<em>Re-integrate</em>). Click a dot to exclude that injection from the fit (it turns hollow; click again to restore it, or <em>✕ Clear all</em>). <strong>↺ Clear ITC data</strong> removes the file. Synthetic thermograms must use realistic, fast peaks: with a 22 s decay the integration window loses 1.5 % of every large peak, which lands directly in the enthalpies.</p>
+
+<h3>Model</h3>
+<p>Concentrations follow the overflow model of a constant-volume cell: after an injection of volume ΔV every cell species is diluted by V<sub>0</sub>/(V<sub>0</sub> + ΔV) and the titrant gains H<sub>syringe</sub>·ΔV/(V<sub>0</sub> + ΔV). The equilibrium composition is solved at every injection with the script's network, and the heat of injection <em>i</em> is</p>
+<p style="text-align:center">q<sub>i</sub> = V<sub>0</sub> Σ<sub>k</sub> ΔH<sub>k</sub> Δξ<sub>k</sub> + q<sub>offset</sub></p>
+<p>where ξ<sub>k</sub> is the <em>extent</em> of reaction k, obtained from the species concentrations (for sequential binding ξ<sub>1</sub> = [GH] + [GH<sub>2</sub>] and ξ<sub>2</sub> = [GH<sub>2</sub>]), and Δξ<sub>k</sub> its change over the injection once the previous state has been diluted. The ΔH<sub>k</sub> are therefore the <strong>stepwise</strong> enthalpies of the reactions as written, not cumulative ones; q<sub>offset</sub> is a heat common to every injection (dilution).</p>
+
+<h3>Fitting</h3>
+<p>Tick the constants to fit and press <em>Fit Parameters</em>. The log K are optimised by Nelder–Mead with the usual Tol and Timeout; at every step the ΔH<sub>k</sub> and q<sub>offset</sub> are solved by linear least squares. The <strong>q_offset (µcal)</strong> box in the sidebar has its own fit tick: unticked (the default) the offset is held at the value in the box, 0 unless you type one. A reaction carrying <code>dH = …</code> keeps that enthalpy; this is required in displacement or competition experiments, where the competitor's enthalpy comes from a separate titration (its column would otherwise be collinear with the offset). Initial concentrations can be fitted as in any titration.</p>
+
+<h3>Results</h3>
+<p>Below the plot: R², the RMSE in µcal, the number of injections fitted, the reduced χ², q<sub>offset</sub> and the number of evaluations; the <em>Fitted constants</em> table (log K ± and K ±); and the <em>Thermodynamics</em> table at the script temperature: ΔG° = −RT ln K, ΔH°, ΔS° = (ΔH° − ΔG°)/T in cal mol<sup>−1</sup> K<sup>−1</sup>, and TΔS° in kcal/mol. The ± on ΔH° is the linear least-squares error at the fitted K and does not include the uncertainty of K; in a three-step network it can understate the real spread by an order of magnitude (Tutorial 23). Use the bootstrap for combined errors: the bootstrap, the jackknife and the Monte Carlo have ITC versions, and ITC tabs take part in the global fit like any other.</p>
+
+<h3>Tutorials</h3>
+<p>19 (1:1 binding), 19B (blank values filled from the file), 19C and 19D (a competitor; 19D with fixed enthalpies), 19E (two binding modes of the same partners), 20B (sequential 1:2 with enthalpies of opposite sign), 23 (three steps, one endothermic).</p>
+</section>
+
 
 <!-- ═══════════════════════════════════════ SIDEBAR ═══════════════════════════════════════ -->
 <section id="sidebar">
@@ -1060,7 +1138,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <ul>
   <li><strong>Min / Max</strong> — wavelength range used for both the spectral plot and fitting.</li>
   <li><strong>Auto-optimize range</strong> — two-pass procedure selects the most discriminating sub-range. Boxes update after fitting.</li>
-  <li><strong>Allow negative absorbances</strong> — unconstrained ε (signed); useful for CD spectra.</li>
+  <li><strong>Allow negative absorbances</strong> — unconstrained molar absorptivities (plain least squares instead of non-negative). Required for CD spectra, and advisable whenever a species stays a minor component: the ε ≥ 0 constraint clips the noise of its poorly determined spectrum and biases its constant upward with a deceptively small error (Tutorial 21C: log K<sub>2</sub> 3.36 ± 0.19 against a truth of 2.50; unconstrained, 3.2 ± 0.3 with a flat profile).</li>
 </ul>
 
 <h3>Equilibrium constants / Rate constants / pKa values</h3>
@@ -1072,12 +1150,11 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <table class="kw-table">
   <thead><tr><th>Control</th><th>Meaning</th><th>Default</th></tr></thead>
   <tbody>
-    <tr><td>Tol (−log)</td><td>Convergence tolerance as 10<sup>−n</sup>.</td><td>6.0</td></tr>
-    <tr><td>Timeout (s)</td><td>Maximum wall-clock time. Best result found is returned if exceeded.</td><td>30</td></tr>
-    <tr><td>L-BFGS-B</td><td>Enable gradient-based optimizer (concentration mode only).</td><td>✓ on</td></tr>
-    <tr><td>Nelder-Mead</td><td>Enable simplex optimizer (all modes).</td><td>✓ on</td></tr>
+    <tr><td>Tol (−log)</td><td>Convergence target for the fitted constants, in log units: the fit is declared converged when the search has narrowed to 10<sup>−n</sup> in every constant. Errors on constants are typically 0.01&ndash;0.1 log units, so 3&ndash;4 is usually sufficient; 6 is very tight and is rarely reached before the Timeout.</td><td>3.0</td></tr>
+    <tr><td>Timeout (s)</td><td>Maximum wall-clock time for one fit. When it expires the best point found so far is kept, and the fit message says so.</td><td>30</td></tr>
   </tbody>
 </table>
+<p>After every fit the banner above the controls states how the fit ended: <em>converged</em> (the search narrowed below Tol, with the number of evaluations, the time taken and how much the constants still moved over the last iterations), <em>stopped by the Timeout</em> (not converged &mdash; the message gives the movement of the constants in the last iterations so you can judge how far from converged it was; pressing Fit again continues from the current values), or <em>stopped at the iteration cap</em>.</p>
 <p><strong>🔧 Fit Parameters</strong> — disabled until data are loaded and at least one parameter checkbox is ticked.</p>
 
 <h3>Experimental data</h3>
@@ -1104,7 +1181,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <p>The right column (both equilibrium and kinetics modes) presents controls and results in this order:</p>
 <ol>
   <li><strong>Fit message</strong> — green success or yellow warning banner from the previous fit run.</li>
-  <li><strong>Solver options</strong> — Tol, Timeout, L-BFGS-B and Nelder-Mead checkboxes, Fit Parameters button.</li>
+  <li><strong>Solver options</strong> — Tol, Timeout, the Fit Parameters button and, with several tabs, the Global fit button next to it (concentration mode runs L-BFGS-B then Nelder-Mead; the other modes Nelder-Mead).</li>
   <li><strong>Data Export</strong> — 💾 Export data and 📸 Snapshot buttons.</li>
   <li><strong>Experimental data</strong> — file uploader, reset button, loaded file badge, data summary.</li>
   <li><strong>Fit Statistics</strong> — R², RMSE, fitted constants table, free energy table, NMR assignment tables (shown only after a fit run).</li>
@@ -1114,7 +1191,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <!-- ═══════════════════════════════════════ MAIN PLOT ═══════════════════════════════════════ -->
 <section id="main-plot">
 <h2>Main Plot</h2><div class="section-line"></div>
-<p>The main chart shows simulated concentration curves [mM] vs. the evaluated <code>x</code> expression (equilibrium) or time [s] (kinetics), clipped to xmax. After fitting, back-calculated data points are overlaid as filled circles in matching colors:</p>
+<p>The main chart shows simulated concentration curves [mM] vs. the evaluated <code>x</code> expression (equilibrium) or time [s] (kinetics), clipped to xmax. After fitting, back-calculated data points are overlaid as circles in matching colors: filled when the concentration comes from chemical shifts or from UV-Vis spectra, open when it comes from NMR integrals. Excluded back-calculated points carry a cross inside the circle.</p>
 <ul>
   <li><strong>Spectra mode</strong> — points from back-projection of A through ε.</li>
   <li><strong>NMR integration</strong> — points from mass-balance deconvolution of integrals.</li>
@@ -1149,7 +1226,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 </ul>
 
 <h4>Bidirectional NMR / concentration linking</h4>
-<p>When NMR data is present, the main plot shows back-calculated concentration dots and the secondary NMR plot shows the corresponding shift dots. Exclusions on either plot are linked:</p>
+<p>When NMR data is present, the main plot shows back-calculated concentration dots and the secondary NMR plot shows the corresponding shift dots. Points from integrals come from the mass balance alone. Points from chemical shifts invert the fitted pure-species shifts; when the signals cannot tell some species apart (fewer signals than species, or near-identical shift changes), only the combinations the shifts resolve are read from the data and the other directions follow the model, and a caption under the plot says how many combinations were resolved. Exclusions on either plot are linked:</p>
 <ul>
   <li><strong>Click a shift dot</strong> (NMR plot) → excludes only that column/row pair. The concentration dot on the main plot is unaffected unless all shift columns at that row are excluded.</li>
   <li><strong>Click a back-calc concentration dot</strong> (main plot) → excludes the entire row across all NMR columns simultaneously, hollowing all shift dots at that x-point.</li>
@@ -1305,7 +1382,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <!-- ═══════════════════════════════════════ STATISTICAL LAYER ═══════════════════════════════════════ -->
 <section id="stats-overview">
 <h2>Statistical Diagnostics &amp; Uncertainty</h2><div class="section-line"></div>
-<p>Equilibrist v2.0 ships a complete statistical-validation layer below the standard fit statistics. Every fit — equilibrium or kinetics, in any mode — emits AIC, AICc, BIC, Durbin–Watson, and Shapiro–Wilk automatically. Eight further panels are gated by individual <em>Show…</em> checkboxes that appear in the right panel after fitting, so the page stays uncluttered until a diagnostic is wanted.</p>
+<p>Since v2.0 Equilibrist ships a complete statistical-validation layer below the standard fit statistics. Every fit — equilibrium or kinetics, in any mode — emits AIC, AICc, BIC, Durbin–Watson, and Shapiro–Wilk automatically. Eight further panels are gated by individual <em>Show…</em> checkboxes that appear in the right panel after fitting, so the page stays uncluttered until a diagnostic is wanted.</p>
 
 <p>The panels are organised into five families:</p>
 
@@ -1441,10 +1518,53 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <p>The same expander block also exposes the 1D RMSE profile (next section), so the most-used identifiability check is one click below the residual figure.</p>
 </section>
 
+<!-- ─────────────────────────── Tabs & global fit ─────────────────────────── -->
+<section id="tabs-global">
+<h2>Tabs and the global fit</h2><div class="section-line"></div>
+<p>One titration rarely pins every constant of a large scheme. Equilibrist can hold several experiments at once, each in its own <strong>tab</strong>, and fit them together.</p>
+<h3>Tabs</h3>
+<p><strong>➕ New tab</strong> (sidebar, under <em>Reset / load new script</em>) opens an empty workspace: load a script and a data file as usual. The tabs are listed under the script name; click one to switch. Every tab keeps its own script, data, constants, fit ticks, fit result and diagnostics, so two tabs may run the same script on different data, or entirely different scripts. <strong>✖ Close this tab</strong> removes the active tab. The Tol and Timeout settings are shared.</p>
+<h3>Global fit</h3>
+<p><strong>🌐 Global fit (all tabs)</strong> sits under <em>Fit Parameters</em> once a second tab exists. It runs one optimisation over every tab that has data loaded and at least one "fit" box ticked, with these rules:</p>
+<ul>
+  <li>a constant is <strong>shared by name</strong>: one value for every tab whose script contains it; it is fitted globally when it is ticked in at least one tab, and tabs where it is not ticked still receive the shared value (unticking it in one tab does not hold it at that tab's own value: give the constant another name in that script if it must stay local);</li>
+  <li>a constant that occurs in one script only is simply that tab's parameter;</li>
+  <li>fitted concentrations and titrant stocks stay <strong>local</strong> to their tab;</li>
+  <li>every tab applies its own bounds (<code>from … to …</code>) and, if its constraint toggle is on, its own <code>$constraints</code>; bounds therefore intersect and constraints accumulate;</li>
+  <li>each tab's objective is normalised to its own data variance, as in a single fit; by default the tabs are then rescaled to their own misfit (<em>Weighting of the tabs</em>, below), or plainly summed when that box is unticked.</li>
+</ul>
+<p>A tab with no tick at all is left out, and the caption under the button says so ("Left out — …: no 'fit' box ticked"): tick at least one constant in every tab that should contribute. Which constants are fitted is then decided by the union of all ticks, so three constants ticked in one tab and one in another give the same fit as all three ticked everywhere.</p>
+<p>The optimiser is Nelder–Mead with the usual Tol and Timeout. Errors come from the Hessian of the summed data term, with the same null-space handling of equality constraints and the same flatness probe as single fits. When the fit ends, every tab receives the shared values, its own RMSE, residual plots, back-calculated points and residual record (so the residual diagnostics and their children are available in every tab), and the green message reports the global RMSE together with the RMSE of each tab, the relative weights and, for every shared constant, each tab's share of the information (next section). Equilibrium constants are printed as log K, rate constants linear with their units. The starting values of the shared constants are those in the sidebar of the tab from which the button was pressed; a shared constant absent from that tab starts from the first tab, in list order, that has it.</p>
+<p>A tab takes part only after it has been opened once with its data loaded, because its settings are registered while it is on screen; the caption under the button lists the tabs that will be included. Session files save one tab at a time.</p>
+<h3>Information shares</h3>
+<p>The curvature of the weighted objective at the solution is what sets the errors of the shared constants, and it is a sum over tabs. For every shared constant the fit message gives each tab's part of that curvature (the second derivative of its weighted objective along the constant) as a percentage of the total, and the Tabs list in the sidebar shows next to each name the mean of that tab's shares over the shared constants. A share says how much of what pins a constant comes from that tab's data: in Tutorial 21 the integration tab carries 93 % of the information on K<sub>2</sub> but 4 % on K<sub>1</sub>, although its relative weight is only 0.013. The shares are read-outs, not settings: they follow from the data and from the weighting, they are diagonal (a tab that determines only the product of two constants contributes to both), and the percentage leaves the Tabs list when a tab is refitted alone.</p>
+<h3>Diagnostics on all tabs or on this tab only</h3>
+<p>After a global fit a <strong>Diagnostics on</strong> switch appears above <em>Show fit statistics</em>: <em>all tabs (global)</em> runs every diagnostic below (1D and 2D RMSE profiles, profile trace, sensitivity test, bootstrap, jackknife and Monte Carlo) on the global objective, refitting all tabs together with the scanned constant pinned everywhere it occurs; <em>this tab only</em> runs the same diagnostics on this tab's data alone, with this tab's own fit ticks and the global constants as starting values. The second view shows what each experiment by itself says about a constant (a double basin visible in one titration and not in another, for instance), the first what the data together say. Changing the switch clears the diagnostics shown, so each one is recomputed in the chosen scope. The model comparison (ΔAIC, ΔBIC, F-test) is the exception: it always refits the alternative model on the active tab's own data. In <em>this tab only</em> a constant that the tab's data do not determine makes every pinned refit run to the Timeout (the free constant wanders along a flat valley), so such a profile takes minutes per grid point. For a weighted global fit the profiles, maps and trace compare the weighted objective (as a root-mean-square per point) rather than the pooled RMSE, so that their minimum is the fitted point.</p>
+<h3>Errors and diagnostics of a global fit</h3>
+<p>After a global fit, every tab's diagnostics run on the <em>global</em> objective, that is, on all experiments at once. The 1D and 2D RMSE profiles, the profile trace and the local sensitivity test pin the chosen constant(s) in every experiment that contains them and refit all the others globally; a constant that exists in one tab only can be scanned too. The bootstrap resamples the residuals of every experiment and refits globally; the jackknife drops one titration step of one experiment at a time (all experiments' steps are enumerated); the Monte Carlo applies the relative uncertainties you give (initial concentrations, titrant stock, V<sub>0</sub>) to every experiment that has that quantity, sampled independently. Fitted concentrations are reported as <code>name@tab</code>. All of these accept <em>Parallel</em> and the supercomputer submission exactly as for a single fit, and each refit of a global diagnostic costs about the sum of the single-experiment evaluation times, so budget the Timeout accordingly.</p>
+<p>The Hessian errors reported after a global fit come from the summed data term of all experiments, with the same null-space handling of equality constraints and the same flatness probe as single fits; each tab's correlation heatmap shows the block of the global covariance for its own constants.</p>
+<p>The global fit covers every mode: equilibrium titrations followed by concentration, NMR (shift, integration, mixed), UV–Vis spectra or ITC, and kinetics followed by concentration, NMR or spectra. Tabs of different kinds may be mixed in one global fit; a rate constant and an equilibrium constant are shared across tabs by name exactly like any other parameter. In the kinetics branch the Global fit button sits under the kinetics Fit Parameters button.</p>
+<h3>Running a fit on a supercomputer</h3>
+<p>A multi-tab fit easily takes ten minutes or more on a laptop, and a single NMR fit with a tight tolerance can too. Below the fit buttons, <strong>🖥️ Run on a supercomputer (SLURM)</strong> opens the same connection panel as the statistical tools, with one submit button per kind of fit: <em>Submit this tab's fit</em> ships this tab's script, data, ticks and settings as one job; with several tabs a second button, <em>Submit the global fit</em>, ships all tabs. When the job ends the result is loaded back exactly as the local fit would have been — fitted constants into the boxes, statistics, errors, and the fit record the diagnostics use (into every tab for a global fit, into the tab it was submitted from for a single fit, even if you are looking at another tab by then). The job list under the button shows the progress; you can close the browser meanwhile. A result is applied only if the tab(s) it was submitted from still exist. A fit is a single sequential task: it is always submitted on 1 node × 1 CPU, whatever the Nodes and CPUs fields say (those apply to the statistical tools, which spread their refits over every task requested), and it runs for the <em>Wall time</em> entered in the panel, minus a margin for the environment start-up and the final statistics (15 %, at least 3 min) — the Timeout next to Tol applies to fits run on this computer only. Note that a cluster core is not faster than a laptop core for a sequential fit (on OSC's Pitzer one evaluation takes about 2.4× longer than on an Apple-silicon Mac); the cluster is for running long unattended, and for the statistical tools.</p>
+<h3>Weighting of the tabs and restarts</h3>
+<p>Every fit function minimises a dimensionless objective (its residuals divided by the variance of that tab's own data), so in a plain sum a tab the model fits badly weighs in proportion to its misfit and can drag a shared constant away from what a clean tab says. With <strong>Weight tabs by their own fit</strong> (default) each tab's objective is rescaled to its own misfit, w<sub>i</sub> = n<sub>i</sub>/obj<sub>i</sub>, re-estimated after each optimiser pass (the first pass is a plain sum), so at the end every tab contributes about n<sub>i</sub> (a reduced χ² of one) whatever its noise or residual level. The relative weights are listed in the fit message; untick the box for a plain sum. The Hessian errors use the same weighted objective, scaled by its reduced χ², and all global diagnostics (profiles, trace, bootstrap, jackknife, Monte Carlo) use the weighting of the fit they belong to.</p>
+<p><strong>Share pure-species shifts across tabs</strong> (below the weighting box). In a plain global fit only the constants are shared: each tab still solves its own chemical shift for every species of its shift columns (GHM, GH2M, GH2M2 …) by linear least squares, so two titrations of the same compound can end with different "pure" shifts for the same species and each tab can absorb part of a misfit in its own shifts. With the box ticked the species shifts are solved <em>once</em> for all tabs: at every evaluation the tabs' shift columns are matched proton by proton through their free shift (the V = 0 row: the same proton has the same free shift in every tab within referencing noise, whatever column it was typed in; a proton found in one tab only keeps its own shifts, and when two protons of one tab lie within 0.05 ppm the columns are paired by position instead), their rows stacked and weighted like the objective itself, and the common shifts solved under the usual <code>read:</code> pins, per-column bounds and shift constraints; every tab's statistics, curves and residuals then describe that common solution. The box is ticked by default when the tabs' shift columns can be matched (same target variables, at least one common proton; the fit refuses otherwise with a message), and the fit message lists the free shifts of the protons that were shared and should be unticked when the tabs follow different protons or different conditions (solvent, temperature, referencing). Expect the residuals to rise a little and the correlated constants to tighten: a misfit that separate shifts could hide becomes visible.</p>
+<p>Independently of the plotted range, every NMR fit now simulates the model out to the last data point: a point beyond the script's <code>xmax</code> (a 10-equivalent check point in a titration plotted to 4) used to be compared with the end of the curve, i.e. with the model at <code>xmax</code> without its own dilution. The fit message says when the range was extended; raise <code>xmax</code> to see the curve there.</p>
+<p><strong><code>standard:</code> in <code>$nmr</code></strong> (integration mode). <code>standard: 1.0 mM</code> declares an internal standard dissolved in the solvent (its concentration is the same in every solution, so no dilution correction). In the data file a column headed <code>Std</code> (or <code>Standard</code>) holds its integrals and normalises the columns that follow it, up to the next <code>Std</code> column: every integral per nucleus is divided by the standard's integral per nucleus of the same spectrum and multiplied by the standard's concentration. Blocks from different nuclei (a 19F block and a 1H block, each with its own <code>Std</code> column) thus land on one absolute scale and are averaged as duplicates of the same species or variable. <code>integration:</code> lists the nuclei per signal for every column, standard columns included. Without <code>pool:</code> the fit uses these absolute concentrations; with <code>pool:</code> it uses only their fractions, renormalised to the known total of complexes, which is robust to an error on the standard.</p>
+<p><strong>Refresh (s)</strong> (under Tol and Timeout). Fits now run in the background, so the page stays live while a fit runs: the progress bar shows the elapsed time, the number of evaluations and the best objective so far (for a global fit, the rms objective of every tab at the current best point: the weighted global objective changes scale whenever the tab weights are re-estimated, and a weighted fit trades one tab's misfit for another's, so no single number is meaningful there), and every Refresh seconds the best constants found so far are written into the sidebar and the page is redrawn with them, so the usual plots update in place. The default is 60 s (a ten-minute fit redraws about ten times); set 5–10 s to watch a short fit, or 0 for no intermediate redraws. This holds for every fit (NMR, concentrations, spectra, ITC, kinetics and the global fit); tabs are locked while a fit runs, and fits sent to the cluster show their progress text instead.</p>
+<p>The global Nelder–Mead optimiser first settles the tab weights with two or three short passes (the weights are re-estimated after each), then runs a full pass, and restarts from its best point with a fresh full-size simplex until a restart no longer lowers the objective (at most five restarts, within the Timeout). A pass is also ended as <em>stationary</em> when the objective has improved by less than Tol/100 (relative) over the last 20 × (n + 1) evaluations: in a flat direction — two constants whose product alone is determined — the simplex never shrinks although the fit stopped changing long before, and without this rule such a fit always ran to the Timeout and was reported as not converged. The message then reads "converged (objective stationary)"; when the Hessian error of a shared constant is missing or exceeds one log unit, it adds that these constants "lie along a flat direction and their individual values are not determined" and names them. Both are converged fits, the second with a warning about identifiability; a timeout is reported only when the objective was still falling when the clock ran out. The number of restarts appears in the fit message.</p>
+<h3>Propagating constants between tabs</h3>
+<p><strong>📤 Propagate ticked constants</strong>, next to the Global fit button, copies the constants that are ticked for fitting in the current tab, at the values shown in their boxes (right after a fit, the fitted values), into every other tab whose script defines a constant of the same name. Only the values move, exactly as a fit writes them back: the other tabs keep their own fit ticks, bounds, data and script text, and a constant with no namesake in a tab is left alone. A notice lists what went to which tab. Since the global fit starts from the boxes of every tab, propagating after a single-tab fit gives all tabs the same starting constants.</p>
+<h3>Monte Carlo with measurement noise on NMR data</h3>
+<p>For any NMR fit (equilibrium or kinetics, single or global) the Monte Carlo panel offers two more inputs besides the uncertainties on the nuisance quantities: <strong>σ on NMR integrations (%)</strong>, a relative error applied point by point to every integration column, and <strong>σ on chemical shifts (ppm)</strong>, an absolute error added point by point to every shift column. Each iteration then fits a freshly perturbed copy of the data (together with the perturbed concentrations, if any), so the spread of the fitted constants reflects the noise level you specify rather than the one inferred from the residuals, which is what the bootstrap does. Which columns are integrals and which are shifts follows the <code>$nmr</code> block of each script.</p>
+</section>
+
 <!-- ─────────────────────────── 1D RMSE profile ─────────────────────────── -->
 <section id="stats-profile-1d">
 <h2>1D RMSE profile</h2><div class="section-line"></div>
 <p>Toggle <strong>🔍 Show parameter profile (RMSE vs each)</strong> inside the residual-diagnostics expander. For each fitted parameter θ<sub>k</sub>, Equilibrist sweeps θ<sub>k</sub> over a user-set range around its fitted optimum; at every grid point θ<sub>k</sub> is held fixed while every other free parameter is refit; the resulting RMSE is plotted as RMSE / RMSE<sub>min</sub> against Δ log θ<sub>k</sub>.</p>
+
+<p>The <strong>Parameters to profile</strong> box chooses which parameters are scanned. By default it holds every parameter that was fitted; the list also offers the constants that were <em>held fixed</em> in the last fit, labelled "(fixed)". A fixed constant is scanned around its fixed value while every fitted parameter is re-optimised at each grid point — the same engine the 2D map uses — and its curve is labelled "(fixed)" in the figure, as a reminder that its centre is an assumption rather than a fit result. Cost is proportional to the number of parameters selected.</p>
 
 <p>This is a direct test of parameter identifiability (cf. Venzon &amp; Moolgavkar 1988; Royall 1997; Hancock et al. 2024, §4.4).</p>
 
@@ -1506,6 +1626,24 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 </table>
 
 <p>When only two parameters were fitted the pair is auto-selected. The contour figure and the underlying RMSE grid are cached and survive a session-save / restore cycle.</p>
+</section>
+
+<!-- ─────────────────────────── Profile trace ─────────────────────────── -->
+<section id="stats-trace">
+<h2>Profile trace</h2><div class="section-line"></div>
+<p>Toggle <strong>📈 Show profile trace (fitted constants vs one scanned parameter)</strong>. One parameter is walked across a user-set range (span and grid as for the 2D map; constants held fixed in the fit may be scanned too). At every step, <em>only the parameters you tick</em> are re-optimised — the other fitted parameters stay at their fitted values — and their fitted values are plotted against the scanned value (left axis, log K, absolute values). The right axis, on log ticks, carries RMSE / RMSE<sub>min</sub> along the scan, so the figure shows at once <em>how</em> the other constants compensate for the scanned one and <em>how much</em> the fit degrades while they do.</p>
+<p>In the profile-likelihood literature these curves are the <em>parameter traces</em> of a profile (Raue et al. 2009): a straight sloping trace with a flat RMSE line is the signature of a compensating pair (only a combination such as a sum or a difference is determined); a flat trace with a rising RMSE line means the scanned parameter is determined on its own.</p>
+<table class="kw-table">
+  <thead><tr><th>Control</th><th>Default</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Scanned parameter</td><td>first fitted</td><td>fitted constants, fitted concentrations / titrants, and "(fixed)" constants</td></tr>
+    <tr><td>Span (log ±)</td><td>1.0</td><td>0.1 – 4.0</td></tr>
+    <tr><td>Grid points (odd)</td><td>11</td><td>3 – 201</td></tr>
+    <tr><td>Parameters refit at each step</td><td>all other fitted</td><td>untick one to hold it at its fitted value</td></tr>
+    <tr><td>Parallel / supercomputer</td><td>off</td><td>one refit per grid point, like the 1D profile</td></tr>
+  </tbody>
+</table>
+<p>Results are cached and saved with the session.</p>
 </section>
 
 <!-- ─────────────────────────── Correlation heatmap ─────────────────────────── -->
@@ -1834,6 +1972,105 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 </div>
 </section>
 
+<!-- ═══════════════════════════════════════ HPC ═══════════════════════════════════════ -->
+<section id="hpc">
+<h2>Running on a supercomputer (SLURM)</h2><div class="section-line"></div>
+<p>The 1D and 2D RMSE profiles, the bootstrap, the jackknife, the Monte Carlo propagation and the local sensitivity test all consist of many <em>independent</em> refits. On a laptop they share the cores ticked by <strong>Parallel (use all cores)</strong>. For large networks, where a single refit takes minutes, the same calculation can instead be sent to a computing cluster that runs the <a href="https://slurm.schedmd.com/" target="_blank" rel="noopener">SLURM</a> scheduler: every refit becomes one task, spread over <em>nodes × CPUs per node</em>. The result that comes back is the same object the local run would have produced, and it appears in the same place in the interface.</p>
+
+<p>Below each <strong>Parallel (use all cores)</strong> box there is a second box, <strong>🖥️ Run on a supercomputer (SLURM)</strong>. Ticking it opens the connection panel and adds a <strong>🚀 Submit … to the supercomputer</strong> button next to the ordinary run button. Settings are shared by all six tools and are remembered between sessions.</p>
+
+<h3>What you need</h3>
+<ul>
+  <li>An account on a cluster that uses SLURM and accepts SSH logins (for example the Ohio Supercomputer Center).</li>
+  <li>The <code>paramiko</code> Python package on <em>your</em> computer. It is part of <code>requirements.txt</code> and <code>environment.yml</code>; for an existing installation run <code>pip install paramiko</code>.</li>
+  <li><code>conda</code> (or any Python ≥ 3.10 with NumPy, SciPy, pandas and joblib) on the cluster. Equilibrist can create the environment for you.</li>
+</ul>
+
+<h3>One-time setup</h3>
+<ol>
+  <li><strong>Choose a preset and fill in the connection.</strong> The <em>OSC</em> preset fills in the host (<code>pitzer.osc.edu</code>; replace by <code>cardinal.osc.edu</code> or <code>ascend.osc.edu</code> as needed) and the commands that load conda there. Enter your username and password, and the <em>Project</em> code your jobs are charged to (at OSC, <code>PAS…</code>).</li>
+  <li><strong>Test connection.</strong> The first time, Equilibrist shows the cluster's key fingerprint and refuses to continue. Compare it with the fingerprint your computing centre publishes (OSC lists them on each cluster's <em>SSH key fingerprints</em> page), then tick <strong>Trust this host</strong> and test again. From then on a changed fingerprint is reported as an error.</li>
+  <li><strong>Remember this computer</strong> (optional, recommended). Uses your password once to authorise an SSH key stored in <code>~/.equilibrist/</code>. Afterwards the password field can stay empty.</li>
+  <li><strong>Install environment on the cluster.</strong> Creates a conda environment named <code>equilibrist</code> in the background; this takes several minutes. <strong>Check the installation</strong> reports <em>running</em>, <em>ready</em> or <em>failed</em> together with the end of the installation log.</li>
+</ol>
+
+<h3>Submitting and collecting a calculation</h3>
+<ol>
+  <li>Set up the tool exactly as for a local run (iterations, grid, spans, …), choose <strong>Nodes</strong>, <strong>CPUs per node</strong> and a <strong>Wall time</strong>, and press <strong>🚀 Submit …</strong>.</li>
+  <li>Equilibrist uploads its own source files and the calculation, submits the batch script and reports the SLURM job number. The job is now listed under <strong>Supercomputer jobs</strong> below the tool. <em>You can close the browser</em>; the list is stored on your computer and is still there next time.</li>
+  <li>While a job is queued or running, a small panel pinned to the bottom-right corner of the window follows it with a progress bar, refreshing every few seconds whatever you are looking at. <strong>Check status</strong> under the tool does the same on demand.</li>
+  <li><strong>Fetch results</strong> downloads the finished result and displays it as if it had been computed locally. If you have refitted the model in the meantime, Equilibrist warns that the job describes the earlier fit and asks for confirmation.</li>
+</ol>
+
+<h3>Settings</h3>
+<table class="kw-table">
+  <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>Host, Username</td><td>The cluster's login node and your account name.</td></tr>
+    <tr><td>Password</td><td>Held in memory for the current browser session only. It is never written to disk, to a saved session, or to a job record. Not needed once <em>Remember this computer</em> has been used.</td></tr>
+    <tr><td>Second factor</td><td>Only for clusters that ask for one at login: a passcode, or the number of the push option (often <code>1</code>).</td></tr>
+    <tr><td>Nodes, CPUs per node</td><td>Their product is the number of refits that run at the same time. Requesting more tasks than there are refits brings no further gain, and one refit is the floor on the run time.</td></tr>
+    <tr><td>Wall time</td><td><code>HH:MM:SS</code>. The scheduler stops the job when it expires; refits completed by then are kept on the cluster.</td></tr>
+    <tr><td>Project</td><td>The allocation charged for the job (<code>#SBATCH --account</code>).</td></tr>
+    <tr><td colspan="2"><em>Advanced settings</em></td></tr>
+    <tr><td>Environment setup</td><td>Shell commands run before Python in every job, typically <code>module load …</code> followed by <code>source activate equilibrist</code>. This is the field to adapt for a cluster other than OSC.</td></tr>
+    <tr><td>Commands that make conda available</td><td>Used only by <em>Install environment</em>.</td></tr>
+    <tr><td>Extra #SBATCH lines</td><td>One scheduler option per line, e.g. <code>--mem=0</code> or <code>--constraint=48core</code>.</td></tr>
+    <tr><td>Partition, Remote folder, Python command, Environment name</td><td>Defaults: none, <code>equilibrist_hpc</code> in your cluster home, <code>python</code>, <code>equilibrist</code>.</td></tr>
+  </tbody>
+</table>
+<p><strong>Preview the batch script</strong> shows the exact script that will be submitted, before anything is sent.</p>
+
+<h3>How it works</h3>
+<p>The tool's call is captured on your computer and written as plain JSON (no executable content is exchanged). On the cluster, <code>srun</code> starts <em>nodes × CPUs</em> copies of <code>equilibrist_hpc.py</code>. Each copy runs the very same tool function, but the parallel loop is replaced by a version that gives task <em>i</em> to copy <em>i</em> mod <em>N</em>, stores every refit in the shared job folder, and waits until all of them are present. Because the tool's own code path is unchanged, local and cluster results agree: in the validation runs the 2D profile and the jackknife were identical to the last digit, and bootstrap samples agreed to better than 10<sup>−6</sup> log units (the random-number seed is part of the job).</p>
+<p>Source files are uploaded to a folder named after a checksum of their content, so a job always runs with exactly the code that submitted it, and updating Equilibrist never disturbs jobs already queued.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Timeout and reproducibility</span>
+  <p>The per-fit <strong>Timeout</strong> applies to every refit on the cluster too. A refit that is cut off by the clock returns the best point found so far, which depends on the speed of the machine. For results that are independent of where they were computed, choose a Timeout that the refits do not reach, and let the job's wall time be the only limit.</p>
+</div>
+
+<div class="callout">
+  <span class="callout-title">If a job fails</span>
+  <p><strong>Check status</strong> shows the end of the error report and of the scheduler's output under <em>What went wrong</em>. The usual causes are an environment that is not installed yet (<em>Install environment</em>), a missing or wrong project code, or a wall time that is too short. Everything belonging to a job stays in <code>equilibrist_hpc/jobs/&lt;job id&gt;/</code> on the cluster and can be deleted there at any time.</p>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════ CUSTOM PY ═══════════════════════════════════════ -->
+<section id="pyscript">
+<h2>Custom Python scripts</h2><div class="section-line"></div>
+<p>At the bottom of the sidebar, <strong>Load custom .py script</strong> accepts a Python file and <strong>▶ Run py script</strong> executes it against the job currently shown: the constants as they stand in the sidebar, the simulated concentration curves, the <code>$variables</code>, the loaded data and the last fit. Whatever the script produces &mdash; a figure, a table, printed text &mdash; appears under the main plots, with PDF and PNG downloads for figures. Use it for a publication figure that Equilibrist does not draw itself, for a derived quantity, or for any calculation that should follow the fitted constants.</p>
+
+<p><code>custom_script_example.py</code>, in the Equilibrist folder, is a commented starting point. Inside a script one object is in scope, <code>eq</code>:</p>
+<table class="kw-table">
+  <thead><tr><th>Member</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td><code>eq.logK</code>, <code>eq.K</code></td><td>Every equilibrium constant, as log<sub>10</sub> K and as K, at the values in the sidebar.</td></tr>
+    <tr><td><code>eq.x</code>, <code>eq.x_label</code></td><td>The x axis of the simulated curve, as defined by <code>$plot x</code>.</td></tr>
+    <tr><td><code>eq.conc</code>, <code>eq.species</code></td><td>Concentration array (mM) of every species along <code>eq.x</code>.</td></tr>
+    <tr><td><code>eq.var("name")</code></td><td>A <code>$variables</code> expression evaluated along <code>eq.x</code>.</td></tr>
+    <tr><td><code>eq.simulate(KGHM=7.0, …)</code></td><td>Recomputes the curves with some constants changed; returns <code>(x, conc)</code>.</td></tr>
+    <tr><td><code>eq.data</code></td><td>The loaded NMR, concentration or spectral data, as Equilibrist holds them.</td></tr>
+    <tr><td><code>eq.fit</code>, <code>eq.errors</code></td><td>Statistics of the last fit and the ± errors of the fitted constants (empty before a fit).</td></tr>
+    <tr><td><code>eq.parsed</code>, <code>eq.network</code>, <code>eq.params</code></td><td>The parsed script, the reaction network and the run parameters (V<sub>0</sub>, titrant, …).</td></tr>
+    <tr><td><code>eq.show(obj)</code></td><td>Displays a matplotlib or plotly figure, a DataFrame or text. A matplotlib figure left in a variable called <code>fig</code> (or a list <code>figs</code>) is shown without calling this.</td></tr>
+  </tbody>
+</table>
+<p><code>numpy</code> (<code>np</code>), <code>pandas</code> (<code>pd</code>), <code>matplotlib.pyplot</code> (<code>plt</code>) and <code>streamlit</code> (<code>st</code>) are pre-imported. Text printed with <code>print</code> is shown too, and an error in the script is reported with its traceback rather than stopping the app.</p>
+
+<pre><code>fig, ax = plt.subplots()
+pool = eq.var("S0") + eq.var("S1") + eq.var("S2")
+ax.plot(eq.x, eq.var("S1") / pool, label="S1 / S012")
+ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
+</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">Trust</span>
+  <p>The script runs with the same permissions as Equilibrist itself, on your computer. Only run scripts that you wrote or that come from someone you trust.</p>
+</div>
+<p>The controls are available for equilibrium jobs. The output is recomputed only when you press <strong>Run py script</strong>; change a constant in the sidebar and run again to update it.</p>
+</section>
+
 <!-- ═══════════════════════════════════════ EXPORT ═══════════════════════════════════════ -->
 <section id="export">
 <h2>Export &amp; Snapshot</h2><div class="section-line"></div>
@@ -1982,6 +2219,41 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 </section>
 
 <!-- ═══════════════════════════════════════ EXAMPLES ═══════════════════════════════════════ -->
+<!-- ─────────────────────────── Tutorials ─────────────────────────── -->
+<section id="tutorials">
+<h2>Tutorials</h2><div class="section-line"></div>
+<p>The <code>TUTORIALS</code> folder holds 24 numbered tutorials: a script <code>tutorial_NN.txt</code> and, where data are fitted, <code>tutorial_NN_input.xlsx</code> or <code>.itc</code>. Lettered scripts are variants that reuse the base data file; a script named "<code>… noref</code>" is the same NMR fit with the <code>noref</code> keyword. The data of tutorials 21 to 24 are synthetic, generated with Equilibrist's own forward models by <code>gen_tutorial21.py</code> … <code>gen_tutorial24.py</code> (in the <code>TUTORIALS</code> folder), so the constants they recover are known exactly.</p>
+<table class="kw-table">
+  <thead><tr><th>#</th><th>Scripts</th><th>System and data</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>01, 01B</td><td>1:1 binding G + H = GH followed by concentrations; 01B writes the model under <code>$equilibria</code> and plots against H<sub>0</sub>.</td></tr>
+    <tr><td>2</td><td>02, 02B, 02C</td><td>Dimerisation 2 A = B with a fixed K<sub>dimer</sub> and B + C = D; 02B adds bounds (<code>from 1.0 to 7.0</code>) on log K<sub>1</sub> and mole-fraction variables, 02C the variables only.</td></tr>
+    <tr><td>3</td><td>03</td><td>Same network with a solid titrant (<code>$titrant solid</code>), mole fractions plotted against C<sub>0</sub>/A<sub>0</sub>.</td></tr>
+    <tr><td>4</td><td>04, 04B, 04C</td><td>Two solid titrants added in a fixed ratio (<code>Ct; 1.0</code>, <code>At; 0.5</code>); 04B gives the constants as ΔG; 04C is a noisy copy for the residual diagnostics.</td></tr>
+    <tr><td>5</td><td>05, 05 noref</td><td>Sequential 1:2 binding followed by one fast-exchange NMR signal (<code>shift: Gtot</code>).</td></tr>
+    <tr><td>6</td><td>06, 06 noref</td><td>The same with two shift targets (Gtot, Htot).</td></tr>
+    <tr><td>7</td><td>07</td><td>Slow exchange: six integrated signals (<code>integration: 1, 3, 1, 1, 2, 1</code>).</td></tr>
+    <tr><td>8</td><td>08, 08 noref</td><td>Sequential 1:3 binding in mixed mode (three integrals and one shift).</td></tr>
+    <tr><td>9</td><td>09, 09 noref, 09B, 09C</td><td>NMR shift fit with <code>$constraints</code>: 09B ties log K<sub>1</sub> = log K<sub>2</sub>, 09C fixes log K<sub>1</sub> + log K<sub>2</sub> = 10.</td></tr>
+    <tr><td>10</td><td>10, 10B</td><td>UV-Vis titration of a cage; 10B pins the cage spectrum from sheet 2 (<code>read: cage</code>).</td></tr>
+    <tr><td>11</td><td>11</td><td>Kinetics A + 2 B &lt;&gt; C + D followed by concentrations.</td></tr>
+    <tr><td>12</td><td>12, 12 noref, 12B</td><td>Irreversible kinetics G + H &gt; GH followed by a fast-exchange shift; 12B plots the variable %GH.</td></tr>
+    <tr><td>13</td><td>13, 13 noref</td><td>The same with two shift targets.</td></tr>
+    <tr><td>14</td><td>14</td><td>Kinetics followed by eight integrated signals.</td></tr>
+    <tr><td>15</td><td>15, 15 noref</td><td>Pre-equilibrium G + H = GH followed by GH &gt; GJ, mixed NMR mode.</td></tr>
+    <tr><td>16</td><td>16, 16B, 16C</td><td>Kinetics A + B &lt;&gt; C, C &gt; D followed by UV-Vis spectra (B transparent; a noisy data file is provided too); 16B constrains k<sub>1</sub>/k<sub>2</sub>, 16C also pins the spectrum of C.</td></tr>
+    <tr><td>17</td><td>17, 17B</td><td>Acid–base: acetic acid titrated with triethylamine, pH followed; 17B in the <code>$reactions acid-base</code> pK<sub>a</sub> syntax.</td></tr>
+    <tr><td>18</td><td>18, 18B</td><td>Phosphoric acid and an amine with two titrants; 18B in ladder syntax.</td></tr>
+    <tr><td>19</td><td>19, 19B, 19C, 19D, 19E</td><td>ITC, 1:1 binding on an iTC200; 19B leaves concentrations and volume blank; 19C adds a competitor M; 19D fixes the competitor's enthalpies (<code>dH =</code>) and adds M<sub>2</sub>H and MGH; 19E has two binding modes of the same partners.</td></tr>
+    <tr><td>20</td><td>20B</td><td>ITC, sequential 1:2 binding with stepwise enthalpies of opposite sign (data file <code>tutorial_20_input.itc</code>).</td></tr>
+    <tr><td>21</td><td>21A, 21B, 21C</td><td>One system (A + B = C + D, 2 A = E) followed by three techniques: slow-exchange integrals with an internal standard, fast-exchange shifts, UV-Vis. Fit each tab, then globally: K<sub>2</sub> is invisible to the UV-Vis tab alone, and the ε ≥ 0 constraint biases it there.</td></tr>
+    <tr><td>22</td><td>22A, 22B, 22C</td><td>Kinetics A + B &lt;&gt; C, 2 C &gt; D at three B<sub>0</sub>, four slow-exchange integrals each; global fit of k<sub>1</sub>, k<sub>−1</sub>, k<sub>2</sub>.</td></tr>
+    <tr><td>23</td><td>23</td><td>ITC, three-step network G + H = GH, GH + H = GH<sub>2</sub>, GH<sub>2</sub> + G = G<sub>2</sub>H<sub>2</sub> with one endothermic step.</td></tr>
+    <tr><td>24</td><td>24</td><td>An oscillating reaction (the Brusselator): simulation of a limit cycle in a closed batch, and a fit of its four rate constants that needs starting values in the oscillating regime.</td></tr>
+  </tbody>
+</table>
+</section>
+
 <section id="ex-1to1">
 <h2>Example: 1:1 Binding</h2><div class="section-line"></div>
 <pre><code><span class="sec">$concentrations</span>
@@ -2578,7 +2850,7 @@ y    = A, B, C, D</code></pre>
 </div>
 
 <footer>
-  <p>Equilibrist — built with Python &amp; Streamlit &nbsp;·&nbsp; all computation local, no data transmitted &nbsp;·&nbsp; <a href="#">v1.0</a></p>
+  <p>Equilibrist — built with Python &amp; Streamlit &nbsp;·&nbsp; all computation local, no data transmitted &nbsp;·&nbsp; v3.0 beta (November 2026)</p>
 </footer>
 
 </body>

@@ -1,0 +1,29 @@
+# Tutorial 24: an oscillating reaction -- the Brusselator (Prigogine & Lefever 1968)
+# A and B are reservoirs (large excess); X and Y oscillate on a limit cycle,
+# period about 7 s, while A and B are slowly consumed.
+# File: tutorial_24_input.xlsx (t in s, X and Y in mM, one point every 0.2 s).
+# Fitting an oscillator: the objective is rugged in the rate constants (a small
+# change of period shifts every later peak), so the starting values must already
+# oscillate with roughly the right period. From within about 10 % of the solution
+# the fit converges; from 20-50 % away Nelder-Mead collapses to a flat line
+# through the mean of the data.
+# Adjust the constants until the simulated period matches the data before fitting.
+
+$concentrations
+A0 = 1000 mM
+B0 = 3000 mM
+X0 = 1 mM
+Y0 = 1 mM
+
+$volumes
+V0 = 1 mL
+
+$reactions
+A > X; k1 = 0.0011
+B + X > Y + D; k2 = 0.9
+2 X + Y > 3 X; k3 = 1.1e+06
+X > E; k4 = 1.1
+
+$plot
+xmax = 60
+y = X, Y

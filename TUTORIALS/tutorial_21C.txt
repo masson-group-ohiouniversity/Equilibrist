@@ -1,0 +1,20 @@
+$concentrations
+A0 = 0.050 mM
+
+$volumes
+V0 = 2.00 mL
+
+$titrant
+Bt = 1.00 mM
+
+$equilibria
+A + B = C + D; log K1 = 1.0
+2 A = E; log K2 = 2.0
+
+$plot
+x = B0/A0
+xmax = 3.0
+y = A, B, C, D, E
+
+$spectra
+transparent: D

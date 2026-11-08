@@ -1,0 +1,23 @@
+$concentrations
+G0
+M0 = 50 mM
+
+$volumes
+V0
+
+$titrant
+Ht
+
+$reactions
+G + H = GH ; log K1 = 5.0
+M + H = MH ; log KM = 3.54; DH = 0.0
+MH + M = M2H; log KM2 = 3.54; DH = -1.0
+M + GH = MGH; log KM3 = 3.54; DH = 0.0 
+
+$variables
+GHtot = GH + MGH
+
+$plot
+x    = H0/G0
+xmax = 2.4
+y    = G, H, GH, GHtot

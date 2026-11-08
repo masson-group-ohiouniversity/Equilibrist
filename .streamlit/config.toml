@@ -1,0 +1,4 @@
+[global]
+# Tabs restore widget values from a snapshot before the widgets are created;
+# Streamlit would otherwise warn for every widget that also declares a default.
+disableWidgetStateDuplicationWarning = true

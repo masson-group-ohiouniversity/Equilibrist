@@ -1078,14 +1078,17 @@ def make_diagnostics_figure(stats: dict, residuals_dict: dict,
                 _vals  = np.asarray(_vals,  dtype=float)
                 _rmses = np.asarray(_rmses, dtype=float)
                 if _vals.size < 2: continue
-                _i_opt = int(np.nanargmin(_rmses))
-                _v_opt = float(_vals[_i_opt])
-                _r_opt = float(_rmses[_i_opt])
+                # x is measured from the grid CENTRE -- the fitted (or fixed)
+                # value the scan was built around -- not from the grid point
+                # with the lowest RMSE: on a flat profile that point is
+                # decided by numerical noise and would shift the whole curve.
+                _r_opt = float(np.nanmin(_rmses))
+                _v_opt = float(_vals[len(_vals) // 2])
                 if not (np.isfinite(_r_opt) and _r_opt > 0): continue
                 _dx = _vals - _v_opt
                 _dy = _rmses / _r_opt
                 _c  = _palette[_i % len(_palette)]
-                _h, = ax.plot(_dx, _dy, "-o", ms=4.5, lw=1.4,
+                _h, = ax.plot(_dx, _dy, "-o", ms=2.2, lw=1.2,
                               color=_c, label=_pname, zorder=3)
                 _legend_handles.append(_h)
                 # Flag near-flat profiles for an inline annotation —
@@ -1097,7 +1100,7 @@ def make_diagnostics_figure(stats: dict, residuals_dict: dict,
             except Exception:
                 continue
         ax.set_yscale("log")
-        ax.set_xlabel("Δ log parameter from optimum")
+        ax.set_xlabel("Δ log parameter from its fitted (or fixed) value")
         ax.set_ylabel("RMSE / RMSE$_{min}$  (log scale)")
         ax.set_title("Parameter profile")
         if _legend_handles:
@@ -1334,6 +1337,16 @@ def render_diagnostics_panel(stats: dict, residuals_dict: dict, *,
 # ════════════════════════════════════════════════════════════════════════
 
 def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
+    """See :func:`_refit_with_pinned_impl`.  ``fa["simplex_step"]`` (log
+    units), when present, sets the optimiser's initial step for the
+    refit -- the profiles use a small one because they start next to the
+    optimum."""
+    from equilibrist_parser import simplex_step_override
+    with simplex_step_override(fa.get("simplex_step")):
+        return _refit_with_pinned_impl(fa, pinned_key=pinned_key, pinned_val=pinned_val)
+
+
+def _refit_with_pinned_impl(fa: dict, *, pinned_key: str, pinned_val: float):
     """Run the appropriate fit function with one parameter pinned.
 
     Reads the same ``_fit_args_*`` dict the bootstrap UI uses, so the
@@ -1352,6 +1365,9 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
 
     Returns the resulting ``stats`` dict, or ``None`` on failure.
     """
+    if fa.get("kind") == "global":              # one fit across several tabs
+        from equilibrist_global import refit_global
+        return refit_global(fa, {pinned_key: float(pinned_val)})
     try:
         # Identify which kind of parameter is being pinned by looking at
         # the fit_args lists.  K's live in fit_keys; concentrations live
@@ -1359,17 +1375,26 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
         _is_K     = pinned_key in (fa.get("fit_keys") or [])
         _is_conc  = pinned_key in (fa.get("fit_conc_keys") or [])
         _is_tit   = pinned_key in (fa.get("fit_titrant_keys") or [])
+        # Location parameters (currently ITC's q_offset) are pinned on a
+        # LINEAR chart: they are additive, may be negative, and log10 is
+        # undefined for them. The profile is invariant to how the pinned
+        # axis is labelled, so mixing charts across parameters is sound
+        # provided each axis is reported in its own units.
+        _is_lin   = pinned_key in (fa.get("linear_pin_keys") or [])
+        _lin_val  = float(pinned_val) if _is_lin else None
 
         _fk  = list(fa.get("fit_keys", []) or [])
         _fck = list(fa.get("fit_conc_keys", []) or [])
         _ftk = list(fa.get("fit_titrant_keys", []) or [])
-        if _is_K:
+        if _is_lin:
+            pass                      # nothing removed: not a free key
+        elif _is_K:
             _fk = [k for k in _fk if k != pinned_key]
         elif _is_conc:
             _fck = [k for k in _fck if k != pinned_key]
         elif _is_tit:
             _ftk = [k for k in _ftk if k != pinned_key]
-        else:
+        elif not _is_lin:
             # Not a recognized parameter — try treating it as a K for
             # backward compatibility with older callers.
             _fk = [k for k in _fk if k != pinned_key]
@@ -1378,7 +1403,7 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
         # K's pinned via the start_log{k,K} dict (read by the fit
         # function's logK key-filter machinery).
         _start = dict(fa.get("start_logk", fa.get("start_logK", {})))
-        if _is_K:
+        if _is_K and not _is_lin:
             _start[pinned_key] = float(pinned_val)
 
         # Concentrations and titrants are linear-space mM values that
@@ -1440,12 +1465,34 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
             _net = fa["network"]
             _par = _params if _params is not None else fa["params"]
             _xe  = fa["x_expr"]
+            if fa.get("use_itc_fit"):
+                # ITC. q_offset is a linear nuisance parameter eliminated by
+                # lstsq at every objective evaluation and is routinely
+                # negative, so it is not profiled by this log10-based
+                # machinery; its trade-off with dH is reported by the
+                # correlation matrix instead. Pass it through if fixed.
+                from equilibrist_itc import fit_itc as _f
+                _ok, _, _s, _ = _f(_p, _net, fa["itc_q_exp"], fa["itc_raw"],
+                                    _par, _start, _fk, _xe,
+                                    tolerance=_tol, maxiter=_mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
+                                    fit_conc_keys=_fck,
+                                    q_offset_fixed=(_lin_val if _is_lin
+                                                    else fa.get("q_offset_fixed")),
+                                    constraints=_cstr,
+                                    excl_set=fa.get("excl_set") or set())
+                if isinstance(_s, dict):
+                    _r = _s.get("rmse")
+                    if _r is not None and np.isfinite(_r):
+                        return _s
+                return None
             if fa.get("use_spectra_fit"):
                 from equilibrist_fit_spectra import fit_spectra as _f
                 _ok, _, _s, _ = _f(_p, _net, fa["spectra_data_fit"],
                                     _par, _start, _fk, _xe,
                                     fa.get("wl_min"), fa.get("wl_max"),
                                     _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck,
                                     fit_titrant_keys=_ftk,
@@ -1486,6 +1533,7 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
                 _ok, _, _s, _ = _f(_p, _net, fa["nmr_data_fit"],
                                     _par, _start, _fk, _xe,
                                     _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck,
                                     fit_titrant_keys=_ftk)
@@ -1536,6 +1584,7 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
                                     float(fa.get("wl_min") or 0.0),
                                     float(fa.get("wl_max") or 1e9),
                                     _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck,
                                     allow_negative_eps=fa.get("allow_neg_eps", False))
@@ -1561,6 +1610,7 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
                     return None
                 _ok, _, _s, _ = _f(_p, _start, fa["nmr_data_fit"], _fk,
                                     _t_max, 200, _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck)
                 # Accept the result whenever stats carry a finite rmse — the
@@ -1576,6 +1626,7 @@ def _refit_with_pinned(fa: dict, *, pinned_key: str, pinned_val: float):
             from equilibrist_kinetics import fit_kinetics as _f
             _ok, _, _s, _ = _f(_p, fa.get("exp_data_fit") or {},
                                 _start, _fk, _t_max, 200, _tol, _mxi,
+                                timeout_s=float(fa.get("timeout_s", 30.0)),
                                 constraints=_cstr,
                                 fit_conc_keys=_fck)
             # Accept the result whenever stats carry a finite rmse — the
@@ -1598,7 +1649,10 @@ def compute_rmse_profile(fit_args: dict, fitted_values: dict,
                          progress_callback=None,
                          fitted_concs_mM: Optional[dict] = None,
                          fitted_titrants_mM: Optional[dict] = None,
-                         n_jobs: int = 1) -> dict:
+                         n_jobs: int = 1,
+                         conc_span_mult: tuple = (0.7, 1.3),
+                         linear_params: Optional[dict] = None,
+                         lin_span_frac: float = 1.0) -> dict:
     """Profile RMSE around each fitted parameter's optimum.
 
     For every key in ``fitted_values`` (mapping ``name`` → ``log10 K``),
@@ -1660,15 +1714,55 @@ def compute_rmse_profile(fit_args: dict, fitted_values: dict,
     # tuple; the result is the RMSE at that point (or NaN on failure).
     tasks = []         # list of (param_name, value)
     grid_per_name = {} # param_name -> grid array (preserves order)
+
+    # Concentrations get a MULTIPLICATIVE window (default 0.7x - 1.3x of the
+    # fitted value) instead of the K's +/- span decades. A full decade either
+    # side drives the pinned refit into the degenerate "no binding" basin
+    # (K -> 0, q_offset absorbs everything) where RMSE saturates at a constant
+    # identical for every concentration, which is uninformative.
+    _conc_names = set(fitted_concs_mM or {}) | set(fitted_titrants_mM or {})
+    _lo_m, _hi_m = float(conc_span_mult[0]), float(conc_span_mult[1])
+    _half = max(1, (n_pts - 1) // 2)
+
     for _name, _opt in scan.items():
         try:
             _opt_f = float(_opt)
         except Exception:
             continue
-        _vals = np.linspace(_opt_f - span, _opt_f + span, n_pts)
+        if _name in _conc_names and _lo_m > 0 and _hi_m > 0:
+            # Two half-grids sharing the centre, so the optimum stays exactly
+            # on the grid even though the window is asymmetric in log space.
+            _lo = _opt_f + float(np.log10(_lo_m))
+            _hi = _opt_f + float(np.log10(_hi_m))
+            _vals = np.concatenate([
+                np.linspace(_lo, _opt_f, _half + 1)[:-1],
+                np.linspace(_opt_f, _hi, _half + 1)])
+        else:
+            _vals = np.linspace(_opt_f - span, _opt_f + span, n_pts)
         grid_per_name[_name] = _vals
         for _v in _vals:
             tasks.append((_name, float(_v)))
+    # Location parameters (ITC q_offset) profile on a LINEAR chart in their
+    # own units. They may be negative, so log10 is undefined; and the profile
+    # is invariant to how the pinned axis is labelled, so this is exact, not
+    # an approximation. The dispatcher recognises them via
+    # fit_args["linear_pin_keys"] and routes them to q_offset_fixed.
+    _lin = dict(linear_params or {})
+    if _lin:
+        _lin_keys = set(fit_args.get("linear_pin_keys") or set())
+        _lin_keys |= set(_lin)
+        fit_args["linear_pin_keys"] = _lin_keys
+        for _name, _val in _lin.items():
+            try:
+                _v = float(_val)
+            except Exception:
+                continue
+            _w = max(abs(_v) * float(lin_span_frac), 1e-9)
+            _vals = np.linspace(_v - _w, _v + _w, n_pts)
+            grid_per_name[_name] = _vals
+            for _g in _vals:
+                tasks.append((_name, float(_g)))
+
     total = max(1, len(tasks))
 
     def _one(name_val):
@@ -1766,6 +1860,16 @@ def compute_rmse_profile(fit_args: dict, fitted_values: dict,
 def _refit_with_two_pinned(fa: dict, *,
                            pin1_key: str, pin1_val: float,
                            pin2_key: str, pin2_val: float):
+    """See :func:`_refit_with_two_pinned_impl`; honours ``fa["simplex_step"]``."""
+    from equilibrist_parser import simplex_step_override
+    with simplex_step_override(fa.get("simplex_step")):
+        return _refit_with_two_pinned_impl(fa, pin1_key=pin1_key, pin1_val=pin1_val,
+                                           pin2_key=pin2_key, pin2_val=pin2_val)
+
+
+def _refit_with_two_pinned_impl(fa: dict, *,
+                           pin1_key: str, pin1_val: float,
+                           pin2_key: str, pin2_val: float):
     """Run the appropriate fit function with TWO parameters pinned.
 
     Mechanically identical to ``_refit_with_pinned`` but handles both
@@ -1781,6 +1885,12 @@ def _refit_with_two_pinned(fa: dict, *,
     ``params``).  Returns the resulting ``stats`` dict or ``None`` on
     dispatch failure.
     """
+    if fa.get("kind") == "global":
+        from equilibrist_global import refit_global
+        return refit_global(fa, {pin1_key: float(pin1_val), pin2_key: float(pin2_val)})
+    # Linear-chart pinning is handled only by _refit_with_pinned;
+    # define the flags here so the shared ITC branch is safe.
+    _is_lin, _lin_val = False, None
     try:
         _all_K = list(fa.get("fit_keys", []) or [])
         _all_C = list(fa.get("fit_conc_keys", []) or [])
@@ -1869,12 +1979,34 @@ def _refit_with_two_pinned(fa: dict, *,
             _net = fa["network"]
             _par = _params if _params is not None else fa["params"]
             _xe  = fa["x_expr"]
+            if fa.get("use_itc_fit"):
+                # ITC. q_offset is a linear nuisance parameter eliminated by
+                # lstsq at every objective evaluation and is routinely
+                # negative, so it is not profiled by this log10-based
+                # machinery; its trade-off with dH is reported by the
+                # correlation matrix instead. Pass it through if fixed.
+                from equilibrist_itc import fit_itc as _f
+                _ok, _, _s, _ = _f(_p, _net, fa["itc_q_exp"], fa["itc_raw"],
+                                    _par, _start, _fk, _xe,
+                                    tolerance=_tol, maxiter=_mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
+                                    fit_conc_keys=_fck,
+                                    q_offset_fixed=(_lin_val if _is_lin
+                                                    else fa.get("q_offset_fixed")),
+                                    constraints=_cstr,
+                                    excl_set=fa.get("excl_set") or set())
+                if isinstance(_s, dict):
+                    _r = _s.get("rmse")
+                    if _r is not None and np.isfinite(_r):
+                        return _s
+                return None
             if fa.get("use_spectra_fit"):
                 from equilibrist_fit_spectra import fit_spectra as _f
                 _ok, _, _s, _ = _f(_p, _net, fa["spectra_data_fit"],
                                     _par, _start, _fk, _xe,
                                     fa.get("wl_min"), fa.get("wl_max"),
                                     _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck,
                                     fit_titrant_keys=_ftk,
@@ -1902,6 +2034,7 @@ def _refit_with_two_pinned(fa: dict, *,
                 _ok, _, _s, _ = _f(_p, _net, fa["nmr_data_fit"],
                                     _par, _start, _fk, _xe,
                                     _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck,
                                     fit_titrant_keys=_ftk)
@@ -1943,6 +2076,7 @@ def _refit_with_two_pinned(fa: dict, *,
                                     float(fa.get("wl_min") or 0.0),
                                     float(fa.get("wl_max") or 1e9),
                                     _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck,
                                     allow_negative_eps=fa.get("allow_neg_eps", False))
@@ -1968,6 +2102,7 @@ def _refit_with_two_pinned(fa: dict, *,
                     return None
                 _ok, _, _s, _ = _f(_p, _start, fa["nmr_data_fit"], _fk,
                                     _t_max, 200, _tol, _mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
                                     constraints=_cstr,
                                     fit_conc_keys=_fck)
                 # Accept the result whenever stats carry a finite rmse — the
@@ -1983,6 +2118,7 @@ def _refit_with_two_pinned(fa: dict, *,
             from equilibrist_kinetics import fit_kinetics as _f
             _ok, _, _s, _ = _f(_p, fa.get("exp_data_fit") or {},
                                 _start, _fk, _t_max, 200, _tol, _mxi,
+                                timeout_s=float(fa.get("timeout_s", 30.0)),
                                 constraints=_cstr,
                                 fit_conc_keys=_fck)
             # Accept the result whenever stats carry a finite rmse — the
@@ -2142,11 +2278,17 @@ def make_2d_profile_figure(scan_2d: dict, *,
                            title: Optional[str] = None,
                            param_cov: Optional[np.ndarray] = None,
                            cov_names: Optional[list] = None,
-                           constraints: Optional[list] = None):
+                           constraints: Optional[list] = None,
+                           show_legend: bool = True):
     """Render a 2D RMSE-profile colormap.
 
-    Plots log10(RMSE / RMSE_min) over the (Δlog p1, Δlog p2) grid with
-    a perceptually-uniform colormap, a star at the optimum (0, 0), and
+    ``show_legend=False`` omits the legend box and the interpretive note in
+    the top-left corner — for publication figures, where that text belongs
+    in the caption.  Markers, ellipses and contours are drawn either way.
+
+    Plots log10(RMSE / RMSE_min) over the (log p1, log p2) grid — axes in
+    ABSOLUTE log10 units, e.g. 6 … 9 for a constant at 7.5 scanned ± 1.5 —
+    with a perceptually-uniform colormap, a star at the optimum, and
     contour lines at RMSE-ratio = 1.1, 1.5, 2× (=  log10 ≈ 0.041,
     0.176, 0.301).  Long diagonal valleys (high color contrast running
     diagonally across the panel) reveal strong correlations between
@@ -2175,8 +2317,11 @@ def make_2d_profile_figure(scan_2d: dict, *,
 
     # Plot Δ-from-optimum so both axes are centered at 0 — keeps the
     # visual convention identical to the 1D profile.
-    dx = p1_grid - _p1_opt
-    dy = p2_grid - _p2_opt
+    # Axes carry ABSOLUTE log10 values (the scanned range itself), so the
+    # map reads directly as "log K from 6 to 9" rather than as an offset.
+    # The names dx / dy are kept for the grid coordinates used below.
+    dx = p1_grid
+    dy = p2_grid
 
     # Color scale: RMSE / RMSE_min on log axis (log_norm), so a 2× rise
     # spans the same color range whether the optimum was 1e-3 or 1e-1.
@@ -2280,7 +2425,7 @@ def make_2d_profile_figure(scan_2d: dict, *,
                         _xy_p = np.stack([_a * np.cos(_t),
                                           _b * np.sin(_t)], axis=0)
                         _xy = eigvecs @ _xy_p
-                        ax.plot(_xy[0], _xy[1],
+                        ax.plot(_xy[0] + _p1_opt, _xy[1] + _p2_opt,
                                 color="#FF7A00", lw=1.4,
                                 ls=("--" if _lbl.startswith("1σ") else "-"),
                                 zorder=3, label=f"Hessian {_lbl}")
@@ -2288,14 +2433,34 @@ def make_2d_profile_figure(scan_2d: dict, *,
         except Exception:
             pass
 
-    # Optimum marker
-    ax.plot(0.0, 0.0, marker="*", ms=14,
-            mec="white", mew=1.0, mfc="#FFD700", zorder=4)
-    ax.axhline(0.0, color="white", lw=0.4, ls=":", alpha=0.5, zorder=2)
-    ax.axvline(0.0, color="white", lw=0.4, ls=":", alpha=0.5, zorder=2)
+    # Optimum marker (the fitted optimum, or — when one of the scanned
+    # constants was held FIXED in the last fit — just the reference point
+    # the map is centred on, which is generally not the minimum).
+    _p1_fixed = bool(scan_2d.get("p1_fixed", False))
+    _p2_fixed = bool(scan_2d.get("p2_fixed", False))
+    _any_fixed = _p1_fixed or _p2_fixed
+    ax.plot(_p1_opt, _p2_opt, marker="*", ms=14,
+            mec="white", mew=1.0, mfc="#FFD700", zorder=4,
+            label=("reference point (last fit)" if _any_fixed else None))
+    # Mark the grid minimum when it is not the central cell — with a
+    # fixed constant on an axis this is the whole point of the map.
+    _min_drawn = False
+    try:
+        if np.any(np.isfinite(rmse_mat)):
+            _jm, _im = np.unravel_index(np.nanargmin(rmse_mat), rmse_mat.shape)
+            if (abs(dx[_im] - _p1_opt) > 1e-9) or (abs(dy[_jm] - _p2_opt) > 1e-9):
+                ax.plot(dx[_im], dy[_jm], marker="X", ms=10,
+                        mec="black", mew=0.8, mfc="white", zorder=5,
+                        label=(f"grid minimum: {_p1} = {p1_grid[_im]:.2f}, "
+                               f"{_p2} = {p2_grid[_jm]:.2f}"))
+                _min_drawn = True
+    except Exception:
+        pass
+    ax.axhline(_p2_opt, color="white", lw=0.4, ls=":", alpha=0.5, zorder=2)
+    ax.axvline(_p1_opt, color="white", lw=0.4, ls=":", alpha=0.5, zorder=2)
 
-    ax.set_xlabel(f"Δ log {_p1} from optimum")
-    ax.set_ylabel(f"Δ log {_p2} from optimum")
+    ax.set_xlabel(f"log {_p1}")
+    ax.set_ylabel(f"log {_p2}")
     ax.set_title(title or f"2D RMSE profile: {_p1} vs {_p2}")
     cbar = fig.colorbar(pcm, ax=ax)
     cbar.set_label("RMSE / RMSE$_{min}$  (log scale)")
@@ -2312,7 +2477,7 @@ def make_2d_profile_figure(scan_2d: dict, *,
 
     # If Hessian ellipses were overlaid, attach a small legend so the
     # reader knows what the orange curves mean.
-    if _ellipse_drawn:
+    if show_legend and (_ellipse_drawn or _min_drawn or _any_fixed):
         ax.legend(loc="lower right", fontsize=7,
                   facecolor="black", edgecolor="none",
                   labelcolor="white", framealpha=0.45)
@@ -2358,7 +2523,9 @@ def make_2d_profile_figure(scan_2d: dict, *,
                     _constraint_active = True
                     break
 
-        if _constraint_active:
+        if not show_legend:
+            pass
+        elif _constraint_active:
             _msg = (f"constraint links {_p1_name} ↔ {_p2_name} — "
                     f"shape reflects the constrained landscape, "
                     f"not free identifiability")
@@ -3116,6 +3283,10 @@ def compute_param_t_tests(stats: dict,
     ft = stats.get("fitted_titrants") or {}
 
     n_data = int(stats.get("n_points") or 0)
+    # after a global fit the SE comes from all tabs: use their total point count
+    _gtot = (stats.get("global_fit") or {}).get("n_points_total") if isinstance(stats.get("global_fit"), dict) else None
+    if _gtot:
+        n_data = int(_gtot)
     n_par  = int(stats.get("n_params") or 0)
     df_resid = max(n_data - n_par, 1)
 
@@ -3398,6 +3569,12 @@ def _compute_rmse_at(fa: dict, param_values: dict) -> Optional[float]:
 
     Returns None on dispatch failure (mode mismatch, missing data, etc.)
     """
+    if fa.get("kind") == "global":
+        from equilibrist_global import evaluate_global
+        return evaluate_global(fa, param_values)
+    # Linear-chart pinning is handled only by _refit_with_pinned;
+    # define the flags here so the shared ITC branch is safe.
+    _is_lin, _lin_val = False, None
     try:
         _kind = fa.get("kind", "eq")
         _tol  = 1e30
@@ -3441,6 +3618,27 @@ def _compute_rmse_at(fa: dict, param_values: dict) -> Optional[float]:
             _net = fa["network"]
             _par = _params if _params is not None else fa.get("params")
             _xe  = fa["x_expr"]
+            if fa.get("use_itc_fit"):
+                # ITC. q_offset is a linear nuisance parameter eliminated by
+                # lstsq at every objective evaluation and is routinely
+                # negative, so it is not profiled by this log10-based
+                # machinery; its trade-off with dH is reported by the
+                # correlation matrix instead. Pass it through if fixed.
+                from equilibrist_itc import fit_itc as _f
+                _ok, _, _s, _ = _f(_p, _net, fa["itc_q_exp"], fa["itc_raw"],
+                                    _par, _start, _fk, _xe,
+                                    tolerance=_tol, maxiter=_mxi,
+                                    timeout_s=float(fa.get("timeout_s", 30.0)),
+                                    fit_conc_keys=_fck,
+                                    q_offset_fixed=(_lin_val if _is_lin
+                                                    else fa.get("q_offset_fixed")),
+                                    constraints=_cstr,
+                                    excl_set=fa.get("excl_set") or set())
+                if isinstance(_s, dict):
+                    _r = _s.get("rmse")
+                    if _r is not None and np.isfinite(_r):
+                        return float(_r)   # this function returns a float, not stats
+                return None
             if fa.get("use_spectra_fit"):
                 from equilibrist_fit_spectra import fit_spectra as _f
                 _ok, _, _s, _ = _f(_p, _net, fa["spectra_data_fit"],
@@ -3756,7 +3954,14 @@ def compute_local_sensitivity(fa: dict, selected_vars: list, *,
     # Prefer fit_stats["n_points"] (the canonical post-fit value),
     # fall back to whatever fa carries, finally to 1 to avoid /0.
     n_data = 0
-    if fit_stats:
+    if fa.get("kind") == "global":
+        # all tabs together: the sum of the per-tab point counts of the fit
+        try:
+            n_data = int(sum(int((st_ or {}).get("n_points") or 0)
+                             for st_ in (fa.get("baseline_stats") or {}).values()))
+        except Exception:
+            n_data = 0
+    if n_data <= 0 and fit_stats:
         try: n_data = int(fit_stats.get("n_points") or 0)
         except Exception: n_data = 0
     if n_data <= 0:
@@ -4426,3 +4631,173 @@ def render_rank_analysis_panel(stats: dict, *, key: str = "rank") -> None:
                        file_name=f"Equilibrist_rank_{ts}.png",
                        mime="image/png",
                        key=f"_rank_dl_{key}")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Profile trace: how the other parameters respond when one is scanned
+# ════════════════════════════════════════════════════════════════════════
+
+def compute_profile_trace(fit_args: dict, x_name: str, x_center: float,
+                          *, span: float = 1.0, n_pts: int = 11,
+                          fit_names: Optional[list] = None,
+                          n_jobs: int = 1, progress_callback=None) -> dict:
+    """Walk ``x_name`` from ``x_center - span`` to ``x_center + span`` and, at
+    every grid point, refit ONLY the parameters in ``fit_names`` (everything
+    else stays at its value in ``fit_args["start_logK"]``).  Records the
+    fitted value of each of them and the RMSE.
+
+    ``x_name`` may be a constant that was held fixed in the fit.  Values are
+    log10 throughout (concentrations / titrants as log10 mM).
+
+    Returns ``{x_name, x_center, x_grid, fit_names, values: {name: array},
+    rmse: array, rmse_min, n_failed, n_total, error_samples}``.
+    """
+    n_pts = max(3, int(n_pts))
+    if n_pts % 2 == 0:
+        n_pts += 1
+    x_grid = np.linspace(float(x_center) - span, float(x_center) + span, n_pts)
+    fit_names = [n for n in (fit_names or []) if n != x_name]
+
+    fa = dict(fit_args)
+    _all_conc = list(fa.get("fit_conc_keys") or [])
+    _all_tit = list(fa.get("fit_titrant_keys") or [])
+    fa["fit_conc_keys"] = [n for n in fit_names if n in _all_conc]
+    fa["fit_titrant_keys"] = [n for n in fit_names if n in _all_tit]
+    fa["fit_keys"] = [n for n in fit_names if n not in fa["fit_conc_keys"]
+                      and n not in fa["fit_titrant_keys"]]
+    # the scanned parameter is pinned by _refit_with_pinned; when it is a K it
+    # must be listed for the pin machinery to recognise it as one
+    if x_name not in _all_conc and x_name not in _all_tit and x_name not in fa["fit_keys"]:
+        fa["fit_keys"] = fa["fit_keys"] + [x_name]
+
+    def _one(idx_val):
+        _i, _v = idx_val
+        try:
+            _s = _refit_with_pinned(fa, pinned_key=x_name, pinned_val=float(_v))
+        except Exception as _e:                              # pragma: no cover
+            return _i, float("nan"), {}, f"{type(_e).__name__}: {_e}"
+        if not isinstance(_s, dict):
+            return _i, float("nan"), {}, "refit returned nothing"
+        _r = _s.get("rmse")
+        _vals = {}
+        for n in fit_names:
+            v = None
+            if n in (_s.get("param_values") or {}):
+                v = _s["param_values"][n]
+            elif n in (_s.get("fitted_concs") or {}):
+                try: v = float(np.log10(float(_s["fitted_concs"][n])))
+                except Exception: v = None
+            elif n in (_s.get("fitted_titrants") or {}):
+                try: v = float(np.log10(float(_s["fitted_titrants"][n])))
+                except Exception: v = None
+            _vals[n] = float(v) if v is not None and np.isfinite(v) else float("nan")
+        return _i, (float(_r) if _r is not None and np.isfinite(_r) else float("nan")), _vals, None
+
+    tasks = list(enumerate(x_grid))
+    total = len(tasks)
+    rmse = np.full(total, np.nan)
+    values = {n: np.full(total, np.nan) for n in fit_names}
+    errors: list = []
+
+    def _store(res):
+        _i, _r, _vals, _err = res
+        rmse[_i] = _r
+        for n, v in _vals.items():
+            values[n][_i] = v
+        if _err and len(errors) < 5:
+            errors.append(_err)
+
+    if n_jobs == 1:
+        for _k, _t in enumerate(tasks):
+            if progress_callback is not None:
+                try: progress_callback(_k / total, f"Profile trace: {_k + 1}/{total}")
+                except Exception: pass
+            _store(_one(_t))
+    else:
+        try:
+            from joblib import Parallel, delayed
+        except Exception:
+            return compute_profile_trace(fit_args, x_name, x_center, span=span, n_pts=n_pts,
+                                         fit_names=fit_names, n_jobs=1,
+                                         progress_callback=progress_callback)
+        try:
+            gen = Parallel(n_jobs=n_jobs, prefer="processes", return_as="generator")(
+                delayed(_one)(_t) for _t in tasks)
+            _done = 0
+            for res in gen:
+                _store(res); _done += 1
+                if progress_callback is not None:
+                    try: progress_callback(_done / total, f"Profile trace: {_done}/{total}")
+                    except Exception: pass
+        except TypeError:
+            for res in Parallel(n_jobs=n_jobs, prefer="processes", batch_size="auto")(
+                    delayed(_one)(_t) for _t in tasks):
+                _store(res)
+    if progress_callback is not None:
+        try: progress_callback(1.0, "Profile trace complete.")
+        except Exception: pass
+    return {
+        "x_name": x_name, "x_center": float(x_center), "x_grid": x_grid,
+        "fit_names": list(fit_names), "values": values, "rmse": rmse,
+        "rmse_min": float(np.nanmin(rmse)) if np.any(np.isfinite(rmse)) else np.nan,
+        "n_failed": int(np.sum(~np.isfinite(rmse))), "n_total": int(total),
+        "error_samples": errors,
+    }
+
+
+def make_profile_trace_figure(res: dict, title: Optional[str] = None,
+                              show_legend: bool = True):
+    """Left axis: fitted log K of every refit parameter vs the scanned one.
+    Right axis (log ticks): RMSE / RMSE_min along the scan."""
+    import matplotlib
+    import matplotlib.pyplot as plt
+    x = np.asarray(res["x_grid"], float)
+    names = list(res.get("fit_names") or [])
+    rmse = np.asarray(res["rmse"], float)
+    rmin = float(np.nanmin(rmse)) if np.any(np.isfinite(rmse)) else np.nan
+    _palette = ["#1F77B4", "#FF7F0E", "#2CA02C", "#D62728",
+                "#9467BD", "#8C564B", "#E377C2", "#17BECF"]
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    handles = []
+    for i, n in enumerate(names):
+        y = np.asarray(res["values"].get(n, []), float)
+        if y.size != x.size:
+            continue
+        h, = ax.plot(x, y, "-o", ms=3.2, lw=1.4, color=_palette[i % len(_palette)],
+                     label=f"log {n}")
+        handles.append(h)
+    ax.axvline(res["x_center"], color="0.5", ls=":", lw=1.0)
+    x_lbl = f"log {res['x_name']}"
+    ax.set_xlabel(x_lbl + ("  (scanned; held fixed in the fit)" if res.get("x_fixed") else "  (scanned)"))
+    ax.set_ylabel("fitted log K")
+    ax.grid(False)
+    ax2 = ax.twinx()
+    if np.isfinite(rmin) and rmin > 0:
+        h2, = ax2.plot(x, rmse / rmin, "--s", ms=3.0, lw=1.1, color="0.35",
+                       label="RMSE / RMSE$_{min}$ (right)")
+        handles.append(h2)
+        ax2.set_yscale("log")
+        ax2.axhline(1.0, color="0.75", ls="--", lw=0.8)
+    ax2.set_ylabel("RMSE / RMSE$_{min}$  (log scale)", color="0.35")
+    ax2.tick_params(axis="y", colors="0.35")
+    ax.set_title(title or f"Profile trace: {res['x_name']}")
+    if show_legend and handles:
+        ax.legend(handles=handles, fontsize=7.5, frameon=False, loc="best")
+    nf = int(res.get("n_failed", 0) or 0)
+    if nf:
+        ax.text(0.01, 0.01, f"{nf} of {res.get('n_total', '?')} refits failed",
+                transform=ax.transAxes, fontsize=7, color="#C0392B", va="bottom")
+    fig.tight_layout()
+    return fig
+
+
+# ── Cluster offload hook (see equilibrist_hpc.py) ────────────────────────────
+try:
+    from equilibrist_hpc import install_offloadable as _install_offloadable
+    _install_offloadable(
+        globals(),
+        ["compute_rmse_profile", "compute_rmse_profile_2d",
+         "compute_profile_trace", "compute_local_sensitivity"],
+        "equilibrist_diagnostics")
+except ImportError:
+    pass

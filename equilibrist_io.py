@@ -553,8 +553,13 @@ def create_snapshot(fig, parsed, params, logK_vals, xmax=None,
             ax_plot.plot(xs, ys, color=_col, lw=0.8, label=name,
                          marker="o", markersize=2.5, markeredgewidth=0)
         elif "markers" in mode:
-            ax_plot.scatter(xs, ys, color=_col, s=9, linewidths=0,
-                            zorder=3, label=name)
+            _sym = str(getattr(getattr(trace, "marker", None), "symbol", "") or "")
+            if "open" in _sym:        # concentrations from NMR integrals: open circles, as on screen
+                ax_plot.scatter(xs, ys, facecolors="none", edgecolors=_col, s=12, linewidths=0.8,
+                                zorder=3, label=name)
+            else:
+                ax_plot.scatter(xs, ys, color=_col, s=9, linewidths=0,
+                                zorder=3, label=name)
         else:
             ax_plot.plot(xs, ys, color=_col, lw=0.8, label=name)
 
@@ -615,12 +620,12 @@ def _export_kinetics_excel(kin_curve, t_vals, plot_y_names, parsed, logk_dict,
     for sp in all_sp:
         if sp in kin_curve:
             data[sp] = kin_curve[sp]
-    for vname, expr in variables.items():
-        ns = {s: kin_curve.get(s, np.zeros_like(t_vals)) for s in all_sp}
-        try:
-            data[vname] = np.array(eval(expr, {"__builtins__": {}, "np": np}, ns))
-        except Exception:
-            pass
+    for vname in variables:
+        # dependency-aware evaluation (a variable may use another variable)
+        vals = compute_variable_curve(vname, variables, kin_curve,
+                                      {"all_species": all_sp}, np.asarray(t_vals))
+        if not np.all(np.isnan(vals)):
+            data[vname] = vals
 
     df_data   = pd.DataFrame(data)
     df_script = pd.DataFrame({"Script": script_text.split("\n")})
@@ -688,6 +693,9 @@ def load_experimental_data(file_bytes) -> dict:
       Rows whose col A is empty/non-string are skipped.  Stored under key
       "_known_shifts" as {species: np.ndarray of shift values}.
 
+    A row whose first cell starts with '#' is a comment row: all its entries
+    are ignored (so proton labels or notes can sit under the header).
+
     Returns dict:
       {column_name: {"v_add_mL": np.ndarray, "y": np.ndarray}}
       plus "_x_col_header": str  (the header of column A)
@@ -707,6 +715,11 @@ def load_experimental_data(file_bytes) -> dict:
             
         x_col    = headers[0]
         data_cols = headers[1:]
+
+        # A row whose first cell starts with '#' is a comment row (labels,
+        # notes): every entry on that row is ignored.
+        _first = df[x_col].astype(str).str.strip()
+        df = df.loc[~_first.str.startswith('#')]
         
         x_series = pd.to_numeric(df[x_col], errors='coerce')
         if x_series.dropna().empty:
@@ -927,7 +940,11 @@ def _pub_figure_bytes(plotly_fig, x_label: str = "", y_label: str = "",
             ax.plot(xs, ys, color=_col, lw=lw,
                     marker="o", markersize=2.5, markeredgewidth=0)
         elif "markers" in mode:
-            ax.scatter(xs, ys, color=_col, s=9, linewidths=0, zorder=3)
+            _sym = str(getattr(getattr(trace, "marker", None), "symbol", "") or "")
+            if "open" in _sym:        # concentrations from NMR integrals: open circles, as on screen
+                ax.scatter(xs, ys, facecolors="none", edgecolors=_col, s=12, linewidths=0.8, zorder=3)
+            else:
+                ax.scatter(xs, ys, color=_col, s=9, linewidths=0, zorder=3)
         else:
             ax.plot(xs, ys, color=_col, lw=lw)
 
@@ -1027,7 +1044,11 @@ def _plot_backcalc_dots(fig, c_bc_pairs: dict, plot_y_names: list,
                         label_suffix: str = "(NMR)",
                         excl_rows: set = None,
                         bc_tag: str = "__nmr_bc__",
-                        excl_only: bool = False):
+                        excl_only: bool = False,
+                        symbol: str = "circle"):
+    # symbol: "circle" (filled) for concentrations back-calculated from chemical
+    # shifts or spectra, "circle-open" for those from NMR integrals.  Excluded
+    # points are drawn as a circle with a cross, so that hollow never means two things.
     # excl_only=True: skip solid (included) markers, only render hollow (excluded) ones.
     # Use this when the included points are already rendered from a different array
     # (e.g. post-fit sp_concs) and you only want hollow markers from a full pre-fit
@@ -1059,22 +1080,37 @@ def _plot_backcalc_dots(fig, c_bc_pairs: dict, plot_y_names: list,
     if not c_bc_pairs:
         return
 
-    # Shared x-axis: use the first species' x_arr as the reference grid.
-    ref_sp   = next(iter(c_bc_pairs))
-    x_ref, _ = c_bc_pairs[ref_sp]
-    n_pts    = len(x_ref)
+    # Back-calculated NMR integrals come with their common grid: every species on
+    # every row, as the mass balance sees them (see BackCalc in equilibrist_fit_nmr).
+    # $variables are evaluated on that grid; a species itself gets a dot only on the
+    # rows where it was measured (a blank cell in the data is not a point).
+    _filled = getattr(c_bc_pairs, "filled", None)
+    measured = {}
+    if _filled is not None:
+        x_ref = np.asarray(_filled[0], float)
+        n_pts = len(x_ref)
+        c_on_ref = {sp: np.asarray(c, float) for sp, c in _filled[1].items()}
+        for sp, (x_sp, _c) in c_bc_pairs.items():
+            measured[sp] = np.isin(np.round(x_ref, 12), np.round(np.asarray(x_sp, float), 12))
+    else:
+        # Shared x-axis: use the first species' x_arr as the reference grid.
+        ref_sp   = next(iter(c_bc_pairs))
+        x_ref, _ = c_bc_pairs[ref_sp]
+        n_pts    = len(x_ref)
 
-    # Build {sp: c_arr_on_x_ref} — interpolate if necessary.
-    c_on_ref = {}
-    for sp, (x_sp, c_sp) in c_bc_pairs.items():
-        if len(x_sp) == n_pts and np.allclose(x_sp, x_ref):
-            c_on_ref[sp] = c_sp
-        else:
-            c_on_ref[sp] = np.interp(x_ref, x_sp, c_sp)
+        # Build {sp: c_arr_on_x_ref} — interpolate if necessary.
+        c_on_ref = {}
+        for sp, (x_sp, c_sp) in c_bc_pairs.items():
+            if len(x_sp) == n_pts and np.allclose(x_sp, x_ref):
+                c_on_ref[sp] = c_sp
+            else:
+                c_on_ref[sp] = np.interp(x_ref, x_sp, c_sp)
 
     for name in plot_y_names:
         if name in c_on_ref:
             y_arr = c_on_ref[name]
+            if name in measured:
+                y_arr = np.where(measured[name], y_arr, np.nan)       # no dot where it was not measured
         elif name in variables:
             # Evaluate $variable expression pointwise from back-calc concentrations.
             #
@@ -1114,14 +1150,16 @@ def _plot_backcalc_dots(fig, c_bc_pairs: dict, plot_y_names: list,
         x_ref_np = np.asarray(x_ref)
         y_arr_np = np.asarray(y_arr)
         excl = excl_rows or set()
-        inc = [i for i in range(n_pts) if i not in excl]
-        exc = [i for i in range(n_pts) if i in excl]
+        _has = np.isfinite(np.asarray(y_arr_np, float))
+        inc = [i for i in range(n_pts) if i not in excl and _has[i]]
+        exc = [i for i in range(n_pts) if i in excl and _has[i]]
         if inc and not excl_only:
             fig.add_trace(go.Scatter(
                 x=x_ref_np[inc], y=y_arr_np[inc],
                 mode="markers", name=f"{name} {label_suffix}",
                 customdata=[[bc_tag, i] for i in inc],
-                marker=dict(color=color, size=6, symbol="circle"),
+                marker=dict(color=color, size=6, symbol=symbol,
+                            line=dict(width=1.5, color=color)),
                 showlegend=True,
             ))
         if exc:
@@ -1129,7 +1167,7 @@ def _plot_backcalc_dots(fig, c_bc_pairs: dict, plot_y_names: list,
                 x=x_ref_np[exc], y=y_arr_np[exc],
                 mode="markers", name=f"_outlier_{name}_{label_suffix}",
                 customdata=[[bc_tag, i] for i in exc],
-                marker=dict(color=color, size=6, symbol="circle-open",
+                marker=dict(color=color, size=7, symbol="circle-x-open",
                             line=dict(width=1.5, color=color)),
                 showlegend=False,
             ))
@@ -1253,3 +1291,194 @@ def _infer_y_label(plot_y_names, parsed, network):
     return "Concentration [mM]"
 
 
+
+
+def _itc_pub_figure_bytes(raw, q_exp, pre_baselines, post_baselines,
+                           eq_times_s, x_vals, q_calc, excl_set=None,
+                           dH_per_mol=None,
+                           dH_calc_curve_x=None, dH_calc_curve_y=None,
+                           x_label=None):
+    """Publication-quality ITC figure.
+
+    Single outer rectangle, 1/3 top / 2/3 bottom, same xlim (time [s]).
+    Top:    Power vs Time [s]  — standard auto time ticks on top edge.
+    Bottom: dH vs H0/G0       — custom ticks: positions = interpolated times
+                                 for round H0/G0 values, labels = H0/G0.
+    Data points align perfectly because both panels share the same x range.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from matplotlib.lines import Line2D
+    import io
+
+    plt.rcParams.update({
+        "pdf.fonttype":      42,   # embed as TrueType → fully editable in Illustrator
+        "ps.fonttype":       42,
+        "font.family":       "sans-serif",
+        "font.sans-serif":   ["Arial", "Helvetica", "DejaVu Sans"],
+        "font.size":         9,
+        "axes.labelsize":    9,
+        "xtick.labelsize":   9,
+        "ytick.labelsize":   9,
+        "axes.linewidth":    0.8,
+        "xtick.major.width": 0.8, "ytick.major.width": 0.8,
+        "xtick.minor.width": 0.6, "ytick.minor.width": 0.6,
+        "xtick.major.size":  3.5, "ytick.major.size":  3.5,
+        "xtick.minor.size":  2.0, "ytick.minor.size":  2.0,
+        "xtick.direction":   "in", "ytick.direction":  "in",
+        "xtick.top":         True,  "ytick.right":     True,
+        "axes.spines.top":   True,  "axes.spines.right": True,
+        "figure.dpi":        600,   "savefig.dpi":     600,
+    })
+
+    power   = raw.get("power_ucal_s")
+    time_s  = raw.get("time_s")
+    starts  = raw.get("inj_start_idx", [])
+    dt      = raw.get("dt_s", 5.0)
+
+    if power is None or time_s is None or len(starts) < 2:
+        raise ValueError("Insufficient ITC data for figure")
+
+    excl_set  = set(excl_set or [])
+    n_total   = len(starts)
+    power_arr = np.array(power, dtype=float)
+    time_arr  = np.array(time_s, dtype=float)
+    x_label   = x_label or "Molar ratio"
+
+    # Baseline-subtracted power
+    sub_power = power_arr.copy()
+    for i in range(n_total):
+        s, e = starts[i], (starts[i+1] if i+1 < n_total else len(power_arr))
+        if e <= s: continue
+        pre  = float(pre_baselines[i])  if i < len(pre_baselines)  else 0.0
+        post = float(post_baselines[i]) if i < len(post_baselines) else pre
+        sub_power[s:e] = power_arr[s:e] - (
+            pre + (post - pre) * np.linspace(0.0, 1.0, e - s))
+
+    # Trim to first real injection, reset time to 0
+    trim   = starts[2] if len(starts) > 2 else starts[1]
+    t_ref  = float(time_arr[trim])
+    t_plot = time_arr[trim:] - t_ref
+    p_plot = sub_power[trim:]
+    t_end  = float(t_plot[-1])
+
+    # Injection times (trimmed, one per real injection)
+    n_q       = len(q_exp)
+    inj_times = np.array([
+        float(time_arr[starts[i+2]]) - t_ref if (i+2) < len(starts) else t_end
+        for i in range(n_q)
+    ])
+
+    # Delta-H data and errors
+    vols_uL = np.array(raw.get("inj_vols_uL", []))
+    H_stock = float(raw.get("syringe_conc_mM", 5.0))
+
+    if dH_per_mol is not None and len(dH_per_mol) == n_q:
+        dH_vals = np.array(dH_per_mol, dtype=float)
+    else:
+        dH_vals = np.full(n_q, np.nan)
+        for i in range(n_q):
+            dV = vols_uL[i+1]/1000.0 if i+1 < len(vols_uL) else 0.002
+            nH = H_stock * dV
+            if nH > 1e-12:
+                dH_vals[i] = float(q_exp[i]) / nH / 1000.0
+
+    dH_err = np.zeros(n_q)
+    for i in range(n_q):
+        dV    = vols_uL[i+1]/1000.0 if i+1 < len(vols_uL) else 0.002
+        nH    = H_stock * dV
+        s     = starts[i+2] if i+2 < len(starts) else len(power_arr)
+        noise = float(np.std(power_arr[max(0,s-12):s])) if s > 0 else 1e-3
+        q_err = noise * np.sqrt(int((eq_times_s[i] if i < len(eq_times_s) else 40.0)/dt) + 8) * dt
+        if nH > 1e-12:
+            dH_err[i] = q_err / nH / 1000.0
+
+    x_arr = (np.asarray(x_vals, dtype=float) if x_vals is not None and len(x_vals) == n_q
+             else np.full(n_q, np.nan))
+
+    incl      = np.array([i not in excl_set for i in range(n_q)])
+    t_pl      = inj_times[incl]   # injection times for included points
+    dH_pl     = dH_vals[incl]
+    err_pl    = dH_err[incl]
+    x_pl      = x_arr[incl]       # H0/G0 for included points
+
+    cy = None
+    if dH_calc_curve_y is not None:
+        cy_raw = np.asarray(dH_calc_curve_y, dtype=float)
+        cy = cy_raw[incl] if len(cy_raw) == n_q else cy_raw
+
+    # ── Figure: two independent panels, same xlim ─────────────────────────
+    L, R, T, B = 0.18, 0.97, 0.88, 0.10
+    fig = plt.figure(figsize=(3.0, 4.6))
+    gs  = gridspec.GridSpec(2, 1, height_ratios=[1, 2], hspace=0,
+                            left=L, right=R, top=T, bottom=B)
+    ax_top = fig.add_subplot(gs[0])
+    ax_bot = fig.add_subplot(gs[1])   # NOT sharex — independent tick control
+
+    for ax in (ax_top, ax_bot):
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+
+    fig.patches.append(plt.Rectangle(
+        (L, B), R-L, T-B, transform=fig.transFigure,
+        fill=False, edgecolor="black", linewidth=0.8, zorder=10))
+    fig.add_artist(Line2D(
+        [L, R], [B + (T-B)*2/3, B + (T-B)*2/3],
+        transform=fig.transFigure, color="black", linewidth=0.8, zorder=10))
+
+    # ── Top panel: Power vs Time [s], time axis on TOP edge ───────────────
+    ax_top.plot(t_plot, p_plot, color="black", linewidth=0.8, rasterized=True)
+    ax_top.axhline(0, color="#888888", linewidth=0.5, linestyle="--", zorder=0)
+    ax_top.set_ylabel("Power (\u03bccal/s)")
+    ax_top.set_xlim(0.0, t_end)
+    ax_top.xaxis.set_label_position("top")
+    ax_top.xaxis.tick_top()
+    ax_top.set_xlabel("Time (s)", labelpad=3)
+    ax_top.tick_params(axis="x", which="both", top=True, labeltop=True,
+                       bottom=False, labelbottom=False)  # no inner ticks
+    ax_top.tick_params(axis="y", which="both", right=True)
+    ax_top.minorticks_on()
+
+    # ── Bottom panel: dH vs time, but x-ticks show H0/G0 values ──────────
+    ax_bot.errorbar(t_pl, dH_pl, yerr=err_pl,
+                    fmt="o", color="black", markersize=2.5,
+                    elinewidth=0.6, capsize=1.5, capthick=0.6, zorder=3)
+
+    if cy is not None and len(cy) >= 4:
+        try:
+            from scipy.interpolate import make_interp_spline as _mis
+            _mask = np.isfinite(t_pl) & np.isfinite(cy)
+            if _mask.sum() >= 4:
+                _spl = _mis(t_pl[_mask], cy[_mask], k=3)
+                _xd  = np.linspace(t_pl[_mask][0], t_pl[_mask][-1], 400)
+                ax_bot.plot(_xd, _spl(_xd), color="#cc0000", linewidth=0.8, zorder=2)
+        except Exception:
+            pass
+
+    ax_bot.set_xlim(0.0, t_end)   # same range as top panel → perfect alignment
+    ax_bot.set_ylabel(r"$\Delta H$ (kcal/mol)")
+    ax_bot.set_xlabel(x_label, labelpad=3)
+    ax_bot.tick_params(axis="x", which="both", top=False, labeltop=False,
+                       bottom=True, labelbottom=True)  # no inner ticks
+    ax_bot.tick_params(axis="y", which="both", right=True)
+    ax_bot.minorticks_on()
+
+    # Custom x-ticks: find times where H0/G0 = 0.5, 1.0, 1.5, ...
+    # Interpolate from (t_pl, x_pl) pairs
+    _valid = np.isfinite(t_pl) & np.isfinite(x_pl)
+    if _valid.sum() >= 2:
+        _t_v, _x_v = t_pl[_valid], x_pl[_valid]
+        _x_min, _x_max = _x_v.min(), _x_v.max()
+        _round_vals = np.arange(np.ceil(_x_min * 2) / 2, _x_max + 0.01, 0.5)
+        _tick_times = np.interp(_round_vals, _x_v, _t_v)
+        ax_bot.set_xticks(_tick_times)
+        ax_bot.set_xticklabels([f"{v:.1f}" for v in _round_vals])
+        ax_bot.xaxis.set_minor_locator(plt.NullLocator())  # no minor x ticks
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches=None)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()

@@ -34,8 +34,11 @@ from equilibrist_curve import *
 from equilibrist_curve import _find_maxEquiv, _x_per_equiv
 from equilibrist_fit_conc import *
 from equilibrist_fit_nmr import *
+from equilibrist_fit_nmr import shift_backcalc_resolved   # not in the module's __all__
 from equilibrist_fit_spectra import *
 from equilibrist_io import *
+from equilibrist_io import _itc_pub_figure_bytes   # underscore-prefixed: not picked up by import *
+from equilibrist_itc import *
 # ── Statistical diagnostics and bootstrap CIs (added in v2) ───────────────
 # Drop-in modules.  See INTEGRATION_PATCHES.md for the rationale.
 from equilibrist_diagnostics import (augment_stats, render_diagnostics_panel,
@@ -48,10 +51,324 @@ from equilibrist_diagnostics import (augment_stats, render_diagnostics_panel,
                                      compute_rmse_profile,
                                      compute_rmse_profile_2d,
                                      make_2d_profile_figure,
+                                     compute_profile_trace,
+                                     make_profile_trace_figure,
                                      render_identifiability_panel,
                                      render_rank_analysis_panel,
                                      compute_local_sensitivity)
 import equilibrist_bootstrap as ebs
+import equilibrist_hpc_ui as hpc_ui   # supercomputer (SLURM) submission panel
+import equilibrist_pyscript as pyscript   # user's custom .py script (sidebar buttons)
+import equilibrist_tabs as eqtabs           # several workspaces ("tabs") in one session
+import equilibrist_global as eqglobal       # one fit across several tabs
+import equilibrist_live as eqlive           # live view of a running fit
+
+
+# ── Progress bar shown while a fit runs ─────────────────────────────────────
+# The optimizer has no known number of steps, so the bar shows elapsed time
+# against the Timeout, which is what bounds a fit; it stops early on
+# convergence.  The bar is advanced by a small helper thread (the fit blocks
+# the script thread), attached to Streamlit's run context so it may draw.
+import contextlib as _contextlib
+import threading as _threading
+import time as _time
+
+
+def _pinned_shift_mismatch(nmr_cfg, nmr_data, tol_ppm=0.004):
+    """When a script pins intrinsic shifts (``read:`` + sheet 2), compare them
+    with the shifts observed at the first titration point.  Returns
+    ``(species, median_offset_ppm, n_cols)`` when the pinned values of the
+    species closest to the data are still further than ``tol_ppm`` away
+    (a referencing mismatch between the data and the pinned sheet), else None."""
+    try:
+        if not nmr_cfg or not nmr_cfg.get("read") or not nmr_data:
+            return None
+        known = nmr_data.get("_known_shifts") or {}
+        if not known:
+            return None
+        cols = [c for c in nmr_data if not str(c).startswith("_")]
+        mode = nmr_cfg.get("mode")
+        if mode == "integration":
+            return None
+        if mode == "mixed":
+            cols = cols[int(nmr_cfg.get("n_integ", len(nmr_cfg.get("n_H_list", []) or [])) or 0):]
+        obs0 = []
+        for c in cols:
+            v = np.asarray(nmr_data[c].get("v_add_mL", []), dtype=float)
+            y = np.asarray(nmr_data[c].get("y", []), dtype=float)
+            ok = np.isfinite(v) & np.isfinite(y)
+            obs0.append(float(y[ok][np.argmin(v[ok])]) if ok.any() else np.nan)
+        obs0 = np.asarray(obs0, dtype=float)
+        best = None
+        for sp in nmr_cfg["read"]:
+            kv = np.asarray(known.get(sp, []), dtype=float)
+            n = min(len(kv), len(obs0))
+            if n == 0:
+                continue
+            off = obs0[:n] - kv[:n]
+            off = off[np.isfinite(off)]
+            if off.size == 0:
+                continue
+            med = float(np.median(off))
+            if best is None or abs(med) < abs(best[1]):
+                best = (sp, med, int(off.size), bool(np.all(np.sign(off) == np.sign(med))))
+        if best is None or abs(best[1]) <= tol_ppm:
+            return None
+        return best
+    except Exception:
+        return None
+
+
+def _fit_end_message(stats, success, message, n_fitted, tol_log, timeout_s):
+    """(level, text) describing how a fit ended, from the stats the NMR
+    fitters record (stop_reason / n_evals / final_spread / elapsed_s).
+    Falls back to the older wording for fitters that do not record them."""
+    level, text = _fit_end_message_core(stats, success, message, n_fitted, tol_log, timeout_s)
+    ab = stats.get("at_bound") or {}
+    if ab:
+        parts = [f"{n} at the {side} bound of its range (log = {b:g})" for n, (side, b) in ab.items()]
+        text += ("  ⚠️ " + "; ".join(parts) + " — the fit wanted to go further; widen the range with "
+                 "'from X to Y' on that reaction line if that is not intended.")
+    return level, text
+
+
+def _fit_end_message_core(stats, success, message, n_fitted, tol_log, timeout_s):
+    reason = stats.get("stop_reason")
+    if reason is None:
+        n_ev = stats.get("n_iter", 0)
+        if stats.get("timed_out"):
+            return ("warning", f"⏱️ Fit timed out after {n_ev} evaluations ({timeout_s:.0f} s limit) — "
+                               "showing best result found. Consider increasing Timeout.")
+        if success:
+            return ("success", f"Fit completed! Updated {n_fitted} parameters. (tol=1e-{tol_log:.0f})")
+        return ("warning", f"Fit did not fully converge — {message}")
+    n_ev = stats.get("n_evals") or stats.get("n_iter", 0)
+    el = float(stats.get("elapsed_s") or 0.0)
+    tol = 10.0 ** (-float(tol_log))
+    sp = stats.get("final_spread")
+    moving = (f"the constants were still moving by up to {sp:.2g} log units in the last iterations"
+              if sp is not None else "the constants were still moving")
+    if reason == "timeout":
+        return ("warning",
+                f"⏱️ Stopped by the {timeout_s:.0f} s Timeout after {n_ev} evaluations — not converged: "
+                f"{moving} (Tol asks for {tol:.0e}).  Press Fit again to continue from these values, "
+                f"raise the Timeout, or relax Tol.")
+    if reason == "tolerance":
+        return ("success",
+                f"✅ Converged after {n_ev} evaluations in {el:.0f} s (Tol = {tol:.0e}); the constants "
+                f"moved by less than {sp:.1e} log units over the last iterations.  Updated {n_fitted} parameters."
+                if sp is not None else
+                f"✅ Converged after {n_ev} evaluations in {el:.0f} s (Tol = {tol:.0e}).  "
+                f"Updated {n_fitted} parameters.")
+    return ("warning", f"Stopped at the iteration cap after {n_ev} evaluations; {moving}.")
+
+
+@_contextlib.contextmanager
+def _fit_progress(slot, timeout_s, label="Fitting parameters…"):
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx as _add_ctx
+    except Exception:                                   # very old Streamlit: plain spinner
+        with slot, st.spinner(label):
+            yield
+        return
+    timeout_s = max(float(timeout_s or 0), 1.0)
+    t0 = _time.time()
+    stop = _threading.Event()
+    try:
+        bar = slot.progress(0.0, text=f"{label}  0 s of {timeout_s:.0f} s")
+    except Exception:
+        bar = None
+
+    def _tick():
+        while bar is not None and not stop.wait(0.5):
+            el = _time.time() - t0
+            try:
+                bar.progress(min(el / timeout_s, 0.99),
+                             text=f"{label}  {el:.0f} s of {timeout_s:.0f} s "
+                                  f"(ends early when converged)")
+            except Exception:
+                break
+
+    th = _threading.Thread(target=_tick, daemon=True)
+    _add_ctx(th)
+    th.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        th.join(timeout=1.0)
+        try:
+            slot.empty()
+        except Exception:
+            pass
+
+
+# ── Fits run in the background; the page stays live ─────────────────────
+def _live_refresh():
+    """The 'Refresh (s)' setting (0 = no intermediate redraws)."""
+    try:
+        return float(st.session_state.get("_shadow_fit_refresh", st.session_state.get("fit_refresh", 60)) or 0)
+    except Exception:
+        return 0.0
+
+
+def _fit_turn(slot, flag="_fit_requested"):
+    """Whether the fit code behind ``flag`` runs on this script run.
+
+    A fit started by :func:`_fit_async` runs in a background thread.  While it
+    is alive the request stays pending, a small fragment in ``slot`` keeps the
+    progress bar moving and, every 'Refresh (s)' seconds, writes the best
+    constants found so far into the sidebar and reruns the page -- the normal
+    plots update in place, nothing else changes -- and False is returned so the
+    rest of the page renders as usual.  Once the thread has finished (or when
+    no fit is running) the request is consumed and True returned: the fit code
+    then collects the result (or starts the fit)."""
+    ss = st.session_state
+    for k, v in (ss.pop("_bg_prefs_restore", None) or {}).items():   # after a fit's final rerun
+        ss.setdefault(k, v)
+    bg = ss.get("_bg_fit")
+    if bg is not None:
+        # the fit boxes of the sidebar: in the kinetics branch that sidebar renders
+        # AFTER the fit code, so the early reruns of a background fit drop their
+        # widget state and the fit block would find nothing ticked
+        for k, v in (bg.get("ticks") or {}).items():
+            ss.setdefault(k, v)
+    if bg is not None and bg["thread"].is_alive():
+        if bg.get("tab_idx") is not None and ss.get("_tab_idx") != bg["tab_idx"]:
+            ss["_tab_switch_to"] = bg["tab_idx"]          # the fit belongs to the tab it started in
+            st.toast("Tabs are locked while a fit is running.")
+            st.rerun()
+        for k, v in (bg.get("prefs") or {}).items():       # checkboxes below the fit code keep their state
+            ss.setdefault(k, v)
+        if bg["flag"] == flag:
+            _bg_fit_watch(slot, bg)
+        elif ss.get(flag):
+            ss.pop(flag, None)
+            st.toast("A fit is already running; wait for it to finish.")
+        return False
+    if bg is not None and bg["flag"] == flag and ss.get(flag):
+        bg["collect_at"] = _time.time()           # this run collects the finished fit
+    return bool(ss.pop(flag, False))
+
+
+def _bg_fit_watch(slot, bg):
+    """Progress bar of the background fit, refreshed every second by a fragment
+    (the rest of the page is untouched); triggers the periodic page reruns."""
+    @st.fragment(run_every=1.0)
+    def _tick():
+        bg = st.session_state.get("_bg_fit")
+        if bg is None:
+            return
+        el = _time.time() - bg["t0"]
+        rec = bg["rec"]
+        info = f"  ·  {rec['n']} evaluations"
+        if rec.get("detail"):
+            info += f", {rec['detail']}"
+        elif np.isfinite(rec["best_f"]):
+            info += f", {rec.get('label', 'objective')} {rec['best_f']:.4g}"
+        if bg["refresh"] > 0:
+            info += f"  ·  plots refresh every {bg['refresh']:.0f} s"
+        st.progress(min(el / max(bg["timeout"], 1.0), 0.99),
+                    text=f"{bg['label']}  {el:.0f} s of {bg['timeout']:.0f} s (ends early when converged){info}")
+        if not bg["thread"].is_alive():
+            st.rerun(scope="app")                         # collect the result
+        elif bg["refresh"] > 0 and _time.time() >= bg["next"]:
+            bg["next"] = _time.time() + bg["refresh"]
+            best = {k: float(v) for k, v in (rec.get("best") or {}).items()}
+            for k, v in best.items():
+                if k in bg["start_logK"]:
+                    st.session_state[f"_pending_logK_{k}"] = v
+            # the NMR shift and spectra plots draw their model from the fit statistics
+            # (pure-species shifts, absorptivities): evaluate them at the best point
+            fa = st.session_state.get("_fit_args_live")
+            if isinstance(fa, dict) and best:
+                try:
+                    lk = dict(fa.get("start_logK") or fa.get("start_logk") or {})
+                    lk.update({k: v for k, v in best.items() if k in lk})
+                    keys = list(fa.get("fit_keys") or []) or ([next(iter(lk))] if lk else [])
+                    out = eqglobal._call_fit(fa, lk, keys, tolerance=1e30, maxiter=1, timeout_s=1e9,
+                                             compute_hessian=False, objective_only=False)
+                    if isinstance(out, tuple) and len(out) == 4 and isinstance(out[2], dict) and out[2]:
+                        st.session_state["_fit_stats"] = out[2]
+                except Exception:
+                    pass
+            st.rerun(scope="app")                         # redraw the page at the best point so far
+    with slot.container():
+        _tick()
+
+
+def _fit_async(slot, timeout_s, run_fit, start_logK, label="Fitting parameters…", flag="_fit_requested"):
+    """Run ``run_fit()`` -- a fit call returning (ok, fitted, stats, message) --
+    in a background thread.  First call: start the thread, keep ``flag`` set so
+    the call site is entered again, and rerun; the page then renders normally
+    while :func:`_fit_turn` keeps the request pending and redraws the plots at
+    the best constants every 'Refresh (s)' seconds.  Final call (thread
+    finished): return the fit's result to the call site, which handles it
+    exactly as it did when the fit was synchronous."""
+    ss = st.session_state
+    bg = ss.get("_bg_fit")
+    if bg is not None and not bg["thread"].is_alive() and not (
+            bg.get("flag") == flag and _time.time() - float(bg.get("collect_at") or 0.0) < 60.0):
+        ss.pop("_bg_fit", None)                   # a stale, never collected fit: start afresh
+        st.toast("The previous fit's result was not collected; starting a new fit.")
+        bg = None
+    if bg is not None and not bg["thread"].is_alive():
+        ss.pop("_bg_fit", None)
+        # the call site ends with an early st.rerun(): widgets rendered after it
+        # (Tol, Timeout, Refresh, the global-fit checkboxes) would lose their state
+        for k in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+            if k in ss:
+                ss[f"_shadow_{k}"] = ss[k]
+        ss["_bg_prefs_restore"] = {k: ss[k] for k in ("_global_weighted", "_global_share_shifts",
+                                                       "_global_share_shifts_touched") if k in ss}
+        # the constants and concentrations as they stand now: those the fit did not
+        # change come back after the final rerun; the fitted ones arrive through
+        # _pending_logK_ and take precedence (consumed first, at the top of the run)
+        ss["_bg_prefs_restore"].update({k: ss[k] for k in (bg.get("ticks") or {}) if k in ss})
+        if bg["box"].get("error") is not None:
+            raise bg["box"]["error"]
+        return bg["box"]["result"]
+    if bg is not None:                                    # still running: not our turn
+        ss[flag] = True
+        st.rerun()
+    rec = {"best": None, "best_f": float("inf"), "n": 0, "label": "objective"}
+    box = {"result": None, "error": None}
+    ident = {"id": None}
+
+    def recorder(values, f, authoritative=False, detail=None):   # called by the fit's objective (fit thread only)
+        if _threading.get_ident() != ident["id"]:
+            return
+        rec["n"] += 1
+        if authoritative:                                 # the global fit reports its own current best
+            rec["best_f"], rec["best"], rec["label"] = float(f), dict(values), "rms objective (plain sum of the tabs)"
+            rec["detail"] = detail
+        elif f < rec["best_f"]:
+            rec["best_f"], rec["best"] = float(f), dict(values)
+
+    def worker():
+        ident["id"] = _threading.get_ident()
+        try:
+            with eqlive.live_hook(recorder):
+                box["result"] = run_fit()
+        except BaseException as ex:                       # handed back to the call site
+            box["error"] = ex
+
+    refresh = _live_refresh()
+    # the sidebar state the early reruns drop (kinetics: the sidebar renders after
+    # the fit code): fit boxes, and the constants / concentrations themselves
+    _ticks = {k: ss[k] for k in list(ss.keys())
+              if isinstance(k, str) and (k.startswith(("fit_logK_", "fit_conc_", "fit_titrant_mM_",
+                                                       "logK_", "conc_", "titrant_mM_")) or k == "xmax")}
+    bg = {"thread": _threading.Thread(target=worker, daemon=True), "box": box, "rec": rec, "ticks": _ticks,
+          "t0": _time.time(), "timeout": max(float(timeout_s or 0), 1.0), "label": label, "flag": flag,
+          "refresh": refresh, "next": (_time.time() + refresh) if refresh > 0 else float("inf"),
+          "tab_idx": ss.get("_tab_idx"),
+          "start_logK": {k: float(v) for k, v in (start_logK or {}).items()},
+          "prefs": {k: ss[k] for k in ("_global_weighted", "_global_share_shifts", "_global_share_shifts_touched") if k in ss}}
+    ss["_bg_fit"] = bg
+    bg["thread"].start()
+    ss[flag] = True
+    st.rerun()
 
 # ── v2: fragment wrapper ──────────────────────────────────────────────────
 # Use st.fragment where available so interacting with widgets inside the
@@ -64,6 +381,45 @@ elif hasattr(st, 'experimental_fragment'):
     _fragment = st.experimental_fragment
 else:
     _fragment = lambda f: f
+
+
+def _fit_ticks_crossed_zero(fit_key: str) -> None:
+    """on_change of a fit box.  The Fit button's state, the global-fit tab list and
+    the live fit args are computed by the main script, which a fragment click does
+    not rerun; one full rerun is requested when this click makes the tab fittable
+    (first box ticked) or unfittable (last box unticked).  Other clicks keep the
+    scroll position, which is what the fragment is for."""
+    ss = st.session_state
+    n = sum(1 for k, v in ss.items() if isinstance(k, str) and v is True
+            and k.startswith(("fit_logK_", "fit_conc_", "fit_titrant_mM_")))
+    if (ss.get(fit_key) and n == 1) or (not ss.get(fit_key) and n == 0):
+        ss["_fit_ticks_rerun"] = True
+
+
+@_fragment
+def _fit_toggle(fit_key: str, *, disabled: bool = False):
+    """Render a sidebar "fit" checkbox inside its own fragment.
+
+    Streamlit reruns the whole script on any widget change, which re-renders
+    the main column and drops the reader back to the top of the page - so
+    every fit-checkbox click meant scrolling down to the thermogram again.
+
+    A fragment reruns ONLY itself, leaving the main column's DOM untouched,
+    so the scroll position simply never moves. This is safe precisely for
+    these checkboxes because they do not affect the plotted curve: they only
+    record which parameters to float, and that is read on the next full
+    rerun, which is exactly when the Fit button is pressed.
+
+    Number inputs cannot be treated this way - changing a concentration must
+    redraw the curve, which requires a full rerun.
+    """
+    st.checkbox("fit", key=fit_key, disabled=disabled,
+                on_change=_fit_ticks_crossed_zero, args=(fit_key,))
+    if st.session_state.pop("_fit_ticks_rerun", False):
+        try:
+            st.rerun(scope="app")
+        except TypeError:                     # older Streamlit without fragments/scope
+            st.rerun()
 
 
 def _indented_checkbox(label, *, indent_frac: float = 0.035, **kwargs):
@@ -113,6 +469,554 @@ def _write_tuple_cache(key: tuple, value) -> None:
     _reg = st.session_state.setdefault("_tuple_cache_registry", [])
     if key not in _reg:
         _reg.append(key)
+
+
+
+def _hpc_store_tuple_cache(_res, _ctx):
+    """Store a result fetched from the cluster where the local 1D / 2D
+    profile would have cached it."""
+    if isinstance(_res, dict):
+        for _k in ("p1_fixed", "p2_fixed", "x_fixed"):
+            if _k in _ctx:
+                _res[_k] = bool(_ctx[_k])
+    _write_tuple_cache(tuple(_ctx.get("ck", [])), _res)
+
+
+def _hpc_store_state(_key):
+    """Handler that stores a fetched cluster result under a session key."""
+    def _h(_res, _ctx):
+        st.session_state[_key] = _res
+    return _h
+
+
+def _profile_param_picker(site: str, fit_stats: dict, fa: dict):
+    """Multi-select of the parameters to scan in the 1D RMSE profile.
+
+    Offers every parameter fitted in the last fit (constants, concentrations,
+    titrants) plus the constants that were held FIXED, labelled "(fixed)".
+    Fixed constants are scanned around their fixed value while every fitted
+    parameter is re-optimised at each grid point -- the same engine the 2D
+    map uses.  Returns ``(logK_values, concs_mM, titrants_mM, fixed_selected,
+    tag, is_default)``; ``is_default`` is True when the selection equals
+    "all fitted parameters" (the historical behaviour -- the cache key then
+    stays the historical 3-tuple).
+    """
+    def _f(_v):
+        try:
+            return float(_v)
+        except Exception:
+            return None
+    _K = {n: _f(v) for n, v in (fit_stats.get("param_values", {}) or {}).items()}
+    _K = {n: v for n, v in _K.items() if v is not None}
+    _c = {n: _f(v) for n, v in (fit_stats.get("fitted_concs", {}) or {}).items()}
+    _c = {n: v for n, v in _c.items() if v is not None and v > 0}
+    _t = {n: _f(v) for n, v in (fit_stats.get("fitted_titrants", {}) or {}).items()}
+    _t = {n: v for n, v in _t.items() if v is not None and v > 0}
+    _fixed = {}
+    for n, v in ((fa or {}).get("start_logK") or (fa or {}).get("start_logk") or {}).items():
+        if n in _K or n == "Kw":
+            continue
+        v = _f(v)
+        if v is not None:
+            _fixed[n] = v
+    _opts = list(_K) + list(_c) + list(_t) + list(_fixed)
+    _default = list(_K) + list(_c) + list(_t)
+    _key, _okey = f"_prof_sel_{site}", f"_prof_sel_opts_{site}"
+    if st.session_state.get(_okey) != _opts or _key not in st.session_state:
+        # new fit / new model: back to the default -- also when the widget was
+        # off-screen for a run (Streamlit then drops its value and the picker
+        # came back empty, e.g. after a change of the diagnostics scope)
+        st.session_state[_okey] = _opts
+        st.session_state[_key] = list(_default)
+    _sel = st.multiselect(
+        "Parameters to profile", _opts, key=_key,
+        format_func=lambda n: f"{n} (fixed)" if n in _fixed else n,
+        help="Each selected parameter is pinned on a grid around its value "
+             "while all fitted parameters are re-optimised at every point.  "
+             "Constants held fixed in the last fit can be added: they are "
+             "scanned around their fixed value.  Cost grows with the number "
+             "of parameters selected.")
+    _selK = {n: (_K[n] if n in _K else _fixed[n]) for n in _sel if n in _K or n in _fixed}
+    _selc = {n: _c[n] for n in _sel if n in _c}
+    _selt = {n: _t[n] for n in _sel if n in _t}
+    return (_selK, _selc, _selt, {n: _fixed[n] for n in _sel if n in _fixed},
+            ",".join(sorted(_sel)), sorted(_sel) == sorted(_default))
+
+
+def _profile_display(prof, fixed_values):
+    """Label the profiles of constants that were held fixed in the last fit."""
+    if not prof:
+        return prof
+    _fx = fixed_values or {}
+    return {(f"{n} (fixed at {_fx[n]:.2f})" if n in _fx else n): v for n, v in prof.items()}
+
+
+def _profile_trace_block(site: str, fit_stats: dict) -> None:
+    """Profile trace: scan one parameter, refit a chosen subset, plot the
+    fitted values (left axis) and RMSE/RMSE_min (right axis, log) against the
+    scanned value.  ``site`` is "eq" or "kin".  Shares the cache, parallel and
+    supercomputer machinery of the 1D / 2D profiles."""
+    _show = _indented_checkbox(
+        "📈 Show profile trace (fitted constants vs one scanned parameter)",
+        value=False, key=f"_show_ptr_{site}",
+        help="Walk one parameter across a range; at every step refit only the "
+             "parameters you tick (the others stay at their fitted values) and "
+             "plot their fitted values, with RMSE / RMSE_min on the right axis.  "
+             "Shows directly how one constant is compensated by the others.")
+    if not _show:
+        return
+    _fa = st.session_state.get(f"_fit_args_{site}")
+    if not _fa:
+        st.info("Click **Fit** first to enable the profile trace.")
+        return
+    _fitted = {}
+    for _n, _v in (fit_stats.get("param_values", {}) or {}).items():
+        try: _fitted[_n] = float(_v)
+        except Exception: pass
+    _conc_like = {}
+    for _key in ("fitted_concs", "fitted_titrants"):
+        for _n, _mM in (fit_stats.get(_key, {}) or {}).items():
+            try:
+                _v = float(_mM)
+                if _v > 0: _conc_like[_n] = float(np.log10(_v))
+            except Exception: pass
+    _fixed = {}
+    for _n, _v in ((_fa.get("start_logK") or _fa.get("start_logk") or {})).items():
+        if _n in _fitted or _n == "Kw": continue
+        try: _fixed[_n] = float(_v)
+        except Exception: pass
+    _x_cands = {**_fitted, **_conc_like, **_fixed}
+    _y_cands = {**_fitted, **_conc_like}
+    if not _x_cands or not _y_cands:
+        st.info("Need at least one fitted parameter.")
+        return
+    _lbl = lambda _n: (f"{_n} (fixed)" if _n in _fixed else _n)
+    c1, _ = st.columns(2)
+    _x = c1.selectbox("X-axis parameter", list(_x_cands), key=f"_ptr_x_{site}",
+                      format_func=_lbl)
+    c_sp, c_np, _ = st.columns(3)
+    _span = c_sp.number_input("Span (log ±)", min_value=0.1, max_value=4.0, value=1.0,
+                              step=0.1, key=f"_ptr_span_{site}")
+    _np = c_np.number_input("Grid (odd)", min_value=3, max_value=201, value=11, step=2,
+                            key=f"_ptr_np_{site}")
+    _y_opts = [n for n in _y_cands if n != _x]
+    _okey, _skey = f"_ptr_sel_opts_{site}", f"_ptr_sel_{site}"
+    if st.session_state.get(_okey) != _y_opts:
+        st.session_state[_okey] = _y_opts
+        st.session_state[_skey] = list(_y_opts)
+    _sel = st.multiselect("Parameters refit at each step (and plotted)", _y_opts, key=_skey,
+                          help="Ticked parameters are re-optimised at every grid point; the "
+                               "other fitted parameters are held at their fitted values.")
+    if _x in _fixed:
+        st.caption(f"**{_x}** was held fixed at {_fixed[_x]:.2f} in the last fit; the scan "
+                   "is centred on that value.")
+    _par = st.checkbox("Parallel (use all cores)", value=False, key=f"_ptr_par_{site}")
+    _hpc_go = hpc_ui.controls(f"ptr_{site}", label="the profile trace")
+    _ck = (f"_ptr_cache_{site}", _x, float(_span), int(_np), ",".join(sorted(_sel)))
+    _res = st.session_state.get(_ck)
+    if _res is None:
+        if st.button("Compute profile trace", key=f"_ptr_btn_{site}",
+                     disabled=not _sel) or _hpc_go:
+            _bar = st.progress(0.0, text="Computing profile trace…")
+            def _cb(f, m):
+                try: _bar.progress(min(1.0, f), text=m)
+                except Exception: pass
+            try:
+                _fa2 = dict(_fa)
+                if _fa2.get("kind") != "global":
+                    _fa2["kind"] = site
+                _seed = dict(_fa2.get("start_logK") or _fa2.get("start_logk") or {})
+                _seed.update(_fitted)
+                _fa2["start_logK"] = _seed
+                _fa2["start_logk"] = dict(_seed)
+                _fa2["simplex_step"] = 0.15
+                _res = compute_profile_trace(
+                    _fa2, _x, _x_cands[_x], span=float(_span), n_pts=int(_np),
+                    fit_names=list(_sel), n_jobs=(-1 if _par else 1),
+                    progress_callback=_cb)
+                _res["x_fixed"] = bool(_x in _fixed)
+                _write_tuple_cache(_ck, _res)
+                _bar.empty()
+            except hpc_ui.CapturedCall as _hpc_cc:
+                _bar.empty()
+                hpc_ui.handle_capture(_hpc_cc, f"ptr_{site}", "profile trace",
+                                      context={"ck": list(_ck), "x_fixed": bool(_x in _fixed)})
+            except Exception as _e:
+                _bar.empty()
+                st.error(f"Profile trace failed: {_e}")
+    hpc_ui.jobs_panel(f"ptr_{site}", on_result=_hpc_store_tuple_cache)
+    if _res is None:
+        return
+    _noleg = st.checkbox("No legend", value=False, key=f"_ptr_noleg_{site}")
+    try:
+        _fig = make_profile_trace_figure(_res, show_legend=not _noleg)
+        st.pyplot(_fig, clear_figure=False)
+        try:
+            _rm = np.asarray(_res["rmse"], float)
+            _i0 = int(np.nanargmin(_rm))
+            _msg = (f"Lowest RMSE on the scan: **{_rm[_i0]:.5g}** at log {_x} = "
+                    f"{float(_res['x_grid'][_i0]):.2f}")
+            _fit_r = fit_stats.get("rmse")
+            if _fit_r is not None and np.isfinite(float(_fit_r)):
+                _ref = _x_cands.get(_x)
+                _msg += (f" — last fit: **{float(_fit_r):.5g}** at "
+                         f"{'' if _ref is None else f'{_ref:.2f}'}"
+                         f" ({float(_fit_r) / _rm[_i0]:.3f} × the scan minimum)")
+            st.caption(_msg)
+        except Exception:
+            pass
+        import io as _io
+        _buf = _io.BytesIO()
+        _fig.savefig(_buf, format="png", dpi=200, bbox_inches="tight")
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.download_button("Download profile trace PNG", data=_buf.getvalue(),
+                           file_name=f"Equilibrist_trace_{_x}_{_ts}.png", mime="image/png",
+                           key=f"_ptr_dl_{site}")
+        if _res.get("error_samples"):
+            st.caption("Refit errors (first few): " + "; ".join(str(e) for e in _res["error_samples"]))
+    except Exception as _re:
+        st.error(f"Could not render the profile trace: {_re}")
+
+def _diag_fa(fa):
+    """The fit record the diagnostics work on.  After a global fit every tab holds
+    the global record; the "Diagnostics on" switch (above the fit statistics)
+    chooses between it ("all tabs") and this tab alone at the global solution
+    ("this tab only", see equilibrist_global.tab_fit_args)."""
+    if (isinstance(fa, dict) and fa.get("kind") == "global"
+            and st.session_state.get("_diag_scope") == "this tab only"):
+        return eqglobal.tab_fit_args(fa)
+    return fa
+
+
+def _diag_scope_switch(fa_key):
+    """The 'Diagnostics on' radio, shown only while this tab holds a global fit."""
+    _fa_scope = st.session_state.get(fa_key)
+    if not (isinstance(_fa_scope, dict) and _fa_scope.get("kind") == "global"):
+        return
+    st.session_state.setdefault("_diag_scope", "all tabs (global)")
+    def _scope_changed():
+        st.session_state["_diag_scope_changed"] = True
+    st.radio("Diagnostics on", ["all tabs (global)", "this tab only"], key="_diag_scope",
+             horizontal=True, on_change=_scope_changed,
+             help="After a global fit the profiles, trace, sensitivity, bootstrap, jackknife, "
+                  "Monte Carlo and model comparison either refit all tabs together (the global "
+                  "objective) or this tab alone, starting from the global constants.  Changing "
+                  "it clears the diagnostics shown.")
+    if st.session_state.pop("_diag_scope_changed", False):
+        _reset_diagnostic_toggles()
+        st.rerun(scope="app")
+
+
+def _share_shifts_checkbox(_ready):
+    """The 'Share pure-species shifts across tabs' box, below 'Weight tabs by
+    their own fit'.  Ticked by default when the tabs' shift columns line up
+    (same number of columns, same target variables; they are paired by
+    position) and unticked otherwise; once the user touches it, their choice
+    stays (both are PREFS, kept across tabs)."""
+    _fas = eqtabs.fit_args_with_data(st.session_state)      # every tab with data, ticked or not
+    _ok, _why = eqglobal.shift_columns_line_up(_fas) if len(_fas) >= 2 else (False, "")
+    if not st.session_state.get("_global_share_shifts_touched"):
+        st.session_state["_global_share_shifts"] = bool(_ok)
+    st.checkbox("Share pure-species shifts across tabs", key="_global_share_shifts",
+                on_change=lambda: st.session_state.__setitem__("_global_share_shifts_touched", True),
+                help="The chemical shift of each species (GHM, GH2M, ...) is solved once for all tabs "
+                     "instead of separately in each: right when the tabs follow the same protons of the "
+                     "same compound under the same conditions.  Shift columns are paired by position.  "
+                     "Ticked by default when the tabs' shift columns line up.")
+    if st.session_state.get("_global_share_shifts") and _why:
+        st.caption(f"⚠️ Shared shifts will be refused: {_why}.")
+
+
+def _render_pure_shift_comparison(fit_stats):
+    """Pure-species shifts of every fitted tab side by side, protons matched by
+    their free shift (see equilibrist_global.match_shift_columns), with the
+    spread across tabs: what 'Share pure-species shifts across tabs' has to
+    reconcile.  Shown under the pure-species table when at least two tabs
+    carry NMR shift results."""
+    ss = st.session_state
+    tabs = ss.get("_tabs") or []
+    if len(tabs) < 2:
+        return
+    names = eqtabs.labels(ss)
+    per_tab = []
+    for i, tab in enumerate(tabs):
+        stt = fit_stats if i == ss.get("_tab_idx") else ((tab.get("state") or {}).get("_fit_stats"))
+        if isinstance(stt, dict) and stt.get("pure_shifts"):
+            per_tab.append((names[i], stt))
+    if len(per_tab) < 2:
+        return
+    cols_by_tab, fps = [], []
+    for name, stt in per_tab:
+        df = stt.get("delta_free") or {}
+        cols = [(tgt, c) for tgt in stt["pure_shifts"] for c in stt["pure_shifts"][tgt]]
+        cols_by_tab.append(cols)
+        fps.append([float(df.get(c, 0.0)) for _, c in cols])
+    try:
+        groups, how = eqglobal.match_shift_columns(fps)
+    except ValueError as ex:
+        st.caption(f"Pure-species shifts across tabs: {ex}.")
+        return
+    rows = []
+    for grp in groups:
+        present = [(t, j) for t, j in enumerate(grp) if j is not None]
+        if len(present) < 2:
+            continue
+        species = []
+        for t, j in present:
+            tgt, c = cols_by_tab[t][j]
+            for sp in per_tab[t][1]["pure_shifts"][tgt][c]:
+                if sp not in species:
+                    species.append(sp)
+        free0 = fps[present[0][0]][present[0][1]]
+        for sp in species:
+            row = {"Proton (free δ)": f"{free0:.3f}", "Species": sp}
+            vals = []
+            for t, j in present:
+                name, stt = per_tab[t]
+                tgt, c = cols_by_tab[t][j]
+                dd = stt["pure_shifts"][tgt][c].get(sp)
+                if dd is None:
+                    row[name] = "—"
+                    continue
+                show_abs = (not stt.get("nmr_noref", False)) or stt.get("pure_shifts_anchored", False)
+                v = (float((stt.get("delta_free") or {}).get(c, 0.0)) if show_abs else 0.0) + float(dd)
+                vals.append(v)
+                und = sp in ((((stt.get("pure_shift_undetermined") or {}).get(tgt) or {}).get(c)) or [])
+                row[name] = f"({v:.3f})" if und else f"{v:.3f}"
+            row["Δ (max − min)"] = f"{(max(vals) - min(vals)):.3f}" if len(vals) >= 2 else ""
+            rows.append(row)
+    if not rows:
+        return
+    st.write("**Pure-species shifts across tabs (ppm):**")
+    st.dataframe(pd.DataFrame(rows).set_index(["Proton (free δ)", "Species"]), width="stretch")
+    st.caption(("Protons matched by their free shift" if how == "fingerprint" else "Columns paired by position")
+               + "; ( ) = not determined in that tab; Δ = spread across tabs, i.e. what "
+                 "'Share pure-species shifts across tabs' has to reconcile.")
+
+
+def _global_fit_dispatch(_fit_slot):
+    """Run one fit across every registered tab (any mode), hand each tab its
+    results and the GLOBAL fit args, then rerun.  Called from the equilibrium
+    and the kinetics branches when the Global fit button was pressed."""
+    _gexps = eqtabs.collect_experiments(st.session_state)
+    if len(_gexps) < 2:
+        st.session_state["_fit_message"] = ("warning", "A Global fit needs at least two tabs with data "
+                                            "loaded and a 'fit' box ticked.")
+    else:
+        try:
+            _g_tol_log = float(st.session_state.get("fit_tolerance_log", 3.0))
+            _g_timeout = float(st.session_state.get("fit_timeout", 30))
+            _g_weighted = bool(st.session_state.get("_global_weighted", True))
+            _g_share = bool(st.session_state.get("_global_share_shifts", False))
+            _g_in = [{"label": _lab, "fa": _fa, "start_logK": dict(_fa.get("start_logK") or {}),
+                      "ticked": list(_fa.get("fit_keys") or [])} for _i, _lab, _fa in _gexps]
+            # the ACTIVE tab's sidebar values win as starting point for shared constants
+            _g_active = [x for x in _g_in if x["label"] == eqtabs.labels(st.session_state)[st.session_state["_tab_idx"]]]
+            if _g_active:
+                _g_in.remove(_g_active[0]); _g_in.insert(0, _g_active[0])
+            _hpc_site = st.session_state.pop("_global_fit_hpc", None)
+            if _hpc_site:
+                # the call is captured and shipped to the cluster; its result comes
+                # back through _hpc_store_fit -> _apply_global_pending.  On the
+                # cluster the fit runs for the job's wall time, not the sidebar Timeout.
+                _g_timeout = hpc_ui.fit_timeout_seconds(_g_timeout)
+                hpc_ui.hpc.arm_capture(_hpc_site)
+                try:
+                    eqglobal.global_fit(_g_in, tolerance=10.0 ** (-_g_tol_log), maxiter=100_000,
+                                        timeout_s=_g_timeout, weighted=_g_weighted, share_shifts=_g_share)
+                except hpc_ui.CapturedCall as _cc:
+                    hpc_ui.handle_capture(_cc, _hpc_site, "Global fit",
+                                          context={"tool": "global", "labels": [x["label"] for x in _g_in],
+                                                   "tol_log": _g_tol_log, "timeout": _g_timeout},
+                                          settings_override=hpc_ui.fit_settings())
+                    return
+                hpc_ui.hpc.disarm_capture()
+                st.error("The global fit could not be captured for the cluster.")
+                return
+            _gres = _fit_async(_fit_slot, _g_timeout, lambda: eqglobal.global_fit(_g_in, tolerance=10.0 ** (-_g_tol_log), maxiter=100_000,
+                                            timeout_s=_g_timeout, weighted=_g_weighted, share_shifts=_g_share),
+                _g_in[0]["start_logK"], "Global fit across tabs…", "_global_fit_requested")
+            _apply_global_result(_gres, _g_in, _gexps, _g_tol_log, _g_timeout)
+            st.rerun()
+        except Exception as _ge:
+            import traceback as _gtb
+            st.error(f"Global fit error: {_ge}")
+            st.caption(_gtb.format_exc())
+
+
+def _apply_global_result(_gres, _g_in, _gexps, _g_tol_log, _g_timeout):
+    """Hand every tab its share of a global fit result (computed here or fetched
+    from the cluster): fitted values, stats, the global fit-args for the diagnostics."""
+    _g_weighted = bool(_gres.get("weighted", True))
+    _g_parts = ", ".join(f"{_lab}: {_r:.3g}" if _r is not None else f"{_lab}: n/a"
+                         for _lab, _r in _gres["rmse_by_label"].items())
+    if _g_weighted:
+        _g_parts += ";  tabs rescaled to their own fit, relative weights " + ", ".join(
+            f"{_lab}: {_w:.2g}" for _lab, _w in (_gres.get("weights") or {}).items())
+    else:
+        _g_parts += ";  plain sum"
+    _g_share = _gres.get("info_share") or {}
+    if _g_share:
+        def _share_txt(_k):
+            return " / ".join(f"{_lab} {100 * _d[_k]:.0f} %" for _lab, _d in _g_share.items()
+                              if _d.get(_k) is not None)
+        _g_parts += ";  share of the information on " + ", ".join(
+            f"{_k}: {_share_txt(_k)}" for _k in (_gres.get("shared") or []) if _share_txt(_k))
+    if _gres.get("share_shifts"):
+        _sp = _gres.get("shared_pure_shifts") or []
+        _common = [s for s in _sp if sum(c is not None for c in s.get("cols") or []) >= 2]
+        _how = (_common[0].get("how") if _common else None)
+        _g_parts += (";  pure-species shifts shared across tabs ("
+                     + f"{len(_common)} proton{'s' if len(_common) != 1 else ''} "
+                     + ("matched by their V = 0 shifts: " + ", ".join(f"{s['free_shift']:.3f}" for s in _common) + " ppm"
+                        if _how == "fingerprint" else "paired by column position")
+                     + (f"; {len(_sp) - len(_common)} tab-specific" if len(_sp) > len(_common) else "") + ")")
+    if _gres["summary"].get("n_restarts"):
+        _g_parts += f";  {_gres['summary']['n_restarts']} restart(s)"
+    _g_lvl = "success" if _gres["success"] else "warning"
+    _parsed_list = [_fa.get("parsed_fit") for _i, _lab, _fa in _gexps]
+    _g_txt = (f"{'✅' if _gres['success'] else '⏱️'} Global fit over {len(_g_in)} tabs "
+              f"{_gres['message']} after {_gres['summary'].get('n_evals')} evaluations "
+              f"in {_gres['elapsed_s']:.0f} s.  Shared constants: "
+              + ", ".join(eqglobal.format_shared_constant(k, _gres['values'][k], _parsed_list) for k in _gres["shared"])
+              + f".  Global RMSE {(_gres['rmse'] or float('nan')):.3g}  (per tab — {_g_parts}).")
+    _names_now = eqtabs.labels(st.session_state)
+    for _i, _lab, _fa in _gexps:
+        _st_i = _gres["stats"].get(_lab) or {}
+        # this tab's residuals at the global solution: without them the residual
+        # diagnostics (and their heatmap / sloppy spectrum / t-test / profile
+        # children) stay hidden, or show the residuals of an older single fit
+        try:
+            _x_expr_i = (_fa.get("x_expr") or (_fa.get("parsed_fit") or {}).get("plot_x_expr")
+                         or ("t" if _fa.get("kind") == "kin" else ""))
+            _res_i = collect_residuals_from_stats(_st_i, x_expr=_x_expr_i)
+            augment_stats(_st_i, _res_i)
+        except Exception:
+            _res_i = {}
+        # the diagnostics of every tab now run on the GLOBAL objective
+        _fa_i = eqglobal.make_global_fit_args(
+            _fa, _g_in, _gres, tolerance=10.0 ** (-_g_tol_log), maxiter=100_000,
+            timeout_s=_g_timeout, label=_lab)
+        _fa_key = "_fit_args_kin" if (_fa.get("kind") == "kin") else "_fit_args_eq"
+        if _i == st.session_state["_tab_idx"]:
+            for _k, _v in (_st_i.get("param_values") or {}).items():
+                st.session_state[f"_pending_logK_{_k}"] = float(_v)
+            for _root, _mM in (_st_i.get("fitted_concs") or {}).items():
+                st.session_state[f"_pending_conc_{_root}"] = float(_mM)
+            for _tk, _mM in (_st_i.get("fitted_titrants") or {}).items():
+                st.session_state[f"_pending_titrant_mM_{_tk}"] = float(_mM)
+            st.session_state["_fit_counter"] = int(st.session_state.get("_fit_counter", 0)) + 1
+            _reset_diagnostic_toggles()
+            st.session_state["_fit_stats"] = _st_i
+            st.session_state["_fit_residuals"] = _res_i
+            st.session_state[_fa_key] = _fa_i
+            st.session_state["_fit_message"] = (_g_lvl, _g_txt)
+        else:
+            eqtabs.write_fit_into(st.session_state["_tabs"][_i]["state"], _st_i, _fa_i, (_g_lvl, _g_txt), key=_fa_key)
+            st.session_state["_tabs"][_i]["state"]["_fit_residuals"] = _res_i
+
+
+def _hpc_store_fit(_res, _ctx):
+    """A fit fetched from the cluster (this tab's or the global one) is applied at
+    the top of the next run, before any widget exists (fitted values go into
+    widget keys)."""
+    if (_ctx or {}).get("tool") == "global":
+        st.session_state["_global_fit_pending"] = (_res, _ctx)
+    else:
+        st.session_state["_single_fit_pending"] = (_res, _ctx)
+
+
+def _submit_single_fit_to_cluster(_site):
+    """Capture this tab's fit (from its live fit record) and ship it to the cluster."""
+    _fa = st.session_state.get("_fit_args_live")
+    if not isinstance(_fa, dict) or not _fa.get("has_data") or not (
+            _fa.get("fit_keys") or _fa.get("fit_conc_keys") or _fa.get("fit_titrant_keys")):
+        st.session_state["_fit_message"] = ("warning", "Load experimental data and tick at least "
+                                            "one 'fit' box before submitting the fit.")
+        return
+    _tol_log = float(st.session_state.get("fit_tolerance_log", 3.0))
+    # on the cluster the fit runs for the job's wall time, not the sidebar Timeout
+    _timeout = hpc_ui.fit_timeout_seconds(float(st.session_state.get("fit_timeout", 30)))
+    _label = eqtabs.labels(st.session_state)[st.session_state["_tab_idx"]]
+    hpc_ui.hpc.arm_capture(_site)
+    try:
+        eqglobal.single_fit(_fa, tolerance=10.0 ** (-_tol_log), maxiter=100_000, timeout_s=_timeout)
+    except hpc_ui.CapturedCall as _cc:
+        hpc_ui.handle_capture(_cc, _site, "Fit", context={"tool": "single", "label": _label,
+                                                        "tol_log": _tol_log, "timeout": _timeout},
+                              settings_override=hpc_ui.fit_settings())
+        return
+    hpc_ui.hpc.disarm_capture()
+    st.error("The fit could not be captured for the cluster.")
+
+
+def _apply_single_pending(_sp):
+    """Apply a single-tab fit fetched from the cluster to the tab it was submitted from."""
+    _res, _ctx = _sp
+    _label = _ctx.get("label")
+    _names = eqtabs.labels(st.session_state)
+    if _label not in _names:
+        st.session_state["_fit_message"] = ("warning", f"The cluster's fit was submitted from tab "
+                                            f"{_label}, which no longer exists; its result was not applied.")
+        return
+    _i = _names.index(_label)
+    _active = (_i == st.session_state["_tab_idx"])
+    _state = st.session_state if _active else (st.session_state["_tabs"][_i].get("state") or {})
+    _fa = _state.get("_fit_args_live")
+    if not isinstance(_fa, dict):
+        st.session_state["_fit_message"] = ("warning", f"Tab {_label} has no fit record any more; "
+                                            "the cluster's fit was not applied.")
+        return
+    _stats = dict(_res.get("stats") or {})
+    _fitted = {k: float(v) for k, v in (_res.get("fitted") or {}).items()}
+    _stats.setdefault("param_values", dict(_fitted))
+    _fa = dict(_fa); _fa.pop("has_data", None)
+    _fa["n_data"] = int(_stats.get("n_points", 0) or 0)
+    _fa["tolerance"] = 10.0 ** (-float(_ctx.get("tol_log", 3.0)))
+    _fa["timeout_s"] = float(_ctx.get("timeout", 30))
+    _key = "_fit_args_kin" if _fa.get("kind") == "kin" else "_fit_args_eq"
+    _lvl = "success" if _res.get("ok") else "warning"
+    _txt = f"{'✅' if _res.get('ok') else '⏱️'} {_res.get('message', 'Fit')} — computed on the supercomputer."
+    if _active:
+        _acid = bool((_fa.get("parsed_fit") or {}).get("is_acid_base"))
+        for _k, _v in _fitted.items():
+            if _acid and _k != "Kw":
+                st.session_state[f"_pending_pKa_{_k}"] = -float(_v)
+            else:
+                st.session_state[f"_pending_logK_{_k}"] = float(_v)
+        for _root, _mM in (_stats.get("fitted_concs") or {}).items():
+            st.session_state[f"_pending_conc_{_root}"] = float(_mM)
+        for _tk, _mM in (_stats.get("fitted_titrants") or {}).items():
+            st.session_state[f"_pending_titrant_mM_{_tk}"] = float(_mM)
+        st.session_state["_fit_counter"] = int(st.session_state.get("_fit_counter", 0)) + 1
+        _reset_diagnostic_toggles()
+        st.session_state["_fit_stats"] = _stats
+        st.session_state[_key] = _fa
+        st.session_state["_fit_message"] = (_lvl, _txt)
+    else:
+        eqtabs.write_fit_into(st.session_state["_tabs"][_i]["state"], _stats, _fa, (_lvl, _txt), key=_key)
+    st.rerun()
+
+
+def _apply_global_pending(_gp):
+    _res, _ctx = _gp
+    _gexps = eqtabs.collect_experiments(st.session_state)
+    _labels = [_lab for _i, _lab, _fa in _gexps]
+    _want = list(_ctx.get("labels") or [])
+    if sorted(_want) != sorted(_labels):
+        st.session_state["_fit_message"] = ("warning", "The cluster's global fit was over the tabs "
+                                            + ", ".join(_want) + " but the tabs are now " + ", ".join(_labels)
+                                            + "; its result was not applied.")
+        return
+    try:
+        _g_in = [{"label": _lab, "fa": _fa, "start_logK": dict(_fa.get("start_logK") or {}),
+                  "ticked": list(_fa.get("fit_keys") or [])} for _i, _lab, _fa in _gexps]
+        _apply_global_result(_res, _g_in, _gexps, float(_ctx.get("tol_log", 3.0)), float(_ctx.get("timeout", 30)))
+        st.rerun()
+    except Exception as _ge:
+        import traceback as _gtb
+        st.error(f"Could not apply the cluster's global fit: {_ge}")
+        st.caption(_gtb.format_exc())
 
 
 def _reset_diagnostic_toggles():
@@ -222,9 +1126,33 @@ def _reset_diagnostic_toggles():
                 del st.session_state[_k]
         except Exception:
             pass
+    # ``st.session_state.keys()`` does NOT yield tuple keys (Streamlit 1.54; see
+    # _write_tuple_cache), so the loop above never reached the profile / 2D-map
+    # caches and a stale profile survived every new fit and every change of the
+    # diagnostics scope (caught 2026-11-07).  Walk the registry as well.
+    _reg = st.session_state.get("_tuple_cache_registry")
+    if isinstance(_reg, list):
+        _keep = []
+        for _k in list(_reg):
+            try:
+                if isinstance(_k, tuple) and _k and isinstance(_k[0], str) \
+                        and any(_k[0].startswith(_p) for _p in _tuple_prefixes):
+                    if _k in st.session_state:
+                        del st.session_state[_k]
+                else:
+                    _keep.append(_k)
+            except Exception:
+                _keep.append(_k)
+        st.session_state["_tuple_cache_registry"] = _keep
 
 
 st.set_page_config(page_title="Equilibrist", layout="wide")
+
+# ── Tabs: a pending new / close / switch request is honoured here, before any
+# widget exists (the only moment widget-owned keys may be rewritten freely).
+_tab_notice = eqtabs.swap_if_requested(st.session_state)
+if _tab_notice:
+    st.session_state["_tab_notice"] = _tab_notice
 
 # Custom CSS
 st.markdown("""
@@ -454,13 +1382,14 @@ def _logk_input_with_fit(label, key, default):
     # Enable fit checkbox if experimental data or NMR data or spectra data is available
     has_exp_data = (bool(st.session_state.get("_exp_data", {})) or
                     bool(st.session_state.get("_nmr_data", {})) or
-                    bool(st.session_state.get("_spectra_data", {})))
+                    bool(st.session_state.get("_spectra_data", {})) or
+                    bool(st.session_state.get("_itc_raw")))
 
     c1, c2 = st.columns([0.86, 0.14])
     with c1:
         val = st.number_input(label, key=key, step=0.1, format="%.2f")
     with c2:
-        st.checkbox("fit", key=fit_key, disabled=not has_exp_data)
+        _fit_toggle(fit_key, disabled=not has_exp_data)
     return float(val)
 
 
@@ -494,13 +1423,14 @@ def _pka_input_with_fit(label, pka_key, logk_key, default_pka):
 
     has_exp_data = (bool(st.session_state.get("_exp_data", {})) or
                     bool(st.session_state.get("_nmr_data", {})) or
-                    bool(st.session_state.get("_spectra_data", {})))
+                    bool(st.session_state.get("_spectra_data", {})) or
+                    bool(st.session_state.get("_itc_raw")))
 
     c1, c2 = st.columns([0.86, 0.14])
     with c1:
         pka_val = st.number_input(label, key=pka_key, step=0.1, format="%.2f")
     with c2:
-        st.checkbox("fit", key=fit_key, disabled=not has_exp_data)
+        _fit_toggle(fit_key, disabled=not has_exp_data)
     return -float(pka_val)   # return logK for the solver
 
 
@@ -524,7 +1454,8 @@ def _conc_input_with_fit(label, key, default):
 
     has_exp_data = (bool(st.session_state.get("_exp_data", {})) or
                     bool(st.session_state.get("_nmr_data", {})) or
-                    bool(st.session_state.get("_spectra_data", {})))
+                    bool(st.session_state.get("_spectra_data", {})) or
+                    bool(st.session_state.get("_itc_raw")))
 
     # Concentration fitting from UV-Vis spectra only is not supported:
     # cage0 is unidentifiable when E is solved analytically (A = C@E is
@@ -539,7 +1470,7 @@ def _conc_input_with_fit(label, key, default):
     with c1:
         val = st.number_input(label, key=key, step=0.1, format="%.4f", min_value=0.0)
     with c2:
-        st.checkbox("fit", key=fit_key, disabled=(not has_exp_data) or spectra_only)
+        _fit_toggle(fit_key, disabled=(not has_exp_data) or spectra_only)
     return float(val)
 
 
@@ -568,7 +1499,8 @@ def _k_input_with_fit(label, key, default_log):
 
     has_exp_data = (bool(st.session_state.get("_exp_data", {})) or
                     bool(st.session_state.get("_nmr_data", {})) or
-                    bool(st.session_state.get("_spectra_data", {})))
+                    bool(st.session_state.get("_spectra_data", {})) or
+                    bool(st.session_state.get("_itc_raw")))
 
     # Linear display key (separate from the log-scale storage key)
     lin_key = f"_lin_{key}"
@@ -606,7 +1538,7 @@ def _k_input_with_fit(label, key, default_log):
                                   min_value=0.0, step=_step,
                                   format="%.1e")
     with c2:
-        st.checkbox("fit", key=fit_key, disabled=not has_exp_data)
+        _fit_toggle(fit_key, disabled=not has_exp_data)
 
     # Write back as log10 so the solver always sees log-scale
     log_val = math.log10(max(lin_val, 1e-300))
@@ -628,6 +1560,22 @@ for _pk in [k for k in st.session_state if k.startswith("_pending_logK_")]:
     st.session_state.pop(f"_lin_{_real}", None)    # clear stale linear display cache
     st.session_state.pop(f"_shdlin_{_real}", None) # clear stale shadow so correction logic doesn't misfire
 
+# ── Restore what a background fit's early reruns drop ────────────────────
+# In kinetics mode the sidebar renders AFTER the fit code, so the rerun that
+# starts a background fit, and the one that collects it, drop the widget state
+# of the constants and concentrations: they came back at the script values
+# (pre-equilibria set to 2.0 by hand showed 3.0 again after Global fit).
+# _fit_async keeps them (bg["ticks"] while the fit runs, _bg_prefs_restore for
+# the final rerun); put them back here, before _fit_args_live is built and
+# before any widget renders.  setdefault: a value the fit wrote back (above)
+# or that the user changed meanwhile is not overridden.
+_bg_now = st.session_state.get("_bg_fit")
+if _bg_now is not None:
+    for _bk, _bv in (_bg_now.get("ticks") or {}).items():
+        st.session_state.setdefault(_bk, _bv)
+for _bk, _bv in (st.session_state.pop("_bg_prefs_restore", None) or {}).items():
+    st.session_state.setdefault(_bk, _bv)
+
 # ── Restore fit-checkbox states persisted across kinetics fit rerun ──────
 # In kinetics mode the fit block runs BEFORE the sidebar, so Streamlit
 # garbage-collects fit_logK_* keys (never rendered in the fit run).
@@ -648,11 +1596,19 @@ if "_persist_xmax" in st.session_state:
 # ── Script upload ─────────────────────────────
 with st.sidebar:
     st.subheader("Equilibrist Script")
+    st.caption("Equilibrist v3.0 beta")
 
     # A "Clear & reload" button that wipes everything and resets the uploader
     if st.button("↺ Reset / load new script"):
         for k in list(st.session_state.keys()):
-            del st.session_state[k]
+            if k not in eqtabs.META:
+                del st.session_state[k]
+        st.rerun()
+    if st.button("➕ New tab", help="Open another workspace with its own script and data.  "
+                                    "Constants with the same name are shared by the Global fit."):
+        # snapshot now: after st.rerun() the widgets not rendered in this run lose their state
+        st.session_state["_tab_new_snapshot"] = eqtabs.snapshot(st.session_state)
+        st.session_state["_tab_new"] = True
         st.rerun()
 
     # Nonce makes the uploader widget unique each session so re-uploading
@@ -696,12 +1652,14 @@ with st.sidebar:
                 # loop), clear state, then re-populate from the bundle.
                 _data_in   = _obj.get("data") or {}
                 _fit_prefs = {k: st.session_state[k]
-                              for k in ("fit_tolerance_log", "fit_timeout")
+                              for k in ("fit_tolerance_log", "fit_timeout", "fit_refresh")
                               if k in st.session_state}
                 _nonce     = st.session_state.get("_uploader_nonce", 0)
                 _exp_nonce = st.session_state.get("_exp_uploader_nonce", 0)
+                _tab_meta  = {k: st.session_state[k] for k in eqtabs.META if k in st.session_state}
                 st.session_state.clear()
                 st.session_state.update(_fit_prefs)
+                st.session_state.update(_tab_meta)
                 st.session_state["_uploader_nonce"]     = _nonce + 1
                 st.session_state["_exp_uploader_nonce"] = _exp_nonce + 1
                 st.session_state["_script_text"]        = _obj.get("script", "")
@@ -993,11 +1951,13 @@ with st.sidebar:
             # ── .txt script upload (original behavior) ────────────────
             new_text = uploaded.read().decode("utf-8", errors="replace")
             _fit_prefs = {k: st.session_state[k]
-                          for k in ("fit_tolerance_log", "fit_timeout")
+                          for k in ("fit_tolerance_log", "fit_timeout", "fit_refresh")
                           if k in st.session_state}
             _nonce = st.session_state.get("_uploader_nonce", 0)
+            _tab_meta = {k: st.session_state[k] for k in eqtabs.META if k in st.session_state}
             st.session_state.clear()
             st.session_state.update(_fit_prefs)
+            st.session_state.update(_tab_meta)
             st.session_state["_uploader_nonce"] = _nonce + 1
             st.session_state["_script_text"] = new_text
             st.session_state["_script_filename"] = uploaded.name
@@ -1018,6 +1978,26 @@ with st.sidebar:
 
     if st.session_state.get("_script_filename"):
         st.markdown(f"<span style='background:#1a6bbf;color:white;font-weight:bold;padding:3px 10px;border-radius:12px;font-size:0.82rem'>📄 {st.session_state['_script_filename']}</span>", unsafe_allow_html=True)
+
+    # ── Tabs (workspaces) ────────────────────────────────────────────────
+    if st.session_state.pop("_tab_notice", None):
+        pass    # the swap already happened at the top of this run
+    _tab_labels = eqtabs.labels(st.session_state)
+    if len(_tab_labels) > 1:
+        _tab_shares = [eqtabs.global_share(st.session_state, _i) for _i in range(len(_tab_labels))]
+        _tab_disp = [_l if _s is None else f"{_l}  ·  {100 * _s:.0f} %"
+                     for _l, _s in zip(_tab_labels, _tab_shares)]
+        st.radio("Tabs", list(range(len(_tab_labels))), key="_tab_radio",
+                 format_func=lambda i: _tab_disp[i],
+                 help="Each tab is an independent workspace (script, data, constants, fit).  "
+                      "Switch by clicking; the Global fit button fits all tabs at once.  "
+                      "After a global fit the percentage next to a tab is its share of the "
+                      "information on the shared constants: how much of the curvature that pins "
+                      "them comes from this tab, averaged over the constants (the per-constant "
+                      "shares are in the fit message).")
+        if st.button("✖ Close this tab", key="_tab_close_btn"):
+            st.session_state["_tab_close"] = True
+            st.rerun()
 
     # ── Session save (FAIR-compliance) ───────────────────────────────────
     # Bundle the script, the uploaded experimental data (verbatim, with
@@ -1145,7 +2125,7 @@ with st.sidebar:
                         profile_caches=_serialize_tuple_caches(st.session_state),
                         seed=42,
                         notes=_notes,
-                        app_version="equilibrist-v2",
+                        app_version="equilibrist-v3.0-beta",
                     )
                     _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     _stem = "session"
@@ -1183,6 +2163,12 @@ with st.sidebar:
         else:
             st.caption("Load or write a script above to enable saving.")
     # ── End session save ────────────────────────────────────────────────
+
+
+# Live progress of supercomputer jobs: a small panel fixed to the bottom-right
+# corner of the window, so it stays visible however the page or the sidebar
+# is scrolled.  Top level on purpose (see hpc_ui.follower).
+hpc_ui.follower()
 
 script_text = st.session_state.get("_script_text", None)
 
@@ -1305,16 +2291,27 @@ def _render_script_editor():
                     st.session_state[f"_pending_logK_{_rxn['kname']}"] = float(_rxn["log_k"])
                     if "krname" in _rxn:
                         st.session_state[f"_pending_logK_{_rxn['krname']}"] = float(_rxn["log_kr"])
-                # Concentrations
+                # Concentrations.
+                # A bare name in an ITC script ("G0" with no value) parses to
+                # None: it is a placeholder to be filled from the .itc header,
+                # not a value to push into a widget. Skipping it leaves the
+                # value already loaded from the file untouched; float(None)
+                # used to raise TypeError here.
                 for _cname, _cval in _new_parsed.get("concentrations", {}).items():
+                    if _cval is None:
+                        continue
                     _root = _cname[:-1] if _cname.endswith("0") else _cname
                     st.session_state[f"_pending_conc_{_root}"] = float(_cval)
                 # Volume
                 _vols = _new_parsed.get("volumes", {})
                 if _vols:
-                    st.session_state["_pending_V0_mL"] = float(list(_vols.values())[0])
+                    _v0_new = list(_vols.values())[0]
+                    if _v0_new is not None:
+                        st.session_state["_pending_V0_mL"] = float(_v0_new)
                 # Titrant concentrations
                 for _tkey, _tval in _new_parsed.get("titrant", {}).items():
+                    if _tval is None:
+                        continue
                     st.session_state[f"_pending_titrant_mM_{_tkey}"] = float(_tval)
                 # xmax / plot settings
                 if _new_parsed.get("plot_xmax") is not None:
@@ -1322,12 +2319,14 @@ def _render_script_editor():
             else:
                 # Hard reset: new/renamed parameters → rebuild everything
                 _fit_prefs = {k: st.session_state[k]
-                              for k in ("fit_tolerance_log", "fit_timeout")
+                              for k in ("fit_tolerance_log", "fit_timeout", "fit_refresh")
                               if k in st.session_state}
                 _nonce    = st.session_state.get("_uploader_nonce", 0)
                 _fname    = st.session_state.get("_script_filename", "untitled.txt")
+                _tab_meta = {k: st.session_state[k] for k in eqtabs.META if k in st.session_state}
                 st.session_state.clear()
                 st.session_state.update(_fit_prefs)
+                st.session_state.update(_tab_meta)     # the other tabs survive a hard reset
                 st.session_state["_uploader_nonce"]  = _nonce
                 st.session_state["_script_text"]     = _new_text
                 st.session_state["_script_filename"] = _fname
@@ -1390,7 +2389,71 @@ if IS_KINETICS:
     plot_y_names    = parsed["plot_y"] if parsed["plot_y"] else all_kin_species[:6]
 
     # ── Handle kinetics fitting (before widgets) ──────────────────
-    if st.session_state.pop("_fit_requested", False):
+    # Reserved slot for the 'Fitting…' message.  Emitted on every run so the
+    # element that follows (the two-column layout) keeps the same position;
+    # otherwise the spinner, appearing only on fitting runs, took the columns'
+    # place and the right-hand panel vanished until the fit returned.
+    _fit_slot = st.empty()
+    # ── What a Global fit would use from THIS (kinetics) tab, refreshed every run ──
+    try:
+        _nmr_live_k = _filter_exp_outliers(st.session_state.get("_nmr_data", {}), "_outliers_nmr")
+        _exp_live_k = _filter_exp_outliers(st.session_state.get("_exp_data", {}), "_outliers_main")
+        _sp_live_k  = _filter_spectra_outliers(st.session_state.get("_spectra_data", {}), "_outliers_spectra")
+        _nmr_cfg_live_k = parsed.get("nmr")
+        _use_nmr_live_k = (_nmr_cfg_live_k is not None and _nmr_cfg_live_k["mode"] in ("shift", "integration", "mixed")
+                           and bool(_nmr_live_k))
+        _use_sp_live_k = parsed.get("spectra") is not None and bool(_sp_live_k)
+        _concs_live_k = {}
+        for _cname, _cval in parsed["concentrations"].items():
+            _root = _cname[:-1] if _cname.endswith("0") else _cname
+            _concs_live_k[_cname] = float(st.session_state.get(f"conc_{_root}", _cval))
+        _parsed_live_k = dict(parsed); _parsed_live_k["concentrations"] = _concs_live_k
+        _logk_live = {n: float(st.session_state.get(f"logK_{n}", logk_dict[n])) for n in logk_dict}
+        _fa_live_k = {
+            "kind": "kin",
+            "fit_keys": [n for n in logk_dict if st.session_state.get(f"fit_logK_{n}", False)],
+            "fit_conc_keys": [root for root in (c[:-1] if c.endswith("0") else c for c in parsed["concentrations"])
+                              if st.session_state.get(f"fit_conc_{root}", False)],
+            "fit_titrant_keys": [],
+            "use_spectra_fit": bool(_use_sp_live_k), "use_nmr_fit": bool(_use_nmr_live_k),
+            "nmr_mode": (_nmr_cfg_live_k["mode"] if _use_nmr_live_k else None),
+            "t_max": float(st.session_state.get("xmax", t_max)),
+            "tolerance": 10.0 ** (-float(st.session_state.get("fit_tolerance_log", 3.0))),
+            "maxiter": 100_000, "timeout_s": float(st.session_state.get("fit_timeout", 30)),
+            "constraints": (_parsed_live_k.get("constraints", []) if st.session_state.get("fit_use_constraints", False) else []),
+            "start_logk": dict(_logk_live), "start_logK": dict(_logk_live),
+            "exp_data_fit": (_exp_live_k if not (_use_nmr_live_k or _use_sp_live_k) else None),
+            "nmr_data_fit": (_nmr_live_k if _use_nmr_live_k else None),
+            "spectra_data_fit": (_sp_live_k if _use_sp_live_k else None),
+            "parsed_fit": _parsed_live_k, "x_expr": _parsed_live_k.get("plot_x_expr", "t"),
+            "wl_min": (float(st.session_state.get("spectra_wl_min", _sp_live_k["wavelengths"][0])) if _use_sp_live_k else None),
+            "wl_max": (float(st.session_state.get("spectra_wl_max", _sp_live_k["wavelengths"][-1])) if _use_sp_live_k else None),
+            "allow_neg_eps": bool(st.session_state.get("spectra_allow_neg", False)),
+            "has_data": bool(_use_nmr_live_k or _use_sp_live_k or _exp_live_k),
+        }
+        if _use_nmr_live_k:
+            try:
+                from equilibrist_network import build_network as _bn_live
+                _fa_live_k["network"] = _bn_live(_parsed_live_k)
+            except Exception:
+                _fa_live_k["network"] = None
+            _fa_live_k["params"] = {"conc0": {k[:-1] if k.endswith("0") else k: float(v) for k, v in _concs_live_k.items()},
+                                    "V0_mL": float(list(_parsed_live_k.get("volumes", {1: 1}).values())[0])}
+        else:
+            _fa_live_k["params"] = {"conc0": {k[:-1] if k.endswith("0") else k: float(v) for k, v in _concs_live_k.items()}}
+        st.session_state["_fit_args_live"] = _fa_live_k
+    except Exception:
+        st.session_state.pop("_fit_args_live", None)
+    if _fit_turn(_fit_slot, "_global_fit_requested"):
+        _global_fit_dispatch(_fit_slot)
+    if st.session_state.get("_global_fit_pending"):
+        _apply_global_pending(st.session_state.pop("_global_fit_pending"))
+    if st.session_state.get("_single_fit_pending"):
+        _apply_single_pending(st.session_state.pop("_single_fit_pending"))
+    if st.session_state.get("_fit_requested") and st.session_state.get("_single_fit_hpc"):
+        st.session_state.pop("_fit_requested", None)
+        _submit_single_fit_to_cluster(st.session_state.pop("_single_fit_hpc"))
+    if _fit_turn(_fit_slot):
         _nmr_data_fit     = _filter_exp_outliers(st.session_state.get("_nmr_data", {}),     "_outliers_nmr")
         exp_data_fit      = _filter_exp_outliers(st.session_state.get("_exp_data", {}),     "_outliers_main")
         _spectra_data_fit = _filter_spectra_outliers(st.session_state.get("_spectra_data", {}), "_outliers_spectra")
@@ -1428,7 +2491,7 @@ if IS_KINETICS:
                 for name in logk_dict
             }
             tol_log    = st.session_state.get("_shadow_fit_tolerance_log",
-                         st.session_state.get("fit_tolerance_log", 6.0))
+                         st.session_state.get("fit_tolerance_log", 3.0))
             tol        = 10.0 ** (-float(tol_log))
             _timeout_s = float(st.session_state.get("_shadow_fit_timeout",
                                st.session_state.get("fit_timeout", 30)))
@@ -1459,46 +2522,46 @@ if IS_KINETICS:
                                      _spectra_data_fit["wavelengths"][-1]))
                     _auto_range_k   = bool(st.session_state.get("spectra_auto_range", False))
                     _allow_neg_k    = bool(st.session_state.get("spectra_allow_neg", False))
-                    with st.spinner("Fitting parameters…"):
-                        success, fitted, stats, msg = fit_kinetics_spectra(
+                    success, fitted, stats, msg = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_kinetics_spectra(
                             parsed_fit, _start_logk, _spectra_data_fit, fit_keys_k,
                             t_max, 200, wl_min_k, wl_max_k, tol, maxiter,
                             timeout_s=_timeout_s, auto_range=_auto_range_k, allow_negative_eps=_allow_neg_k,
                             use_lbfgsb=st.session_state.get("fit_use_lbfgsb", True),
                             use_neldermead=st.session_state.get("fit_use_neldermead", True),
                             constraints=_active_constraints,
-                            fit_conc_keys=fit_conc_keys_k)
+                            fit_conc_keys=fit_conc_keys_k),
+                        _start_logk, "Fitting parameters…", "_fit_requested")
                     if _auto_range_k and "opt_wl_min" in stats:
                         st.session_state["_pending_spectra_wl_min"] = stats["opt_wl_min"]
                         st.session_state["_pending_spectra_wl_max"] = stats["opt_wl_max"]
                 elif _use_nmr_fit and _nmr_cfg_fit["mode"] == "shift":
-                    with st.spinner("Fitting parameters…"):
-                        success, fitted, stats, msg = fit_kinetics_nmr_shifts(
+                    success, fitted, stats, msg = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_kinetics_nmr_shifts(
                             parsed_fit, _start_logk, _nmr_data_fit, fit_keys_k,
                             t_max, 200, tol, maxiter, timeout_s=_timeout_s,
                             constraints=_active_constraints,
-                            fit_conc_keys=fit_conc_keys_k)
+                            fit_conc_keys=fit_conc_keys_k),
+                        _start_logk, "Fitting parameters…", "_fit_requested")
                 elif _use_nmr_fit and _nmr_cfg_fit["mode"] == "integration":
-                    with st.spinner("Fitting parameters…"):
-                        success, fitted, stats, msg = fit_kinetics_nmr_integration(
+                    success, fitted, stats, msg = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_kinetics_nmr_integration(
                             parsed_fit, _start_logk, _nmr_data_fit, fit_keys_k,
                             t_max, 200, tol, maxiter, timeout_s=_timeout_s,
                             constraints=_active_constraints,
-                            fit_conc_keys=fit_conc_keys_k)
+                            fit_conc_keys=fit_conc_keys_k),
+                        _start_logk, "Fitting parameters…", "_fit_requested")
                 elif _use_nmr_fit and _nmr_cfg_fit["mode"] == "mixed":
-                    with st.spinner("Fitting parameters…"):
-                        success, fitted, stats, msg = fit_kinetics_nmr_mixed(
+                    success, fitted, stats, msg = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_kinetics_nmr_mixed(
                             parsed_fit, _start_logk, _nmr_data_fit, fit_keys_k,
                             t_max, 200, tol, maxiter, timeout_s=_timeout_s,
                             constraints=_active_constraints,
-                            fit_conc_keys=fit_conc_keys_k)
+                            fit_conc_keys=fit_conc_keys_k),
+                        _start_logk, "Fitting parameters…", "_fit_requested")
                 else:
-                    with st.spinner("Fitting parameters…"):
-                        success, fitted, stats, msg = fit_kinetics(
+                    success, fitted, stats, msg = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_kinetics(
                             parsed_fit, exp_data_fit, _start_logk, fit_keys_k,
                             t_max, 200, tol, maxiter, timeout_s=_timeout_s,
                             constraints=_active_constraints,
-                            fit_conc_keys=fit_conc_keys_k)
+                            fit_conc_keys=fit_conc_keys_k),
+                        _start_logk, "Fitting parameters…", "_fit_requested")
                 for name, val in fitted.items():
                     st.session_state[f"_pending_logK_{name}"] = float(val)
                 # Push fitted concentration results back to sidebar
@@ -1588,18 +2651,9 @@ if IS_KINETICS:
                 except Exception:
                     st.session_state["_fit_residuals"] = {}
                 _n_evals = stats.get("n_iter", 0)
-                if stats.get("timed_out"):
-                    st.session_state["_fit_message"] = ("warning",
-                        f"⏱️ Fit timed out after {_n_evals} evaluations ({_timeout_s:.0f} s limit) — "
-                        "showing best result found. Consider increasing Timeout.")
-                elif success:
-                    _n_fitted_k = len(fitted) + len(stats.get("fitted_concs", {}))
-                    st.session_state["_fit_message"] = ("success",
-                        f"Fit completed! Updated {_n_fitted_k} parameters. "
-                        f"({_n_evals} evaluations, tol=1e-{tol_log:.0f})")
-                else:
-                    st.session_state["_fit_message"] = ("warning",
-                        f"Fit did not fully converge — {msg}")
+                _n_fitted_k = len(fitted) + len(stats.get("fitted_concs", {}))
+                st.session_state["_fit_message"] = _fit_end_message(
+                    stats, success, msg, _n_fitted_k, tol_log, _timeout_s)
             except Exception as _fit_exc:
                 import traceback as _tb
                 st.session_state["_fit_message"] = ("warning",
@@ -1765,12 +2819,11 @@ if IS_KINETICS:
             color = COLORS[idx % len(COLORS)]
             trace_colors[sp] = color
             if sp in variables:
-                # Evaluate variable expression
-                ns = {s: kin_curve.get(s, np.zeros_like(t_vals)) for s in all_kin_species}
-                try:
-                    y_vals = np.array(eval(variables[sp], {"__builtins__": {}, "np": np}, ns))
-                except Exception:
-                    y_vals = np.zeros_like(t_vals)
+                # Evaluate the expression with its dependencies on other
+                # variables resolved, as in the equilibrium branch; a
+                # variable that cannot be evaluated plots as a gap, not as 0.
+                y_vals = compute_variable_curve(
+                    sp, variables, kin_curve, {"all_species": all_kin_species}, t_vals)
             else:
                 y_vals = kin_curve.get(sp, np.zeros_like(t_vals))
             fig.add_trace(go.Scatter(
@@ -1832,7 +2885,7 @@ if IS_KINETICS:
             _plot_backcalc_dots(fig, _kni_full, plot_y_names,
                                 parsed.get("variables", {}),
                                 _kin_all_sp_plt, trace_colors,
-                                label_suffix=_kin_sfx_integ,
+                                label_suffix=_kin_sfx_integ, symbol="circle-open",
                                 excl_rows=_nmr_excl_intersection(_kin_nmr_data))
 
         # Integration / mixed — pre-fit: back-calc from raw integrals (no k needed)
@@ -1850,7 +2903,7 @@ if IS_KINETICS:
             _plot_backcalc_dots(fig, _bc_pre_kin, plot_y_names,
                                 parsed.get("variables", {}),
                                 _kin_all_sp_plt, trace_colors,
-                                label_suffix=_kin_sfx_pre,
+                                label_suffix=_kin_sfx_pre, symbol="circle-open",
                                 excl_rows=_nmr_excl_intersection(_kin_nmr_data))
 
         # Shift mode: invert M-matrix to back-calculate concentrations from Δδ
@@ -1901,12 +2954,19 @@ if IS_KINETICS:
                     _dobs_bc  = np.interp(_t_bc, _t_col_bc, _kin_nmr_data[col_bc]["y"] - _df0_bc)
                     rhs_bc[k_bc, :] = (_dobs_bc + _ref_c_bc) * _ctot_bc
                 # Solve M @ c_nonfree(t) = rhs(t) at each point
-                _rank_bc = np.linalg.matrix_rank(M_bc)
                 _c_nf_bc = np.zeros((_n_nf, _n_pts_bc))
-                if _n_nf > 0 and _rank_bc >= min(_n_sig_bc, _n_nf):
-                    for j_bc in range(_n_pts_bc):
-                        _sol = np.linalg.lstsq(M_bc, rhs_bc[:, j_bc], rcond=None)[0]
-                        _c_nf_bc[:, j_bc] = np.clip(_sol, 0.0, None)
+                if _n_nf > 0:
+                    # model concentrations at the data times, corrected only along
+                    # the directions the shift signals resolve
+                    _c_model_nf = np.array([np.interp(_t_bc, t_vals, kin_curve.get(sp, np.zeros_like(t_vals)))
+                                            for sp in _nf_sp])
+                    _sol_bc, _k_res = shift_backcalc_resolved(M_bc, rhs_bc, _c_model_nf)
+                    _c_nf_bc = np.clip(_sol_bc, 0.0, None)
+                    if _k_res < _n_nf:
+                        st.session_state["_shift_bc_note_kin"] = (
+                            f"Shift-derived points: the {_n_sig_bc} shift signal{'s' if _n_sig_bc != 1 else ''} resolve "
+                            f"{_k_res} combination{'s' if _k_res != 1 else ''} of the {_n_nf} species of the target "
+                            f"({', '.join(_nf_sp)}); along the others the points follow the model.")
                 # Back-calc free species from mass balance, then plot via helper
                 _bc_kin_shift = {}
                 for _tgt_bc in _kin_nmr_cfg_plt["targets"]:
@@ -1987,6 +3047,8 @@ if IS_KINETICS:
                                    nmr_bc_cols=[c for c in _kin_nmr_data if not c.startswith("_")]):
             st.rerun()
         _outlier_bar("kin_main", "_outliers_main", "_outliers_nmr", "_outliers_spectra")
+        if st.session_state.get("_shift_bc_note_kin"):
+            st.caption(st.session_state.pop("_shift_bc_note_kin"))
         _pub_download_button(fig, "kinetics_main", y_label=_kin_y_label)
         st.session_state["_current_figure"] = fig
         st.session_state.pop("_kin_snapshot_data", None)
@@ -2257,40 +3319,102 @@ if IS_KINETICS:
         _fc1, _fc2 = st.columns(2)
         with _fc1:
             fit_tolerance_log = _num_input(
-                "Tol (−log)", key="fit_tolerance_log", default=6.0, step=0.5, format="%.1f"
+                "Tol (−log)", key="fit_tolerance_log", default=3.0, step=0.5, format="%.1f",
+                help="Convergence target for the constants, in log units: the fit is "
+                     "declared converged when the search has narrowed to 10^−Tol in every "
+                     "constant.  Errors on constants are typically 0.01–0.1, so 3–4 is "
+                     "usually enough; 6 is very tight and rarely reached before the Timeout.  "
+                     "The message after each fit says how it ended."
             )
         with _fc2:
             fit_timeout = _num_input(
                 "Timeout (s)", key="fit_timeout", default=30, step=5, format="%d"
             )
+        fit_refresh = _num_input(
+            "Refresh (s)", key="fit_refresh", default=60, step=5, format="%d",
+            help="While a fit runs, redraw data and model at the best constants found so far "
+                 "every this many seconds (0 = off).  NMR and global fits for now."
+        )
 
-        # ── Optimizer selection ──────────────────────────────────
-        _oc1, _oc2 = st.columns(2)
-        with _oc1:
-            use_lbfgsb_k = st.checkbox("L-BFGS-B", key="fit_use_lbfgsb", value=True)
-        with _oc2:
-            use_neldermead_k = st.checkbox("Nelder-Mead", key="fit_use_neldermead", value=True)
-        if not use_lbfgsb_k and not use_neldermead_k:
-            st.warning("At least one optimizer must be selected.")
-            use_lbfgsb_k = True
-
-        if st.button("🔧 Fit Parameters", disabled=not fit_ok):
-            if fit_ok:
-                for _pref in ("fit_tolerance_log", "fit_timeout"):
+        _g_why_k = []
+        _g_ready_k = eqtabs.collect_experiments(st.session_state, _g_why_k)
+        _multi_k = len(st.session_state.get("_tabs") or []) > 1
+        if _multi_k:
+            st.session_state.setdefault("_global_weighted", True)
+            st.checkbox("Weight tabs by their own fit", key="_global_weighted",
+                        help="Each tab's objective is rescaled to its own misfit (re-estimated after each "
+                             "optimiser pass), so a titration the model fits worse cannot outvote a clean "
+                             "one.  Untick for a plain sum of the tabs' objectives.")
+            _share_shifts_checkbox(_g_ready_k)
+        _fb1, _fb2 = st.columns(2)
+        with _fb1:
+            # never disabled: the fit boxes live in fragments, so a tick does not rerun the
+            # main script and a button greyed out here would stay greyed out (a fresh tab
+            # with boxes ticked could not be fitted).  The ticks are read on the press.
+            if st.button("🔧 Fit Parameters", width="stretch"):
+                if fit_ok:
+                    for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+                        if _pref in st.session_state:
+                            st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+                    # Snapshot current concentration values before rerun clears widget state
+                    for _cname in parsed["concentrations"]:
+                        _root = _cname[:-1] if _cname.endswith("0") else _cname
+                        _ckey = f"conc_{_root}"
+                        if _ckey in st.session_state:
+                            st.session_state[f"_shadow_{_ckey}"] = st.session_state[_ckey]
+                    if "xmax" in st.session_state:
+                        st.session_state["_shadow_xmax"] = st.session_state["xmax"]
+                    st.session_state["_fit_requested"] = True
+                    st.rerun()
+                else:
+                    st.info("Load experimental data and check parameters to fit.")
+        with _fb2:
+            if _multi_k and st.button("🌐 Global fit (all tabs)", key="_global_fit_btn_kin", width="stretch",
+                                      help="One fit across every tab that has data and a ticked parameter.  "
+                                           "Constants with the same name share one value; concentrations stay "
+                                           "per tab; each tab's bounds and constraints apply."):
+                if len(_g_ready_k) >= 2:
+                    for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+                        if _pref in st.session_state:
+                            st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+                    st.session_state["_global_fit_requested"] = True
+                    st.rerun()
+                else:
+                    st.info("The Global fit needs at least two tabs with data loaded and a 'fit' "
+                            "box ticked.  " + "  ".join(_g_why_k))
+        if _multi_k:
+            st.caption("Tabs in the global fit: " + (", ".join(_lab for _i, _lab, _fa in _g_ready_k) or "none yet")
+                       + ((".  Left out — " + "; ".join(_g_why_k)) if _g_why_k else ""))
+        _hpc_go_k = hpc_ui.controls("hpc_kin", label="the fit",
+                                    submits=[("fit", "this tab's fit")] + ([("global", "the global fit")] if _multi_k else []))
+        if _hpc_go_k == "global":
+            if len(_g_ready_k) >= 2:
+                for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
                     if _pref in st.session_state:
                         st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
-                # Snapshot current concentration values before rerun clears widget state
-                for _cname in parsed["concentrations"]:
-                    _root = _cname[:-1] if _cname.endswith("0") else _cname
-                    _ckey = f"conc_{_root}"
-                    if _ckey in st.session_state:
-                        st.session_state[f"_shadow_{_ckey}"] = st.session_state[_ckey]
-                if "xmax" in st.session_state:
-                    st.session_state["_shadow_xmax"] = st.session_state["xmax"]
+                st.session_state["_global_fit_hpc"] = "hpc_kin"
+                st.session_state["_global_fit_requested"] = True
+                st.rerun()
+            else:
+                st.info("The Global fit needs at least two tabs with data loaded and a 'fit' "
+                        "box ticked.  " + "  ".join(_g_why_k))
+        elif _hpc_go_k == "fit":
+            if fit_ok:
+                for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+                    if _pref in st.session_state:
+                        st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+                st.session_state["_single_fit_hpc"] = "hpc_kin"
                 st.session_state["_fit_requested"] = True
                 st.rerun()
             else:
                 st.info("Load experimental data and check parameters to fit.")
+        hpc_ui.jobs_panel("hpc_kin", on_result=_hpc_store_fit)
+        if _multi_k:
+            if st.button("📤 Propagate ticked constants", key="_propagate_btn_kin",
+                         help="Copy the constants ticked here, at the values in their boxes, into every "
+                              "other tab whose script has a constant of the same name.  Only the values "
+                              "move; the other tabs' ticks, bounds, data and scripts stay as they are."):
+                st.info(eqtabs.propagate_ticked(st.session_state, parse_script))
 
         # ── Export ───────────────────────────────────────────────
         st.subheader("Data Export")
@@ -2428,7 +3552,7 @@ if IS_KINETICS:
     # sidebar closes here — script editor goes below the plot in col1
         # ── Fit stats ────────────────────────────────────────────
         fit_stats = st.session_state.get("_fit_stats", {})
-        if fit_stats:
+        if fit_stats and fit_stats.get("fit_mode", "kinetics") != "itc":
             _kin_fit_mode = fit_stats.get("fit_mode", "kinetics")
             if fit_stats.get("timed_out"):
                 _to_s = float(st.session_state.get("fit_timeout", 30))
@@ -2443,6 +3567,7 @@ if IS_KINETICS:
             # table.  Same hierarchy as "Show residual diagnostics".
             @_fragment
             def _stats_kin_frag():
+                _diag_scope_switch("_fit_args_kin")
                 if st.checkbox("🔢 Show fit statistics",
                                value=False, key="_show_stats_kin",
                                help="R², RMSE, reduced χ², information "
@@ -2747,8 +3872,9 @@ if IS_KINETICS:
                                  "well-determined parameter; flat regions "
                                  "= unidentifiable.")
                         _prof = None
+                        _prof_fixed = {}
                         if _show_prof:
-                            _fa = st.session_state.get("_fit_args_kin")
+                            _fa = _diag_fa(st.session_state.get("_fit_args_kin"))
                             if not _fa:
                                 st.info("Click **Fit** first to enable "
                                         "the parameter profile.")
@@ -2760,8 +3886,10 @@ if IS_KINETICS:
                                     key="_prof_span_kin")
                                 _p_npts = col_b.number_input(
                                     "Grid points (odd)", min_value=5,
-                                    max_value=51, value=11, step=2,
+                                    max_value=201, value=11, step=2,
                                     key="_prof_npts_kin")
+                                (_pk_K, _pk_c, _pk_t, _prof_fixed, _pk_tag,
+                                 _pk_default) = _profile_param_picker("kin", fit_stats, _fa)
                                 _prof_par_kin = st.checkbox(
                                     "Parallel (use all cores)",
                                     value=False, key="_prof_par_kin",
@@ -2769,6 +3897,7 @@ if IS_KINETICS:
                                          "refits in parallel via joblib. "
                                          "Speeds up large profiles "
                                          "roughly linearly with core count.")
+                                _hpc_go_prof_kin = hpc_ui.controls("prof_kin", label="the 1D profile")
                                 _prof_jobs_kin = -1 if _prof_par_kin else 1
                                 # Cache key intentionally OMITS the
                                 # fitted ``param_values`` tuple: every
@@ -2785,12 +3914,15 @@ if IS_KINETICS:
                                 # profile failed to re-render.
                                 _cache_key = ("_prof_cache_kin",
                                               float(_p_span), int(_p_npts))
+                                if not _pk_default:      # a custom selection gets its own cache entry
+                                    _cache_key = _cache_key + (_pk_tag,)
                                 _cached = st.session_state.get(_cache_key)
                                 if _cached is not None:
                                     _prof = _cached
                                 else:
                                     if st.button("Compute profile",
-                                                 key="_prof_btn_kin"):
+                                                 key="_prof_btn_kin",
+                                                 disabled=not (_pk_K or _pk_c or _pk_t)) or _hpc_go_prof_kin:
                                         _bar = st.progress(0.0,
                                             text="Computing profile…")
                                         def _cb(f, m):
@@ -2801,23 +3933,39 @@ if IS_KINETICS:
                                                 pass
                                         try:
                                             _fa_kin_prof = dict(_fa)
-                                            _fa_kin_prof["kind"] = "kin"
+                                            if _fa_kin_prof.get("kind") != "global":
+                                                _fa_kin_prof["kind"] = "kin"
+                                            # Seed every refit from the FITTED values and use a small
+                                            # initial simplex: the refits start next to the optimum.
+                                            _seed1d = dict(_fa_kin_prof.get("start_logK") or _fa_kin_prof.get("start_logk") or {})
+                                            for _n, _v in (fit_stats.get("param_values", {}) or {}).items():
+                                                try: _seed1d[_n] = float(_v)
+                                                except Exception: pass
+                                            _fa_kin_prof["start_logK"] = _seed1d
+                                            _fa_kin_prof["start_logk"] = dict(_seed1d)
+                                            _fa_kin_prof["simplex_step"] = 0.15
                                             _prof = compute_rmse_profile(
                                                 _fa_kin_prof,
-                                                fit_stats.get("param_values", {}),
+                                                _pk_K,
                                                 span=float(_p_span),
                                                 n_pts=int(_p_npts),
-                                                fitted_concs_mM=fit_stats.get("fitted_concs"),
+                                                fitted_concs_mM=_pk_c,
+                                                fitted_titrants_mM=_pk_t,
                                                 n_jobs=_prof_jobs_kin,
                                                 progress_callback=_cb)
                                             _write_tuple_cache(_cache_key, _prof)
                                             _bar.empty()
+                                        except hpc_ui.CapturedCall as _hpc_cc:
+                                            _bar.empty()
+                                            hpc_ui.handle_capture(_hpc_cc, "prof_kin", "1D RMSE profile",
+                                                                  context={"ck": list(_cache_key)})
                                         except Exception as _pe:
                                             _bar.empty()
                                             st.error(f"Profile failed: {_pe}")
+                                hpc_ui.jobs_panel("prof_kin", on_result=_hpc_store_tuple_cache)
                         render_diagnostics_panel(fit_stats, _res_kin,
                                                  key="diag_kin",
-                                                 rmse_profile=_prof)
+                                                 rmse_profile=_profile_display(_prof, _prof_fixed))
 
                         # ── 2D RMSE profile (pairwise correlation diagnostic) ──
                         # Lives as a peer to the 1D profile.  Different
@@ -2839,7 +3987,7 @@ if IS_KINETICS:
                                  "pairwise correlation; round wells "
                                  "= independently identified.")
                         if _show_p2d_k:
-                            _fa_k_for2d = st.session_state.get("_fit_args_kin")
+                            _fa_k_for2d = _diag_fa(st.session_state.get("_fit_args_kin"))
                             if not _fa_k_for2d:
                                 st.info("Click **Fit** first to enable "
                                         "the 2D profile.")
@@ -2860,9 +4008,22 @@ if IS_KINETICS:
                                         if _v > 0:
                                             _cands[_n] = float(np.log10(_v))
                                     except Exception: pass
+                                # Constants that were held FIXED in the last fit are offered too:
+                                # the refit engine pins both scanned parameters anyway, so a
+                                # fixed constant can be scanned against a fitted one while every
+                                # other fitted parameter is re-optimised at each grid point.
+                                _fixed_cands = {}
+                                _slk2d = (_fa_k_for2d.get("start_logK")
+                                          or _fa_k_for2d.get("start_logk") or {})
+                                for _n, _v in _slk2d.items():
+                                    if _n in _cands or _n == "Kw": continue
+                                    try: _fixed_cands[_n] = float(_v)
+                                    except Exception: pass
+                                _cands.update(_fixed_cands)
+                                _lbl2d = lambda _n: (f"{_n} (fixed)" if _n in _fixed_cands else _n)
                                 _names = list(_cands.keys())
                                 if len(_names) < 2:
-                                    st.info("Need at least 2 fitted "
+                                    st.info("Need at least 2 "
                                             "parameters to build a 2D "
                                             "profile.")
                                 else:
@@ -2870,15 +4031,25 @@ if IS_KINETICS:
                                         _p1_k, _p2_k = _names[0], _names[1]
                                         st.caption(f"Auto-selected: "
                                                    f"**{_p1_k}** vs **{_p2_k}** "
-                                                   "(only two fitted).")
+                                                   "(only two available).")
                                     else:
                                         c1, c2 = st.columns(2)
                                         _p1_k = c1.selectbox(
                                             "X-axis parameter", _names,
-                                            index=0, key="_p2d_p1_kin")
+                                            index=0, key="_p2d_p1_kin",
+                                            format_func=_lbl2d)
                                         _p2_k = c2.selectbox(
                                             "Y-axis parameter", _names,
-                                            index=1, key="_p2d_p2_kin")
+                                            index=1, key="_p2d_p2_kin",
+                                            format_func=_lbl2d)
+                                    _fx_sel = [_n for _n in (_p1_k, _p2_k) if _n in _fixed_cands]
+                                    if _fx_sel:
+                                        st.caption("Held fixed in the last fit: " + ", ".join(
+                                            f"**{_n}** = {_fixed_cands[_n]:.2f}" for _n in _fx_sel) +
+                                            ". The map is centred on that value, which is not an "
+                                            "optimum — look for where the RMSE minimum actually "
+                                            "falls. All other fitted parameters are refit at each "
+                                            "grid point.")
                                     c_sx, c_sy, c_np = st.columns(3)
                                     _sx_k = c_sx.number_input(
                                         "Span X (log ±)", min_value=0.1,
@@ -2890,7 +4061,7 @@ if IS_KINETICS:
                                         key="_p2d_sy_kin")
                                     _np_k = c_np.number_input(
                                         "Grid (per axis, odd)",
-                                        min_value=5, max_value=31,
+                                        min_value=5, max_value=201,
                                         value=11, step=2,
                                         key="_p2d_np_kin")
                                     _par2_k = st.checkbox(
@@ -2898,6 +4069,7 @@ if IS_KINETICS:
                                         value=True, key="_p2d_par_kin",
                                         help="Strongly recommended — "
                                              "2D scans run n_pts² refits.")
+                                    _hpc_go_p2d_kin = hpc_ui.controls("p2d_kin", label="the 2D profile")
                                     _p2d_jobs = -1 if _par2_k else 1
                                     if _p1_k == _p2_k:
                                         st.warning("Pick two **different** "
@@ -2920,7 +4092,7 @@ if IS_KINETICS:
                                             _scan2 = None
                                             if st.button(
                                                     "Compute 2D profile",
-                                                    key="_p2d_btn_kin"):
+                                                    key="_p2d_btn_kin") or _hpc_go_p2d_kin:
                                                 _bar2 = st.progress(0.0,
                                                     text="Computing 2D profile…")
                                                 def _cb2(f, m):
@@ -2928,7 +4100,15 @@ if IS_KINETICS:
                                                     except Exception: pass
                                                 try:
                                                     _fa_k_prof2 = dict(_fa_k_for2d)
-                                                    _fa_k_prof2["kind"] = "kin"
+                                                    if _fa_k_prof2.get("kind") != "global":
+                                                        _fa_k_prof2["kind"] = "kin"
+                                                    _seed2k = dict(_fa_k_prof2.get("start_logk") or _fa_k_prof2.get("start_logK") or {})
+                                                    for _n, _v in (fit_stats.get("param_values", {}) or {}).items():
+                                                        try: _seed2k[_n] = float(_v)
+                                                        except Exception: pass
+                                                    _fa_k_prof2["start_logk"] = _seed2k
+                                                    _fa_k_prof2["start_logK"] = dict(_seed2k)
+                                                    _fa_k_prof2["simplex_step"] = 0.15
                                                     _scan2 = compute_rmse_profile_2d(
                                                         _fa_k_prof2,
                                                         _p1_k, _cands[_p1_k],
@@ -2939,12 +4119,24 @@ if IS_KINETICS:
                                                         n_pts_y=int(_np_k),
                                                         n_jobs=_p2d_jobs,
                                                         progress_callback=_cb2)
+                                                    _scan2["p1_fixed"] = bool(_p1_k in _fixed_cands)
+                                                    _scan2["p2_fixed"] = bool(_p2_k in _fixed_cands)
                                                     _write_tuple_cache(_ck, _scan2)
                                                     _bar2.empty()
+                                                except hpc_ui.CapturedCall as _hpc_cc:
+                                                    _bar2.empty()
+                                                    hpc_ui.handle_capture(_hpc_cc, "p2d_kin", "2D RMSE profile",
+                                                                          context={"ck": list(_ck), "p1_fixed": bool(_p1_k in _fixed_cands), "p2_fixed": bool(_p2_k in _fixed_cands)})
                                                 except Exception as _e2:
                                                     _bar2.empty()
                                                     st.error(f"2D profile failed: {_e2}")
+                                        hpc_ui.jobs_panel("p2d_kin", on_result=_hpc_store_tuple_cache)
                                         if _scan2 is not None:
+                                            _p2d_noleg = st.checkbox(
+                                                "No legend", value=False, key="_p2d_noleg_kin",
+                                                help="Draw the map without the legend box and the "
+                                                     "note in the corner — for publication, where "
+                                                     "that text goes in the figure caption.")
                                             try:
                                                 _fig2 = make_2d_profile_figure(
                                                     _scan2,
@@ -2952,7 +4144,8 @@ if IS_KINETICS:
                                                           f"{_p1_k} vs {_p2_k}",
                                                     param_cov=fit_stats.get("param_cov"),
                                                     cov_names=fit_stats.get("param_cov_names"),
-                                                    constraints=_fa_k_for2d.get("constraints"))
+                                                    constraints=_fa_k_for2d.get("constraints"),
+                                                    show_legend=not _p2d_noleg)
                                                 st.pyplot(_fig2, clear_figure=False)
                                                 import io as _io
                                                 _buf2 = _io.BytesIO()
@@ -2971,6 +4164,7 @@ if IS_KINETICS:
                                             except Exception as _re:
                                                 st.error(f"Could not render 2D "
                                                          f"figure: {_re}")
+                        _profile_trace_block("kin", fit_stats)
                 _diag_kin_frag()
 
             # ── v2 bootstrap CIs (toggle, in fragment) ───────────────────
@@ -2981,7 +4175,7 @@ if IS_KINETICS:
                     st.caption("Resamples fit residuals to estimate CIs without "
                                "assuming Gaussian errors. Recommended when "
                                "Shapiro p < 0.05 above. Each iteration is a full refit.")
-                    _fa = st.session_state.get("_fit_args_kin")
+                    _fa = _diag_fa(st.session_state.get("_fit_args_kin"))
                     if not _fa:
                         st.info("Click **Fit** once with the current script and data "
                                 "to enable bootstrap.  (The bootstrap reuses the exact "
@@ -2994,13 +4188,18 @@ if IS_KINETICS:
                                                index=0, key="_bs_mth_kin")
                         _bs_par = st.checkbox("Parallel (use all cores)",
                                               value=False, key="_bs_par_kin")
-                        if st.button("Run bootstrap", key="_bs_run_kin"):
+                        _hpc_go_bs_kin = hpc_ui.controls("bs_kin", label="the bootstrap")
+                        if st.button("Run bootstrap", key="_bs_run_kin") or _hpc_go_bs_kin:
                             _pb = st.progress(0.0, text="Bootstrap running…")
                             _cb = lambda i, N: _pb.progress(min(i / max(N,1), 1.0),
                                                             text=f"Bootstrap {i}/{N}")
                             _jobs = -1 if _bs_par else 1
                             try:
-                                if _fa["use_spectra_fit"]:
+                                if _fa.get("kind") == "global":
+                                    _r = eqglobal.bootstrap_global(
+                                        _fa, n_bootstrap=int(_bs_n), method=_bs_mth,
+                                        n_jobs=_jobs, seed=42, progress_callback=_cb)
+                                elif _fa["use_spectra_fit"]:
                                     _r = ebs.bootstrap_kinetics_spectra(
                                         _fa["parsed_fit"], _fa["start_logk"],
                                         _fa["spectra_data_fit"], _fa["fit_keys"],
@@ -3067,11 +4266,16 @@ if IS_KINETICS:
                                         progress_callback=_cb)
                                 _pb.empty()
                                 st.session_state["_bs_result_kin"] = _r
+                            except hpc_ui.CapturedCall as _hpc_cc:
+                                _pb.empty()
+                                hpc_ui.handle_capture(_hpc_cc, "bs_kin", "Bootstrap",
+                                                      context={})
                             except Exception as _bse:
                                 _pb.empty()
                                 import traceback as _tb_bs
                                 st.error(f"Bootstrap failed: {_bse}")
                                 st.caption(_tb_bs.format_exc())
+                        hpc_ui.jobs_panel("bs_kin", on_result=_hpc_store_state("_bs_result_kin"))
                         _br = st.session_state.get("_bs_result_kin")
                         if _br and _br.get("ci"):
                             st.caption(f"{_br['n_success']}/{_br['n_bootstrap']} bootstrap "
@@ -3128,7 +4332,7 @@ if IS_KINETICS:
                                         "observed species at one time "
                                         "for kinetics) at one x-value, "
                                         "simultaneously."):
-                        _fa_jk_k = st.session_state.get("_fit_args_kin")
+                        _fa_jk_k = _diag_fa(st.session_state.get("_fit_args_kin"))
                         if not _fa_jk_k:
                             st.info("Click **Fit** once with the current "
                                     "script and data to enable jackknife.")
@@ -3136,8 +4340,9 @@ if IS_KINETICS:
                             _jk_par_k = st.checkbox(
                                 "Parallel (use all cores)",
                                 value=False, key="_jk_par_kin")
+                            _hpc_go_jk_kin = hpc_ui.controls("jk_kin", label="the jackknife")
                             if st.button("Run jackknife",
-                                          key="_jk_run_kin"):
+                                          key="_jk_run_kin") or _hpc_go_jk_kin:
                                 _pb_jk_k = st.progress(
                                     0.0, text="Jackknife running…")
                                 _cb_jk_k = lambda i, N: _pb_jk_k.progress(
@@ -3148,7 +4353,10 @@ if IS_KINETICS:
                                     "fit_timeout", 30))
                                 try:
                                     _jr_k = None
-                                    if _fa_jk_k.get("use_spectra_fit"):
+                                    if _fa_jk_k.get("kind") == "global":
+                                        _jr_k = eqglobal.jackknife_global(
+                                            _fa_jk_k, n_jobs=_jobs_jk_k, progress_callback=_cb_jk_k)
+                                    elif _fa_jk_k.get("use_spectra_fit"):
                                         # kinetics + spectra
                                         _jr_k = ebs.jackknife_kinetics_spectra(
                                             _fa_jk_k["parsed_fit"],
@@ -3225,6 +4433,10 @@ if IS_KINETICS:
                                             progress_callback=_cb_jk_k)
                                     if _jr_k is not None:
                                         st.session_state["_jk_result_kin"] = _jr_k
+                                except hpc_ui.CapturedCall as _hpc_cc:
+                                    _pb_jk_k.empty()
+                                    hpc_ui.handle_capture(_hpc_cc, "jk_kin", "Jackknife",
+                                                          context={})
                                 except Exception as _jke_k:
                                     _pb_jk_k.empty()
                                     import traceback as _tb_jk_k
@@ -3233,6 +4445,7 @@ if IS_KINETICS:
                                 else:
                                     _pb_jk_k.empty()
 
+                            hpc_ui.jobs_panel("jk_kin", on_result=_hpc_store_state("_jk_result_kin"))
                             _jr_k = st.session_state.get("_jk_result_kin")
                             if _jr_k is not None and not _jr_k.get("jack_se"):
                                 _msg = (_jr_k.get("best_message")
@@ -3324,7 +4537,7 @@ if IS_KINETICS:
                                         "experimental-prep uncertainty — "
                                         "invisible to the residual-noise "
                                         "bootstrap."):
-                        _fa_mc_k = st.session_state.get("_fit_args_kin")
+                        _fa_mc_k = _diag_fa(st.session_state.get("_fit_args_kin"))
                         if not _fa_mc_k:
                             st.info("Click **Fit** once with the current "
                                     "script and data to enable Monte Carlo.")
@@ -3359,7 +4572,10 @@ if IS_KINETICS:
                                                        f"{_vv:.3g} mL)",
                                                        _vn))
 
-                            if not _all_inputs_k:
+                            _mc_is_nmr_k = bool(_fa_mc_k.get("use_nmr_fit")) or (
+                                _fa_mc_k.get("kind") == "global" and any(
+                                    (e.get("fa") or {}).get("use_nmr_fit") for e in _fa_mc_k.get("experiments", [])))
+                            if not _all_inputs_k and not _mc_is_nmr_k:
                                 st.info("No nuisance parameters to sample "
                                         "— every experimental quantity is "
                                         "already a fit variable.")
@@ -3379,6 +4595,20 @@ if IS_KINETICS:
                                             _specs_k[f"conc:{_name}"] = _val / 100.0
                                         elif _kind == "vol":
                                             _specs_k[f"vol:{_name}"]  = _val / 100.0
+                                if _mc_is_nmr_k:
+                                    _mn1, _mn2 = st.columns(2)
+                                    _mc_integ_pct_k = _mn1.number_input(
+                                        "σ on NMR integrations (%)", min_value=0.0, max_value=50.0,
+                                        value=0.0, step=0.5, key="_mc_sig_kin_nmr_integ", format="%.2f",
+                                        help="Relative error of the peak integrals (per point).")
+                                    _mc_shift_ppm_k = _mn2.number_input(
+                                        "σ on chemical shifts (ppm)", min_value=0.0, max_value=1.0,
+                                        value=0.0, step=0.001, key="_mc_sig_kin_nmr_shift", format="%.4f",
+                                        help="Absolute error of the observed shifts (per point, ppm).")
+                                    if _mc_integ_pct_k > 0:
+                                        _specs_k["nmr_integ_rel"] = float(_mc_integ_pct_k) / 100.0
+                                    if _mc_shift_ppm_k > 0:
+                                        _specs_k["nmr_shift_ppm"] = float(_mc_shift_ppm_k)
 
                                 _ci_n, _ci_p = st.columns([1, 1])
                                 _n_mc_k = _ci_n.number_input(
@@ -3389,6 +4619,7 @@ if IS_KINETICS:
                                 _mc_par_k = _ci_p.checkbox(
                                     "Parallel (use all cores)",
                                     value=False, key="_mc_par_kin")
+                                _hpc_go_mc_kin = hpc_ui.controls("mc_kin", label="the Monte Carlo run")
 
                                 if not _specs_k:
                                     st.warning("All uncertainties are 0 % — "
@@ -3398,7 +4629,7 @@ if IS_KINETICS:
 
                                 if st.button("Run Monte Carlo",
                                               key="_mc_run_kin",
-                                              disabled=(not _specs_k)):
+                                              disabled=(not _specs_k)) or (_hpc_go_mc_kin and bool(_specs_k)):
                                     _pb_mc = st.progress(0.0, text="MC running…")
                                     _cb_mc = lambda i, N: _pb_mc.progress(
                                         min(i / max(N, 1), 1.0),
@@ -3406,7 +4637,11 @@ if IS_KINETICS:
                                     _jobs_mc = -1 if _mc_par_k else 1
                                     try:
                                         _mr_k = None
-                                        if _fa_mc_k.get("use_spectra_fit"):
+                                        if _fa_mc_k.get("kind") == "global":
+                                            _mr_k = eqglobal.monte_carlo_global(
+                                                _fa_mc_k, nuisance_specs=_specs_k, n_iter=int(_n_mc_k),
+                                                n_jobs=_jobs_mc, progress_callback=_cb_mc)
+                                        elif _fa_mc_k.get("use_spectra_fit"):
                                             _mr_k = ebs.monte_carlo_kinetics_spectra(
                                                 _fa_mc_k["parsed_fit"], _fa_mc_k["start_logk"],
                                                 _fa_mc_k["spectra_data_fit"],
@@ -3467,6 +4702,10 @@ if IS_KINETICS:
                                                 progress_callback=_cb_mc)
                                         if _mr_k is not None:
                                             st.session_state["_mc_result_kin"] = _mr_k
+                                    except hpc_ui.CapturedCall as _hpc_cc:
+                                        _pb_mc.empty()
+                                        hpc_ui.handle_capture(_hpc_cc, "mc_kin", "Monte Carlo",
+                                                              context={})
                                     except Exception as _mce_k:
                                         _pb_mc.empty()
                                         import traceback as _tb_mc
@@ -3475,6 +4714,7 @@ if IS_KINETICS:
                                     else:
                                         _pb_mc.empty()
 
+                                hpc_ui.jobs_panel("mc_kin", on_result=_hpc_store_state("_mc_result_kin"))
                             _mr_k = st.session_state.get("_mc_result_kin")
                             if _mr_k is not None and not _mr_k.get("mc_se"):
                                 st.warning(f"Monte Carlo: "
@@ -3536,7 +4776,7 @@ if IS_KINETICS:
                                         "coupling.  3^N grid evaluations — "
                                         "tractable up to ~6–7 selected "
                                         "variables."):
-                        _fa_lst_k = st.session_state.get("_fit_args_kin")
+                        _fa_lst_k = _diag_fa(st.session_state.get("_fit_args_kin"))
                         if not _fa_lst_k:
                             st.info("Click **Fit** once with the current "
                                     "script and data to enable the local "
@@ -3604,6 +4844,7 @@ if IS_KINETICS:
                             _par_lst_k = _cpar_k.checkbox(
                                 "Parallel (use all cores)",
                                 value=True, key="_lst_kin_par")
+                            _hpc_go_lst_kin = hpc_ui.controls("lst_kin", label="the local sensitivity test")
 
                             _N = len(_selected_k)
                             if _N == 0:
@@ -3630,7 +4871,7 @@ if IS_KINETICS:
 
                             if st.button("Run local sensitivity test",
                                           key="_lst_kin_run",
-                                          disabled=not _can_run):
+                                          disabled=not _can_run) or (_hpc_go_lst_kin and _can_run):
                                 _pb = st.progress(0.0, text="Local sensitivity running…")
                                 _cb = lambda i, N: _pb.progress(
                                     min(i / max(N, 1), 1.0),
@@ -3649,6 +4890,10 @@ if IS_KINETICS:
                                         progress_callback=_cb)
                                     if _lr is not None:
                                         st.session_state["_lst_result_kin"] = _lr
+                                except hpc_ui.CapturedCall as _hpc_cc:
+                                    _pb.empty()
+                                    hpc_ui.handle_capture(_hpc_cc, "lst_kin", "Local sensitivity",
+                                                          context={})
                                 except Exception as _le:
                                     _pb.empty()
                                     import traceback as _tb_lst
@@ -3657,7 +4902,10 @@ if IS_KINETICS:
                                 else:
                                     _pb.empty()
 
+                            hpc_ui.jobs_panel("lst_kin", on_result=_hpc_store_state("_lst_result_kin"))
                             _lr = st.session_state.get("_lst_result_kin")
+                            if _lr is not None and not _lr.get("f") and _lr.get("best_message"):
+                                st.warning(f"Local sensitivity test: {_lr['best_message']}")
                             if _lr is not None and _lr.get("f"):
                                 st.caption(
                                     f"{_lr['n_success']}/{_lr['n_grid']} "
@@ -3744,7 +4992,7 @@ if IS_KINETICS:
                             "**Nested?** when the simpler model is a special "
                             "case of the more complex one (e.g. single-step vs "
                             "two-step) to enable the F-test.")
-                        _fa_k = st.session_state.get("_fit_args_kin")
+                        _fa_k = _diag_fa(st.session_state.get("_fit_args_kin"))
                         _alt_script_k = st.text_area(
                             "Alternative kinetic model script",
                             height=180, key="_alt_script_text_kin",
@@ -3920,9 +5168,9 @@ if IS_KINETICS:
                     if kname in _eq_knames_disp:
                         rows.append({"Parameter": kname,
                                      "log P":  f"{val:.2f}",
-                                     "±log P": f"± {err:.2f}" if err is not None else "n/a",
+                                     "±log P": f"± {err:.2f}" if err is not None else ("n/d" if kname in param_errors else "n/a"),
                                      "P":      f"{k_lin:.2e}",
-                                     "±P":     f"± {err_lin:.2e}" if err_lin is not None else "n/a"})
+                                     "±P":     f"± {err_lin:.2e}" if err_lin is not None else ("n/d" if kname in param_errors else "n/a")})
                     else:
                         rows.append({"Parameter": kname,
                                      "log P":  "—",
@@ -4008,6 +5256,9 @@ if IS_KINETICS:
             _ps_anchored = bool(fit_stats.get("pure_shifts_anchored", False))
             _show_abs    = (not _nmr_noref) or _ps_anchored
             _ps_dfree    = fit_stats.get("delta_free", {}) or {}
+            _ps_und      = fit_stats.get("pure_shift_undetermined", {}) or {}
+            _ps_mf       = fit_stats.get("pure_shift_maxfrac", {}) or {}
+            _ps_pin      = fit_stats.get("pure_shift_pinned", {}) or {}
             if pure_shifts_disp:
                 if _show_abs:
                     st.write("**Pure-species chemical shifts (ppm):**")
@@ -4020,6 +5271,11 @@ if IS_KINETICS:
                         df0 = float(_ps_dfree.get(col, 0.0)) if _show_abs else 0.0
                         for sp, dd_val in sp_dict.items():
                             row[sp] = f"{df0 + dd_val:.4f}"
+                            if sp in ((_ps_und.get(tgt) or {}).get(col) or []):
+                                row[sp] = f"({row[sp]})"
+                            elif (sp not in ((_ps_pin.get(tgt) or {}).get(col) or [])
+                                  and float(((_ps_mf.get(tgt) or {}).get(col) or {}).get(sp, 1.0)) < 0.10):
+                                row[sp] = f"{row[sp]} *"
                             if sp not in all_sp_cols:
                                 all_sp_cols.append(sp)
                         rows_ps.append(row)
@@ -4028,10 +5284,17 @@ if IS_KINETICS:
                     ordered = [c for c in all_sp_cols if c in df_ps.columns]
                     st.dataframe(df_ps[ordered], width='stretch')
                     if _show_abs:
-                        st.caption("Each row = one NMR signal; columns = δ of each pure species (ppm)")
+                        st.caption("Each row = one NMR signal; columns = δ of each pure species (ppm). "
+                                   "( ) = species below 2 % of the pool over this titration: its shift is not "
+                                   "determined by these data and is held at the free shift (or at the value "
+                                   "shared from the other tabs).  * = species below 10 % of the pool: its shift "
+                                   "is poorly determined and may absorb misfit; tie it to a related species in "
+                                   "$constraints if its value is implausible.")
                     else:
                         st.caption("Each row = one NMR signal; columns = Δδ relative to math reference (ppm). "
                                    "Add a `read:` anchor in $nmr to recover absolute δ.")
+
+            _render_pure_shift_comparison(fit_stats)
 
             if _kin_fit_mode == "mixed":
                 integ_sp   = list(sp_concs_disp.keys())
@@ -4067,6 +5330,65 @@ for cname, cval in parsed["concentrations"].items():
     conc_roots[root] = cval
 
 primary_component = list(conc_roots.keys())[0] if conc_roots else network["free_species"][0]
+# Sanitise conc_roots: replace None values with 1.0 mM default
+conc_roots = {k: (v if v is not None else 1.0) for k, v in conc_roots.items()}
+
+
+
+# ITC placeholder: all concentrations/volumes/titrant are bare names (no values)
+# and no ITC file has been loaded yet. Show a friendly message instead of crashing.
+_itc_placeholder = (
+    all(v is None for v in parsed["concentrations"].values()) and
+    all(v is None for v in parsed["volumes"].values()) and
+    all(v is None for v in parsed["titrant"].values()) and
+    st.session_state.get("_itc_raw") is None
+)
+if _itc_placeholder:
+    st.warning("⬆️ Upload an ITC file to set concentrations and volumes automatically.")
+    _ph_uploaded = st.file_uploader(
+        "Upload ITC file (.itc)", type=["itc"],
+        key=f"_itc_uploader_{st.session_state.get('_itc_uploader_nonce', 0)}",
+    )
+    if _ph_uploaded is not None:
+        try:
+            from equilibrist_itc import parse_itc_file as _parse_itc
+            _itc_raw_ph = _parse_itc(_ph_uploaded.read())
+            st.session_state["_itc_raw"] = _itc_raw_ph
+            # Fill in concentrations/volumes/titrant from file header
+            _cell_conc_ph   = _itc_raw_ph.get("cell_conc_mM")
+            _syr_conc_ph    = _itc_raw_ph.get("syringe_conc_mM")
+            _cell_vol_ph    = _itc_raw_ph.get("cell_vol_mL")
+            _cname_ph = list(parsed["concentrations"].keys())[0]
+            _tkey_ph  = list(parsed["titrant"].keys())[0]
+            _vkey_ph  = list(parsed["volumes"].keys())[0]
+            _root_ph  = _cname_ph[:-1] if _cname_ph.endswith("0") else _cname_ph
+            _tfree_ph = _tkey_ph[:-1]  if _tkey_ph.endswith("t") else _tkey_ph
+            if _cell_conc_ph:
+                st.session_state[f"conc_{_root_ph}"]        = float(_cell_conc_ph)
+                st.session_state[f"_pending_conc_{_root_ph}"] = float(_cell_conc_ph)
+            if _syr_conc_ph:
+                st.session_state[f"titrant_mM_{_tkey_ph}"]            = float(_syr_conc_ph)
+                st.session_state[f"_pending_titrant_mM_{_tkey_ph}"]   = float(_syr_conc_ph)
+            if _cell_vol_ph:
+                st.session_state["V0_mL"] = float(_cell_vol_ph)
+            st.rerun()
+        except Exception as _e:
+            st.error(f"Could not read ITC file: {_e}")
+    st.stop()
+
+# Sanitise parsed dicts: replace any remaining None with session state values.
+# This runs only when _itc_placeholder is False (ITC file has been loaded).
+for _k in list(parsed["concentrations"]):
+    if parsed["concentrations"][_k] is None:
+        _root = _k[:-1] if _k.endswith("0") else _k
+        parsed["concentrations"][_k] = float(st.session_state.get(f"conc_{_root}", 1.0))
+for _k in list(parsed["titrant"]):
+    if parsed["titrant"][_k] is None:
+        parsed["titrant"][_k] = float(st.session_state.get(f"titrant_mM_{_k}", 10.0))
+for _k in list(parsed["volumes"]):
+    if parsed["volumes"][_k] is None:
+        parsed["volumes"][_k] = float(st.session_state.get("V0_mL", 0.1991))
+
 
 # ── Sidebar: concentrations, volume, titrant ──
 with st.sidebar:
@@ -4077,15 +5399,19 @@ with st.sidebar:
     for root, default in conc_roots.items():
         if _is_acid_base and root == "H2O":
             # H2O is implicit in acid-base mode — keep value but hide widget
-            conc_vals[root] = float(st.session_state.get(f"conc_{root}", float(default)))
+            conc_vals[root] = float(st.session_state.get(f"conc_{root}", float(default) if default is not None else 1.0))
             continue
+        _def_c = float(default) if default is not None else \
+                 float(st.session_state.get(f"conc_{root}", 1.0))
         conc_vals[root] = _conc_input_with_fit(
-            f"{root}₀", key=f"conc_{root}", default=float(default),
+            f"{root}₀", key=f"conc_{root}", default=_def_c,
         )
 
     st.header("Volume & Titrant")
-    V0_default  = list(parsed["volumes"].values())[0]  if parsed["volumes"]  else 0.5
-    V0_mL = _num_input("V₀ (mL)", key="V0_mL", default=float(V0_default), step=0.01, format="%.4f")
+    _v0_raw     = list(parsed["volumes"].values())[0]  if parsed["volumes"]  else 0.5
+    V0_default  = float(_v0_raw) if _v0_raw is not None else \
+                  float(st.session_state.get("V0_mL", ITC200_CELL_VOLUME_ML))
+    V0_mL = _num_input("V₀ (mL)", key="V0_mL", default=V0_default, step=0.01, format="%.4f")
 
     titrant_mMs    = {}
     titrant_ratios = {}
@@ -4210,6 +5536,27 @@ with st.sidebar:
                 logK_vals[kname] = _logk_input_with_fit(label, key=f"logK_{kname}", default=eq["logK"])
             _rendered_knames.add(kname)
 
+# ── ITC q_offset widget (only shown when ITC data is loaded) ──────────
+_itc_raw_sb = st.session_state.get("_itc_raw")
+if _itc_raw_sb is not None:
+    with st.sidebar:
+        st.header("ITC offset")
+        # Apply pending writeback from fitter (same pattern as logK/conc widgets)
+        if "_pending_itc_q_offset" in st.session_state:
+            st.session_state["itc_q_offset"] = float(st.session_state.pop("_pending_itc_q_offset"))
+        _qoffset_default = float(st.session_state.get("itc_q_offset", 0.0))
+        # Identical layout to K1/conc widgets: narrow fit checkbox column
+        _qoff_c1, _qoff_c2 = st.columns([0.86, 0.14])
+        with _qoff_c1:
+            _itc_q_offset = _num_input(
+                "q_offset (µcal)", key="itc_q_offset",
+                default=_qoffset_default, step=0.01, format="%.4f")
+        with _qoff_c2:
+            # No value= : defaults to False, consistent with every other
+            # "fit" checkbox. Forcing True here meant q_offset was silently
+            # floated the moment an .itc file was loaded.
+            _fit_toggle("fit_itc_q_offset")
+
 # ── Constraints toggle (only shown when $constraints section present) ──
 if parsed.get("constraints"):
     with st.sidebar:
@@ -4221,6 +5568,8 @@ if parsed.get("constraints"):
         )
 
 with st.sidebar:
+    st.markdown("---")
+    pyscript.sidebar_controls()          # "Load custom .py script" / "Run py script"
     st.markdown("---")
     st.caption("Equilibrist © Eric Masson, Ohio University, 2026")
 
@@ -4237,11 +5586,29 @@ for w in cycle_warnings:
 _ref_cname_m = list(parsed['concentrations'].keys())[0]
 _tit_free_m  = network['titrant_free_names'][0] if network.get('titrant_free_names') else titrant_key[:-1] if titrant_key.endswith('t') else titrant_key
 _x_expr_main = parsed.get("plot_x_expr") or f"{_tit_free_m}0/{_ref_cname_m}"
-_maxEquiv = _find_maxEquiv(
-    _x_expr_main, float(xmax), parsed, conc_vals, float(V0_mL),
-    titrant_free_names, titrant_keys, titrant_mMs, titrant_ratios,
-    parsed["titrant_is_solid"], primary_component,
-)
+if _itc_placeholder:
+    _maxEquiv = 2.4  # dummy — not used for rendering
+else:
+    # Sanitise: replace any remaining None values before calling _find_maxEquiv
+    conc_vals   = {k: (v if v is not None else 1.0)  for k, v in conc_vals.items()}
+    titrant_mMs = {k: (v if v is not None else 10.0) for k, v in titrant_mMs.items()}
+    # _find_maxEquiv reads parsed["concentrations"] directly — patch it too
+    _parsed_maxequiv = dict(parsed)
+    _parsed_maxequiv["concentrations"] = dict(parsed["concentrations"])
+    for _cn, _cv in conc_vals.items():
+        _k0 = _cn + "0"
+        if _k0 in _parsed_maxequiv["concentrations"]:
+            _parsed_maxequiv["concentrations"][_k0] = float(_cv)
+        elif _cn in _parsed_maxequiv["concentrations"]:
+            _parsed_maxequiv["concentrations"][_cn] = float(_cv)
+    # Non-ITC behaviour must be untouched: only ITC placeholders need the
+    # widget-patched copy, because their script concentrations were None.
+    _pm_arg = _parsed_maxequiv if st.session_state.get("_itc_raw") is not None else parsed
+    _maxEquiv = _find_maxEquiv(
+        _x_expr_main, float(xmax), _pm_arg, conc_vals, float(V0_mL),
+        titrant_free_names, titrant_keys, titrant_mMs, titrant_ratios,
+        parsed["titrant_is_solid"], primary_component,
+    )
 
 params = {
     "conc0":               conc_vals,
@@ -4259,12 +5626,15 @@ params = {
 }
 
 
-with st.spinner("Solving mass balances…"):
-    try:
-        curve = compute_curve(parsed, network, logK_vals, params)
-    except Exception as e:
-        st.warning(f"⚠️ Solver error — check concentrations and reaction definitions: {e}")
-        st.stop()
+if _itc_placeholder:
+    curve = {}   # empty dict — downstream .get() and iteration are safe
+else:
+    with st.spinner("Solving mass balances…"):
+        try:
+            curve = compute_curve(parsed, network, logK_vals, params)
+        except Exception as e:
+            st.warning(f"⚠️ Solver error — check concentrations and reaction definitions: {e}")
+            st.stop()
 
 # ── Evaluate x-axis expression (needed for fitting) ────
 x_expr = parsed["plot_x_expr"]
@@ -4332,8 +5702,218 @@ plot_targets, plot_warns = resolve_plot_targets(plot_y_names, parsed["variables"
 for w in plot_warns:
     st.warning(w)
 
+# ── ITC Fit dispatch ─────────────────────────────────────────────────
+_itc_raw_disp = st.session_state.get("_itc_raw")
+_itc_q_exp    = st.session_state.get("_itc_q_exp")
+_use_itc_fit  = (_itc_raw_disp is not None and
+                 _itc_q_exp is not None and
+                 len(_itc_q_exp) > 0)
+
+# Reserved slot for the 'Fitting…' message.  Emitted on every run so the
+# element that follows (the two-column layout) keeps the same position;
+# otherwise the spinner, appearing only on fitting runs, took the columns'
+# place and the right-hand panel vanished until the fit returned.
+_fit_slot = st.empty()
+if st.session_state.get("_single_fit_pending"):
+    _apply_single_pending(st.session_state.pop("_single_fit_pending"))
+if st.session_state.get("_fit_requested") and st.session_state.get("_single_fit_hpc"):
+    st.session_state.pop("_fit_requested", None)
+    _submit_single_fit_to_cluster(st.session_state.pop("_single_fit_hpc"))
+if _use_itc_fit and _fit_turn(_fit_slot):
+    _itc_fit_keys  = list(dict.fromkeys(
+        eq["kname"] for eq in parsed["equilibria"]
+        if st.session_state.get(f"fit_logK_{eq['kname']}", False)
+    ))
+    _itc_conc_keys = [root for root in conc_roots
+                      if st.session_state.get(f"fit_conc_{root}", False)]
+    # Titrant stock: the checkbox key uses the titrant KEY ('Ht') while
+    # params["titrant_mMs"] is keyed by the FREE name ('H'), so map across
+    # the two parallel lists. Previously this was not collected at all, so
+    # ticking "fit" on the syringe stock silently did nothing.
+    _itc_tit_keys  = [_fname for _tkey, _fname in zip(titrant_keys,
+                                                       titrant_free_names)
+                      if st.session_state.get(f"fit_titrant_mM_{_tkey}", False)]
+    _itc_any_fit   = bool(_itc_fit_keys or _itc_conc_keys or _itc_tit_keys)
+    if _itc_any_fit:
+        try:
+            _itc_tol_log  = st.session_state.get("fit_tolerance_log", 3.0)
+            _itc_tol      = 10.0 ** (-_itc_tol_log)
+            _itc_timeout  = float(st.session_state.get("fit_timeout", 30))
+            _itc_constr   = (parsed.get("constraints", [])
+                             if st.session_state.get("fit_use_constraints", False) else [])
+            # q_offset: free (lstsq) when fit checkbox is ticked, fixed otherwise
+            _qoff_fit = bool(st.session_state.get("fit_itc_q_offset", True))
+            _qoff_arg = None if _qoff_fit else float(st.session_state.get("itc_q_offset", 0.0))
+
+            # Pass the full raw dict and excluded set to fit_itc.
+            # fit_itc computes dC for ALL injections then masks — this ensures
+            # dC[i] = C[i] - C[i-1] is correct even when early injections are excluded.
+            _itc_excl = st.session_state.get("_outliers_itc", set())
+            # q_exp[0] is always the dummy injection — skip it; fit only real injections
+            _itc_q_fit = np.array([q for i, q in enumerate(_itc_q_exp[1:])
+                                   if i not in _itc_excl])
+
+            _itc_success, _itc_fitted, _itc_stats, _itc_msg = _fit_async(_fit_slot, _itc_timeout, lambda: fit_itc(
+                    parsed, network, _itc_q_fit, _itc_raw_disp, params, logK_vals,
+                    _itc_fit_keys, x_expr,
+                    fit_titrant_keys=_itc_tit_keys,
+                    tolerance=_itc_tol, maxiter=100_000,
+                    timeout_s=_itc_timeout,
+                    fit_conc_keys=_itc_conc_keys,
+                    q_offset_fixed=_qoff_arg,
+                    constraints=_itc_constr,
+                    excl_set=_itc_excl,
+                ),
+                logK_vals, "Fitting ITC parameters…", "_fit_requested")
+
+            # Write back fitted K values
+            for kname, val in _itc_fitted.items():
+                st.session_state[f"_pending_logK_{kname}"] = float(val)
+            for root, mM in _itc_stats.get("fitted_concs", {}).items():
+                st.session_state[f"_pending_conc_{root}"] = float(mM)
+            # Fitted titrant stocks: the widget key uses the titrant KEY
+            # ('Ht') while the fit returns the FREE name ('H'), so map back.
+            _free_to_tkey = {_f: _t for _t, _f in zip(titrant_keys,
+                                                       titrant_free_names)}
+            for _fname, mM in _itc_stats.get("fitted_titrants", {}).items():
+                _tk = _free_to_tkey.get(_fname, _fname)
+                st.session_state[f"_pending_titrant_mM_{_tk}"] = float(mM)
+            # Write back q_offset only when it was solved (not fixed)
+            if _qoff_fit:
+                st.session_state["_pending_itc_q_offset"] = float(_itc_stats.get("q_offset", 0.0))
+
+            # Residual diagnostics (residuals vs predictor, Q-Q, DW, Shapiro,
+            # AIC/BIC) need the unified collector, exactly as the equilibrium
+            # dispatch does. Without this the panel renders empty for ITC.
+            try:
+                _itc_res = collect_residuals_from_stats(_itc_stats, x_expr=x_expr)
+                augment_stats(_itc_stats, _itc_res)
+                # The diagnostics panel is gated on this session key, not on
+                # the stats dict: it renders only when
+                # st.session_state["_fit_residuals"] has a non-empty y_obs.
+                # Computing the residuals without storing them here left the
+                # whole panel invisible for ITC.
+                st.session_state["_fit_residuals"] = _itc_res
+            except Exception:
+                st.session_state["_fit_residuals"] = {}
+            st.session_state["_fit_stats"] = _itc_stats
+            st.session_state["_fit_counter"] = int(st.session_state.get("_fit_counter", 0)) + 1
+            # Statistics panels (profiles, bootstrap, jackknife, MC) read
+            # _fit_args_eq. The equilibrium dispatch builds it; ITC has its
+            # own dispatch, so build the ITC flavour here or none of the
+            # v2.0 diagnostics can reach an ITC fit.
+            st.session_state["_fit_args_eq"] = {
+                "kind":             "eq",
+                "use_itc_fit":      True,
+                "use_spectra_fit":  False,
+                "use_nmr_fit":      False,
+                "fit_keys":         list(_itc_fit_keys),
+                "fit_conc_keys":    list(_itc_conc_keys),
+                "fit_titrant_keys": list(_itc_tit_keys),
+                "tolerance":        float(_itc_tol),
+                "maxiter":          100_000,
+                "timeout_s":        float(_itc_timeout),
+                "constraints":      _itc_constr,
+                "start_logK":       dict(logK_vals),
+                "start_logk":       dict(logK_vals),
+                "x_expr":           x_expr,
+                "parsed_fit":       parsed,
+                "network":          network,
+                "params":           params,
+                "itc_q_exp":        _itc_q_fit,
+                "itc_raw":          _itc_raw_disp,
+                "q_offset_fixed":   None,
+                "excl_set":         set(_itc_excl or set()),
+                "exp_data_fit":     None,
+                "nmr_data_fit":     None,
+                "spectra_data_fit": None,
+                "n_data":           int(_itc_stats.get("n_points", 0)),
+            }
+            _itc_n_par = (len(_itc_fitted)
+                          + len(_itc_stats.get("fitted_concs", {}))
+                          + len(_itc_stats.get("fitted_titrants", {})))
+            st.session_state["_fit_message"] = _fit_end_message(
+                _itc_stats, _itc_success, _itc_msg, _itc_n_par, _itc_tol_log, _itc_timeout)
+            st.rerun()
+        except Exception as _itc_exc:
+            import traceback as _itc_tb
+            st.error(f"ITC fitting error: {_itc_exc}")
+            st.caption(_itc_tb.format_exc())
+
 # ── Fit dispatch — runs BEFORE plots so spinner appears at top ────────
-if st.session_state.pop("_fit_requested", False):
+# ── What a Global fit would use from THIS tab: refreshed every run so the
+# snapshot of an inactive tab always carries its current script, data,
+# ticks, values and constraints.
+if not _use_itc_fit:
+    try:
+        _nmr_cfg_live = parsed.get("nmr")
+        _nmr_live = _filter_exp_outliers(st.session_state.get("_nmr_data", {}), "_outliers_nmr")
+        _exp_live = _filter_exp_outliers(st.session_state.get("_exp_data", {}), "_outliers_main")
+        _sp_live  = _filter_spectra_outliers(st.session_state.get("_spectra_data", {}), "_outliers_spectra")
+        _use_nmr_live = (_nmr_cfg_live is not None and _nmr_cfg_live["mode"] in ("shift", "integration", "mixed")
+                         and bool(_nmr_live))
+        _use_sp_live = parsed.get("spectra") is not None and bool(_sp_live)
+        _tol_live = 10.0 ** (-float(st.session_state.get("fit_tolerance_log", 3.0)))
+        st.session_state["_fit_args_live"] = {
+            "kind": "eq",
+            "fit_keys": list(dict.fromkeys(eq["kname"] for eq in parsed["equilibria"]
+                                           if st.session_state.get(f"fit_logK_{eq['kname']}", False))),
+            "fit_conc_keys": [root for root in conc_roots if st.session_state.get(f"fit_conc_{root}", False)],
+            "fit_titrant_keys": [tkey for tkey in titrant_keys if st.session_state.get(f"fit_titrant_mM_{tkey}", False)],
+            "use_spectra_fit": bool(_use_sp_live), "use_nmr_fit": bool(_use_nmr_live),
+            "nmr_mode": (_nmr_cfg_live["mode"] if _use_nmr_live else None),
+            "wl_min": (float(st.session_state.get("spectra_wl_min", _sp_live["wavelengths"][0])) if _use_sp_live else None),
+            "wl_max": (float(st.session_state.get("spectra_wl_max", _sp_live["wavelengths"][-1])) if _use_sp_live else None),
+            "allow_neg_eps": bool(st.session_state.get("spectra_allow_neg", False)),
+            "tolerance": float(_tol_live), "maxiter": 100_000,
+            "timeout_s": float(st.session_state.get("fit_timeout", 30)),
+            "constraints": (parsed.get("constraints", []) if st.session_state.get("fit_use_constraints", False) else []),
+            "start_logK": dict(logK_vals), "start_logk": dict(logK_vals),
+            "x_expr": x_expr,
+            "exp_data_fit": (_exp_live if not (_use_nmr_live or _use_sp_live) else None),
+            "nmr_data_fit": (_nmr_live if _use_nmr_live else None),
+            "spectra_data_fit": (_sp_live if _use_sp_live else None),
+            "parsed_fit": parsed, "network": network, "params": params,
+            "has_data": bool(_use_nmr_live or _use_sp_live or _exp_live),
+        }
+    except Exception:
+        st.session_state.pop("_fit_args_live", None)
+else:
+    # ITC tab: what a Global fit would use from it (mirrors the ITC fit dispatch)
+    try:
+        _itc_excl_live = set(st.session_state.get("_outliers_itc", set()) or set())
+        _itc_q_all = st.session_state.get("_itc_q_exp")
+        _itc_q_live = (np.array([q for i, q in enumerate(_itc_q_all[1:]) if i not in _itc_excl_live])
+                       if _itc_q_all is not None and len(_itc_q_all) > 1 else None)
+        _qoff_fit_live = bool(st.session_state.get("fit_itc_q_offset", True))
+        st.session_state["_fit_args_live"] = {
+            "kind": "eq", "use_itc_fit": True, "use_spectra_fit": False, "use_nmr_fit": False,
+            "fit_keys": list(dict.fromkeys(eq["kname"] for eq in parsed["equilibria"]
+                                           if st.session_state.get(f"fit_logK_{eq['kname']}", False))),
+            "fit_conc_keys": [root for root in conc_roots if st.session_state.get(f"fit_conc_{root}", False)],
+            "fit_titrant_keys": [_fname for _tkey, _fname in zip(titrant_keys, titrant_free_names)
+                                 if st.session_state.get(f"fit_titrant_mM_{_tkey}", False)],
+            "tolerance": 10.0 ** (-float(st.session_state.get("fit_tolerance_log", 3.0))),
+            "maxiter": 100_000, "timeout_s": float(st.session_state.get("fit_timeout", 30)),
+            "constraints": (parsed.get("constraints", []) if st.session_state.get("fit_use_constraints", False) else []),
+            "start_logK": dict(logK_vals), "start_logk": dict(logK_vals),
+            "x_expr": x_expr, "parsed_fit": parsed, "network": network, "params": params,
+            "itc_q_exp": _itc_q_live, "itc_raw": _itc_raw_disp,
+            "q_offset_fixed": (None if _qoff_fit_live else float(st.session_state.get("itc_q_offset", 0.0))),
+            "excl_set": _itc_excl_live,
+            "exp_data_fit": None, "nmr_data_fit": None, "spectra_data_fit": None,
+            "has_data": bool(_itc_q_live is not None and len(_itc_q_live) > 0),
+        }
+    except Exception:
+        st.session_state.pop("_fit_args_live", None)
+
+# ── Global fit dispatch (all tabs at once) ────────────────────────────
+if _fit_turn(_fit_slot, "_global_fit_requested"):
+    _global_fit_dispatch(_fit_slot)
+if st.session_state.get("_global_fit_pending"):
+    _apply_global_pending(st.session_state.pop("_global_fit_pending"))
+
+if not _use_itc_fit and _fit_turn(_fit_slot):
     exp_data_fit     = _filter_exp_outliers(st.session_state.get("_exp_data", {}),      "_outliers_main")
     nmr_data_fit     = _filter_exp_outliers(st.session_state.get("_nmr_data", {}),      "_outliers_nmr")
     spectra_data_fit = _filter_spectra_outliers(st.session_state.get("_spectra_data", {}), "_outliers_spectra")
@@ -4357,7 +5937,7 @@ if st.session_state.pop("_fit_requested", False):
 
     if has_data_end and (fit_keys_end or fit_conc_keys_end or fit_titrant_keys_end):
         try:
-            tolerance_log   = st.session_state.get("fit_tolerance_log", 6.0)
+            tolerance_log   = st.session_state.get("fit_tolerance_log", 3.0)
             tolerance       = 10.0 ** (-tolerance_log)
             maxiter         = 100_000
             _use_lbfgsb     = st.session_state.get("fit_use_lbfgsb", True)
@@ -4396,56 +5976,56 @@ if st.session_state.pop("_fit_requested", False):
                 auto_range    = bool(st.session_state.get("spectra_auto_range", False))
                 allow_neg_eps = bool(st.session_state.get("spectra_allow_neg", False))
                 _timeout_s = float(st.session_state.get("fit_timeout", 30))
-                with st.spinner("Fitting parameters…"):
-                    success, fitted_logKs, stats, message = fit_spectra(
+                success, fitted_logKs, stats, message = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_spectra(
                         parsed, network, spectra_data_fit, params, _start_logK,
                         fit_keys_end, x_expr, wl_min_fit, wl_max_fit,
                         tolerance, maxiter, auto_range=auto_range, timeout_s=_timeout_s, allow_negative_eps=allow_neg_eps,
                         constraints=_active_constraints,
                         fit_conc_keys=fit_conc_keys_end,
-                        fit_titrant_keys=fit_titrant_keys_end)
+                        fit_titrant_keys=fit_titrant_keys_end),
+                    _start_logK, "Fitting parameters…", "_fit_requested")
                 if auto_range and "opt_wl_min" in stats:
                     st.session_state["_pending_spectra_wl_min"] = stats["opt_wl_min"]
                     st.session_state["_pending_spectra_wl_max"] = stats["opt_wl_max"]
             elif use_nmr_fit and nmr_cfg_fit["mode"] == "shift":
                 _timeout_s = float(st.session_state.get("fit_timeout", 30))
-                with st.spinner("Fitting parameters…"):
-                    success, fitted_logKs, stats, message = fit_nmr_shifts(
+                success, fitted_logKs, stats, message = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_nmr_shifts(
                         parsed, network, nmr_data_fit, params, _start_logK,
                         fit_keys_end, x_expr, tolerance, maxiter,
                         timeout_s=_timeout_s,
                         constraints=_active_constraints,
                         fit_conc_keys=fit_conc_keys_end,
-                        fit_titrant_keys=fit_titrant_keys_end)
+                        fit_titrant_keys=fit_titrant_keys_end),
+                    _start_logK, "Fitting parameters…", "_fit_requested")
             elif use_nmr_fit and nmr_cfg_fit["mode"] == "integration":
                 _timeout_s = float(st.session_state.get("fit_timeout", 30))
-                with st.spinner("Fitting parameters…"):
-                    success, fitted_logKs, stats, message = fit_nmr_integration(
+                success, fitted_logKs, stats, message = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_nmr_integration(
                         parsed, network, nmr_data_fit, params, _start_logK,
                         fit_keys_end, x_expr, tolerance, maxiter,
                         timeout_s=_timeout_s,
                         constraints=_active_constraints,
                         fit_conc_keys=fit_conc_keys_end,
-                        fit_titrant_keys=fit_titrant_keys_end)
+                        fit_titrant_keys=fit_titrant_keys_end),
+                    _start_logK, "Fitting parameters…", "_fit_requested")
             elif use_nmr_fit and nmr_cfg_fit["mode"] == "mixed":
                 _timeout_s = float(st.session_state.get("fit_timeout", 30))
-                with st.spinner("Fitting parameters…"):
-                    success, fitted_logKs, stats, message = fit_nmr_mixed(
+                success, fitted_logKs, stats, message = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_nmr_mixed(
                         parsed, network, nmr_data_fit, params, _start_logK,
                         fit_keys_end, x_expr, tolerance, maxiter,
                         timeout_s=_timeout_s,
                         constraints=_active_constraints,
                         fit_conc_keys=fit_conc_keys_end,
-                        fit_titrant_keys=fit_titrant_keys_end)
+                        fit_titrant_keys=fit_titrant_keys_end),
+                    _start_logK, "Fitting parameters…", "_fit_requested")
             else:
-                with st.spinner("Fitting parameters…"):
-                    success, fitted_logKs, stats, message = fit_parameters(
+                success, fitted_logKs, stats, message = _fit_async(_fit_slot, st.session_state.get("_shadow_fit_timeout", st.session_state.get("fit_timeout", 30)), lambda: fit_parameters(
                         parsed, network, exp_data_fit, params, _start_logK,
                         fit_keys_end, x_expr, tolerance, maxiter,
                         use_lbfgsb=_use_lbfgsb, use_neldermead=_use_neldermead,
                         constraints=_active_constraints,
                         fit_conc_keys=fit_conc_keys_end,
-                        fit_titrant_keys=fit_titrant_keys_end)
+                        fit_titrant_keys=fit_titrant_keys_end),
+                    _start_logK, "Fitting parameters…", "_fit_requested")
 
             for kname, fitted_val in fitted_logKs.items():
                 if parsed.get("is_acid_base") and kname != "Kw":
@@ -4489,6 +6069,9 @@ if st.session_state.pop("_fit_requested", False):
                 "wl_max":            (float(wl_max_fit) if use_spectra_fit else None),
                 "tolerance":         float(tolerance),
                 "maxiter":           int(maxiter),
+                # The profile / bootstrap refits reuse the user's Timeout —
+                # without this key they silently fell back to 30 s per refit.
+                "timeout_s":         float(st.session_state.get("fit_timeout", 30)),
                 "constraints":       _active_constraints,
                 "start_logK":        dict(_start_logK),
                 "start_logk":        dict(_start_logK),  # alias for profile dispatcher
@@ -4519,18 +6102,9 @@ if st.session_state.pop("_fit_requested", False):
                 st.session_state["_fit_residuals"] = {}
             _n_evals = stats.get("n_iter", 0)
             _n_fitted = len(fitted_logKs) + len(stats.get("fitted_concs", {})) + len(stats.get("fitted_titrants", {}))
-            if stats.get("timed_out"):
-                _to_s = float(st.session_state.get("fit_timeout", 30))
-                st.session_state["_fit_message"] = ("warning",
-                    f"⏱️ Fit timed out after {_n_evals} evaluations ({_to_s:.0f} s limit) — "
-                    f"showing best result found. Consider increasing Timeout.")
-            elif success:
-                st.session_state["_fit_message"] = ("success",
-                    f"Fit completed! Updated {_n_fitted} parameters. "
-                    f"(tol=1e-{tolerance_log:.0f})")
-            else:
-                st.session_state["_fit_message"] = ("warning",
-                    f"Fit did not fully converge — {message}")
+            st.session_state["_fit_message"] = _fit_end_message(
+                stats, success, message, _n_fitted, tolerance_log,
+                float(st.session_state.get("fit_timeout", 30)))
             st.rerun()
 
         except Exception as e:
@@ -4554,6 +6128,15 @@ pure_shifts = {}
 with col1:
     fig = go.Figure()
 
+    if _itc_placeholder:
+        fig.add_annotation(
+            text="📂 Upload an ITC file to compute the curve",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=13, color="#888888"),
+        )
+        fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False),
+                          height=350)
+        st.plotly_chart(fig, use_container_width=True)
     # Build a color map: label → color (for matching exp dots to traces)
     trace_colors = {}
     for idx, (label, species_list) in enumerate(plot_targets):
@@ -4759,11 +6342,18 @@ with col1:
 
             # Solve M @ c_nonfree(j) = rhs(j) at each point
             conc_nonfree = np.zeros((n_nfree, n_pts))
-            rank = np.linalg.matrix_rank(M_mat)
-            if n_nfree > 0 and rank >= min(n_sig, n_nfree):
-                for j in range(n_pts):
-                    sol = np.linalg.lstsq(M_mat, rhs_mat[:, j], rcond=None)[0]
-                    conc_nonfree[:, j] = np.clip(sol, 0.0, None)
+            if n_nfree > 0:
+                # the model's concentrations at the data points; the shifts correct
+                # them only along the directions they resolve (shift_backcalc_resolved)
+                c_model_nf = np.array([np.interp(exp_x_bc, x_vals, curve.get(sp, np.zeros_like(x_vals)))
+                                       for sp in non_free_sp])
+                sol, k_res = shift_backcalc_resolved(M_mat, rhs_mat, c_model_nf)
+                conc_nonfree = np.clip(sol, 0.0, None)
+                if k_res < n_nfree:
+                    st.session_state["_shift_bc_note_eq"] = (
+                        f"Shift-derived points: the {n_sig} shift signal{'s' if n_sig != 1 else ''} resolve "
+                        f"{k_res} combination{'s' if k_res != 1 else ''} of the {n_nfree} species of the target "
+                        f"({', '.join(non_free_sp)}); along the others the points follow the model.")
 
             # Recover free-species concentration from mass balance of each target
             c_bc_eq_shift = {}
@@ -4818,7 +6408,7 @@ with col1:
             x_col_header=nmr_data_integ.get("_x_col_header", ""))
         _plot_backcalc_dots(fig, _eqi_full, plot_y_names,
                             parsed.get("variables", {}), network["all_species"],
-                            trace_colors, label_suffix=_nmr_suffix_integ,
+                            trace_colors, label_suffix=_nmr_suffix_integ, symbol="circle-open",
                             excl_rows=_nmr_excl_intersection(nmr_data_integ))
 
     elif (nmr_cfg_integ is not None and
@@ -4835,11 +6425,11 @@ with col1:
         bc_pre = _nmr_integration_backCalc(
             integ_data_pre, n_H_list_pre[:n_integ_pre], params, network, x_expr, parsed,
             x_col_header=nmr_data_integ.get("_x_col_header", ""))
-        _bc_pre_pairs = {sp_p: (x_p, c_bc_p) for sp_p, (x_p, c_bc_p) in bc_pre.items()}
+        _bc_pre_pairs = bc_pre        # as returned: it carries its common grid for the plot
         _nmr_suffix_pre = "(NMR/integration)" if nmr_cfg_integ.get("mode") == "mixed" else "(NMR)"
         _plot_backcalc_dots(fig, _bc_pre_pairs, plot_y_names,
                             parsed.get("variables", {}), network["all_species"],
-                            trace_colors, label_suffix=_nmr_suffix_pre,
+                            trace_colors, label_suffix=_nmr_suffix_pre, symbol="circle-open",
                             excl_rows=_nmr_excl_intersection(nmr_data_integ))
 
     # ── UV-Vis spectra back-calculated concentrations ───────────
@@ -4878,6 +6468,39 @@ with col1:
                                 excl_rows=st.session_state.get("_outliers_spectra", set()),
                                 bc_tag="__uvvis_bc__")
 
+    # ── ITC back-calculated concentration dots on main plot ─────
+    _itc_stats_mp = st.session_state.get("_fit_stats", {})
+    _itc_raw_mp   = st.session_state.get("_itc_raw")
+    if _itc_stats_mp.get("fit_mode") == "itc" and _itc_raw_mp is not None:
+        _x_inj_mp  = _itc_stats_mp.get("x_inj", np.array([]))
+        _C_back_mp = _itc_stats_mp.get("C_back", None)
+        _proxy_sp  = _itc_stats_mp.get("rxn_proxy_sp", [])
+        _itc_excl_mp = st.session_state.get("_outliers_itc", set())
+        if _C_back_mp is not None and len(_x_inj_mp) > 0:
+            for _j, _sp in enumerate(_proxy_sp):
+                if _sp not in trace_colors:
+                    continue
+                _col_bc = trace_colors[_sp]
+                _x_bc = [_x_inj_mp[i] for i in range(len(_x_inj_mp)) if i not in _itc_excl_mp]
+                _y_bc = [float(_C_back_mp[i, _j]) for i in range(len(_x_inj_mp)) if i not in _itc_excl_mp]
+                _x_excl = [_x_inj_mp[i] for i in range(len(_x_inj_mp)) if i in _itc_excl_mp]
+                _y_excl = [float(_C_back_mp[i, _j]) for i in range(len(_x_inj_mp)) if i in _itc_excl_mp]
+                if _x_bc:
+                    fig.add_trace(go.Scatter(
+                        x=_x_bc, y=_y_bc, mode="markers",
+                        name=f"{_sp} (ITC)",
+                        customdata=[[f"_itc_{_sp}", i] for i, _ in enumerate(_x_bc)],
+                        marker=dict(color=_col_bc, size=7, symbol="circle",
+                                    line=dict(width=1, color="white")),
+                    ))
+                if _x_excl:
+                    fig.add_trace(go.Scatter(
+                        x=_x_excl, y=_y_excl, mode="markers",
+                        name=f"_outlier_itc_{_sp}", showlegend=False,
+                        marker=dict(color=_col_bc, size=7, symbol="circle-open",
+                                    line=dict(width=1.5, color=_col_bc)),
+                    ))
+
     _eq_y_label   = _infer_y_label(plot_y_names, parsed, network)
     _eq_rangemode = None if _has_log_units(plot_y_names, parsed, network) else "tozero"
     _eq_yaxis = dict(title=_eq_y_label)
@@ -4910,6 +6533,8 @@ with col1:
                                             if not c.startswith("_")]):
         st.rerun()
     _outlier_bar("eq_main", "_outliers_main", "_outliers_nmr", "_outliers_spectra")
+    if st.session_state.get("_shift_bc_note_eq"):
+        st.caption(st.session_state.pop("_shift_bc_note_eq"))
     _pub_download_button(fig, "equilibrium_main", y_label=_eq_y_label)
     st.session_state["_current_figure"] = fig
     st.session_state.pop("_eq_snapshot_data", None)
@@ -5199,6 +6824,308 @@ with col1:
         _pub_download_button(fig_nmr, "equilibrium_nmr", y_label="Δδ [ppm]")
 
 
+    # ── ITC Thermogram plot ───────────────────────────────────────
+    _itc_raw_plot = st.session_state.get("_itc_raw")
+    if _itc_raw_plot is not None:
+        _itc_power = _itc_raw_plot.get("power_ucal_s")
+        _itc_time  = _itc_raw_plot.get("time_s")
+        _itc_q_exp_plot = st.session_state.get("_itc_q_exp", np.array([]))
+        _itc_starts_plot = _itc_raw_plot.get("inj_start_idx", [])
+        _itc_bl_plot     = st.session_state.get("_itc_baselines", np.zeros(len(_itc_starts_plot)))
+        _itc_vols_plot   = _itc_raw_plot.get("inj_vols_uL", [])
+        _itc_excl_plot   = st.session_state.get("_outliers_itc", set())
+        _itc_stats_plot  = st.session_state.get("_fit_stats", {})
+
+        if _itc_power is not None and len(_itc_time) > 0:
+            fig_itc = go.Figure()
+
+            # Raw power trace
+            fig_itc.add_trace(go.Scatter(
+                x=_itc_time, y=_itc_power, mode="lines",
+                name="Power (µcal/s)",
+                line=dict(color="#7c9eff", width=1.2),
+                showlegend=True,
+            ))
+
+            # Injection markers (vertical lines)
+            for _im, _si in enumerate(_itc_starts_plot):
+                if _si < len(_itc_time):
+                    _t_inj = float(_itc_time[_si])
+                    fig_itc.add_vline(
+                        x=_t_inj, line_width=1,
+                        line_dash="dot", line_color="#555570",
+                    )
+
+            # Linear baseline segments per injection
+            _itc_post_seg = st.session_state.get(
+                "_itc_post_baselines", np.zeros(len(_itc_starts_plot)))
+            for _im in range(len(_itc_starts_plot)):
+                _s = _itc_starts_plot[_im]
+                _e = (_itc_starts_plot[_im + 1] if _im + 1 < len(_itc_starts_plot)
+                      else len(_itc_time))
+                if _s < len(_itc_time) and _e <= len(_itc_time) and _e > _s:
+                    _pre_v  = float(_itc_bl_plot[_im]) if _im < len(_itc_bl_plot) else 0.0
+                    _post_v = float(_itc_post_seg[_im]) if _im < len(_itc_post_seg) else _pre_v
+                    fig_itc.add_trace(go.Scatter(
+                        x=[_itc_time[_s], _itc_time[_e - 1]],
+                        y=[_pre_v, _post_v],
+                        mode="lines",
+                        line=dict(color="#fbbf24", width=1, dash="dash"),
+                        showlegend=False, hoverinfo="skip",
+                    ))
+
+            # Integrated heats as dots on a secondary y-axis
+            # Place dots at injection midpoints, x = time midpoint of window
+            if len(_itc_q_exp_plot) > 0:
+                _itc_dot_t = []
+                _itc_dot_q = []
+                _itc_dot_orig_idx = []  # original injection indices for customdata
+                _itc_dot_q_excl = []
+                _itc_dot_t_excl = []
+                for _ii in range(len(_itc_q_exp_plot)):
+                    # _ii=0 is the dummy injection (@1); real injections start at _ii=1 (@2+)
+                    _si2 = _itc_starts_plot[_ii + 1] if (_ii + 1) < len(_itc_starts_plot) else None
+                    _ei2 = (_itc_starts_plot[_ii + 2] if (_ii + 2) < len(_itc_starts_plot)
+                            else len(_itc_time))
+                    if _si2 is not None and _si2 < len(_itc_time):
+                        _t_mid = float((_itc_time[_si2] + _itc_time[min(_ei2 - 1, len(_itc_time)-1)]) / 2)
+                    else:
+                        _t_mid = 0.0
+                    _real_idx = _ii - 1  # index into real injections (q_exp[1:])
+                    if _ii == 0 or _real_idx in _itc_excl_plot:
+                        # dummy (_ii==0) always hollow; user-excluded real injections also hollow
+                        _itc_dot_t_excl.append(_t_mid)
+                        _itc_dot_q_excl.append(float(_itc_q_exp_plot[_ii]))
+                    else:
+                        _itc_dot_t.append(_t_mid)
+                        _itc_dot_q.append(float(_itc_q_exp_plot[_ii]))
+                        _itc_dot_orig_idx.append(_real_idx)  # index into real injections
+
+                if _itc_dot_t:
+                    fig_itc.add_trace(go.Scatter(
+                        x=_itc_dot_t, y=_itc_dot_q, mode="markers",
+                        name="q (µcal)", yaxis="y2",
+                        customdata=[[_itc_dot_orig_idx[i]] for i in range(len(_itc_dot_t))],
+                        marker=dict(color="#00CC96", size=8, symbol="circle",
+                                    line=dict(width=1, color="white")),
+                        hovertemplate="injection %{customdata[0]}<br>q = %{y:.3f} µcal<extra></extra>",
+                    ))
+                if _itc_dot_t_excl:
+                    fig_itc.add_trace(go.Scatter(
+                        x=_itc_dot_t_excl, y=_itc_dot_q_excl, mode="markers",
+                        name="_itc_excl", yaxis="y2", showlegend=False,
+                        marker=dict(color="#00CC96", size=8, symbol="circle-open",
+                                    line=dict(width=1.5, color="#00CC96")),
+                    ))
+
+                # Theoretical q(i) line after fitting
+                if _itc_stats_plot.get("fit_mode") == "itc":
+                    _q_theo_plot = _itc_stats_plot.get("q_theo", np.array([]))
+                    _x_inj_t    = _itc_stats_plot.get("x_inj", np.array([]))
+                    if len(_q_theo_plot) > 0 and len(_x_inj_t) > 0:
+                        # Re-use same time midpoints for non-excluded injections
+                        _all_t_mids = []
+                        for _ii in range(1, len(_itc_q_exp_plot)):  # skip dummy (_ii=0)
+                            _si2 = (_itc_starts_plot[_ii + 1]
+                                    if (_ii + 1) < len(_itc_starts_plot) else None)
+                            _ei2 = (_itc_starts_plot[_ii + 2]
+                                    if (_ii + 2) < len(_itc_starts_plot) else len(_itc_time))
+                            if _si2 is not None and _si2 < len(_itc_time):
+                                _all_t_mids.append(float(
+                                    (_itc_time[_si2] + _itc_time[min(_ei2 - 1, len(_itc_time)-1)]) / 2))
+                            else:
+                                _all_t_mids.append(0.0)
+                        # _all_t_mids[j] = time of real injection j (0-indexed)
+                        _incl_idx = [i for i in range(len(_itc_q_exp_plot) - 1) if i not in _itc_excl_plot]
+                        _theo_t   = [_all_t_mids[i] for i in _incl_idx if i < len(_all_t_mids)]
+                        _theo_q   = [float(_q_theo_plot[j]) for j, i in enumerate(_incl_idx)
+                                     if j < len(_q_theo_plot)]
+                        if _theo_t:
+                            fig_itc.add_trace(go.Scatter(
+                                x=_theo_t, y=_theo_q, mode="lines+markers",
+                                name="q (calc)", yaxis="y2",
+                                line=dict(color="#EF553B", width=2),
+                                marker=dict(color="#EF553B", size=5),
+                            ))
+
+            fig_itc.update_layout(
+                height=380,
+                margin=dict(l=40, r=60, t=40, b=60),
+                xaxis=dict(title="Time [s]"),
+                yaxis=dict(title="Power [µcal/s]"),
+                yaxis2=dict(title="q [µcal]", overlaying="y", side="right",
+                            showgrid=False),
+                template="plotly_dark",
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="top", y=-0.15,
+                            xanchor="center", x=0.5),
+                title=dict(text="ITC Thermogram — click an injection dot to exclude/restore",
+                           font=dict(size=13), x=0.5),
+            )
+            _itc_ver_plot = st.session_state.get("_outlier_ver__outliers_itc", 0)
+            _itc_event = st.plotly_chart(
+                fig_itc, width="stretch",
+                on_select="rerun", selection_mode="points",
+                key=f"_itc_chart_{_itc_ver_plot}",
+            )
+            # Outlier toggle for ITC injection dots
+            if _itc_event and _itc_event.get("selection", {}).get("points"):
+                for _pt in _itc_event["selection"]["points"]:
+                    _cd = _pt.get("customdata")
+                    if _cd and len(_cd) >= 1:
+                        _inj_i = int(_cd[0])
+                        _s_itc = st.session_state.setdefault("_outliers_itc", set())
+                        _s_itc.discard(_inj_i) if _inj_i in _s_itc else _s_itc.add(_inj_i)
+                        _bump_outlier_ver("_outliers_itc")
+                        # Re-integrate with current baselines
+                        _bl_now = st.session_state.get("_itc_baselines",
+                                  np.zeros(len(_itc_starts_plot)))
+                        _post_now = st.session_state.get("_itc_post_baselines",
+                                             _bl_now)
+                        st.session_state["_itc_q_exp"] = integrate_with_baselines(
+                            _itc_raw_plot, _bl_now, _post_now)
+                        st.rerun()
+
+            # Outlier bar
+            _itc_n_excl = len(st.session_state.get("_outliers_itc", set()))
+            if _itc_n_excl == 0:
+                st.caption("🖱️ Click an injection dot to flag it as an outlier and exclude it from fitting")
+            else:
+                _col_obar1, _col_obar2 = st.columns([4, 1])
+                with _col_obar1:
+                    st.caption(f"⚠️ {_itc_n_excl} injection(s) excluded from fitting "
+                               "— click a hollow dot to restore it")
+                with _col_obar2:
+                    if st.button("✕ Clear all", key="_itc_clear_outliers"):
+                        st.session_state.pop("_outliers_itc", None)
+                        _bump_outlier_ver("_outliers_itc")
+                        st.rerun()
+
+            # ── Baseline adjustment UI ────────────────────────────
+            with st.expander("⚙️ Adjust per-injection baselines", expanded=False):
+                st.caption("**Pre** = power level before injection; "
+                           "**Post** = power level after peak recovery. "
+                           "A linear baseline is drawn between them. "
+                           "Adjust and click **Re-integrate**.")
+                _bl_edit      = list(_itc_bl_plot)
+                _itc_post_plot = st.session_state.get(
+                    "_itc_post_baselines",
+                    np.zeros(len(_itc_starts_plot)))
+                _bl_post_edit = list(_itc_post_plot)
+                _n_inj_ui = len(_itc_starts_plot)
+
+                # Header row
+                _hc = st.columns([1, 3, 3])
+                _hc[0].caption("**Inj**")
+                _hc[1].caption("**Pre (µcal/s)**")
+                _hc[2].caption("**Post (µcal/s)**")
+
+                for _im in range(1, _n_inj_ui):  # skip dummy (index 0)
+                    _rc = st.columns([1, 3, 3])
+                    _rc[0].caption(f"#{_im}")
+                    with _rc[1]:
+                        _pre_new = st.number_input(
+                            f"pre_{_im}", label_visibility="collapsed",
+                            value=float(_bl_edit[_im]) if _im < len(_bl_edit) else 0.0,
+                            step=0.001, format="%.4f",
+                            key=f"_itc_bl_pre_{_im}",
+                        )
+                        _bl_edit[_im] = _pre_new
+                    with _rc[2]:
+                        _post_new = st.number_input(
+                            f"post_{_im}", label_visibility="collapsed",
+                            value=float(_bl_post_edit[_im]) if _im < len(_bl_post_edit) else 0.0,
+                            step=0.001, format="%.4f",
+                            key=f"_itc_bl_post_{_im}",
+                        )
+                        _bl_post_edit[_im] = _post_new
+
+                if st.button("Re-integrate", key="_itc_reintegrate"):
+                    _bl_arr      = np.array(_bl_edit)
+                    _post_arr    = np.array(_bl_post_edit)
+                    st.session_state["_itc_baselines"]      = _bl_arr
+                    st.session_state["_itc_post_baselines"] = _post_arr
+                    st.session_state["_itc_q_exp"] = integrate_with_baselines(
+                        _itc_raw_plot, _bl_arr, _post_arr)
+                    # Clear old fit stats since data changed
+                    st.session_state.pop("_fit_stats", None)
+                    st.rerun()
+
+            # ITC publication figure: custom two-panel layout
+            try:
+                from datetime import datetime as _dt2
+                _itc_stats_pub = st.session_state.get("_fit_stats", {})
+                _itc_pre_pub   = st.session_state.get("_itc_baselines",
+                                   np.zeros(len(_itc_starts_plot)))
+                _itc_post_pub  = st.session_state.get("_itc_post_baselines",
+                                   _itc_pre_pub)
+                _itc_eq_pub    = st.session_state.get("_itc_eq_times",
+                                   np.zeros(len(_itc_q_exp_plot)))
+
+                # x_inj_all: molar-ratio values for ALL injections (len = n_q)
+                # x_inj: only included injections — wrong length, use x_inj_all
+                _itc_x_pub = _itc_stats_pub.get("x_inj_all")
+                if _itc_x_pub is None:
+                    _itc_x_pub = _itc_stats_pub.get("x_inj")  # fallback
+
+                # dH per mol for each injection (from fit stats)
+                _itc_dH_pub   = _itc_stats_pub.get("dH_per_inj")
+                _itc_qcalc    = _itc_stats_pub.get("q_theo")
+
+                # Fitted curve for the isotherm
+                _itc_curve_x  = _itc_stats_pub.get("curve_x")
+                _itc_curve_y  = _itc_stats_pub.get("curve_dH")
+
+                # Compute dH_norm from real injections (q_exp[1:], skip dummy at [0])
+                # so it aligns with x_inj_all (real injections only).
+                _itc_vols_pub = np.array(_itc_raw_plot.get("inj_vols_uL", []))
+                _itc_Hst_pub  = float(_itc_raw_plot.get("syringe_conc_mM", 5.0))
+                _itc_dH_data_pub = np.array([
+                    float(_itc_q_exp_plot[i+1]) /
+                    max(_itc_Hst_pub * _itc_vols_pub[i+1]/1000.0, 1e-12) / 1000.0
+                    if (i+1) < len(_itc_vols_pub) and (i+1) < len(_itc_q_exp_plot) else float("nan")
+                    for i in range(len(_itc_q_exp_plot) - 1)
+                ])
+                _itc_dH_theo_pub  = _itc_stats_pub.get("dH_theo_norm")     # kcal/mol fit
+
+                _itc_pub_bytes = _itc_pub_figure_bytes(
+                    raw=_itc_raw_plot,
+                    q_exp=_itc_q_exp_plot[1:],  # skip dummy
+                    pre_baselines=_itc_pre_pub,
+                    post_baselines=_itc_post_pub,
+                    eq_times_s=_itc_eq_pub,
+                    x_vals=_itc_x_pub,
+                    q_calc=_itc_qcalc,
+                    excl_set=_itc_excl_plot,
+                    dH_per_mol=_itc_dH_data_pub,
+                    dH_calc_curve_x=_itc_x_pub,
+                    dH_calc_curve_y=_itc_dH_theo_pub,
+                    x_label=x_expr,
+                )
+                _ts2 = _dt2.now().strftime("%Y%m%d_%H%M%S")
+                st.download_button(
+                    "📐 Publication figure (pdf)",
+                    data=_itc_pub_bytes,
+                    file_name=f"itc_pub_{_ts2}.pdf",
+                    mime="application/pdf",
+                    key="_pubfig_itc",
+                )
+            except Exception as _epub:
+                st.caption(f"Export failed: {_epub}")
+
+    # ── Custom Python script: run on request, show the latest output ──────
+    def _py_context():
+        return pyscript.EquilibristContext(
+            parsed=parsed, network=network, params=params, logK=logK_vals,
+            curve=curve, x=x_vals, x_label=x_label, xmax=float(xmax),
+            data={"nmr": st.session_state.get("_nmr_data", {}) or {},
+                  "conc": st.session_state.get("_exp_data", {}) or {},
+                  "spectra": st.session_state.get("_spectra_data", {}) or {}},
+            fit_stats=st.session_state.get("_fit_stats", {}) or {}, st_module=st,
+            main_fig=fig)
+    pyscript.render_output(_py_context)
+
+
 with col2:
     # ── Show fit message from previous run ───────
     _fit_msg = st.session_state.pop("_fit_message", None)
@@ -5230,25 +7157,25 @@ with col2:
     _fc1, _fc2 = st.columns(2)
     with _fc1:
         fit_tolerance_log = _num_input(
-            "Tol (−log)", key="fit_tolerance_log", default=6.0, step=0.5, format="%.1f"
+            "Tol (−log)", key="fit_tolerance_log", default=3.0, step=0.5, format="%.1f",
+            help="Convergence target for the constants, in log K units: the fit is "
+                 "declared converged when the search has narrowed to 10^−Tol in every "
+                 "constant.  The errors on constants are typically 0.01–0.1, so 3–4 is "
+                 "usually enough and much faster; 6 is very tight and is rarely reached "
+                 "before the Timeout.  The message after each fit says how it ended."
         )
     with _fc2:
         fit_timeout = _num_input(
-            "Timeout (s)", key="fit_timeout", default=30, step=5, format="%d"
+            "Timeout (s)", key="fit_timeout", default=30, step=5, format="%d",
+            help="Wall-clock limit for one fit.  When it expires the best point found "
+                 "so far is kept and the message says the fit was not converged."
         )
-
-    # ── Optimizer selection ───────────────────────
-    # Default: both checked → L-BFGS-B first, Nelder-Mead fallback.
-    # User can uncheck one; at least one must remain checked.
-    _oc1, _oc2 = st.columns(2)
-    with _oc1:
-        use_lbfgsb = st.checkbox("L-BFGS-B", key="fit_use_lbfgsb", value=True)
-    with _oc2:
-        use_neldermead = st.checkbox("Nelder-Mead", key="fit_use_neldermead", value=True)
-    # Prevent unchecking both
-    if not use_lbfgsb and not use_neldermead:
-        st.warning("At least one optimizer must be selected.")
-        use_lbfgsb = True
+    fit_refresh = _num_input(
+        "Refresh (s)", key="fit_refresh", default=60, step=5, format="%d",
+        help="While a fit runs, redraw data and model at the best constants found so far "
+             "every this many seconds, under the progress bar (0 = off).  Each redraw costs "
+             "one model evaluation.  NMR fits and the global fit for now."
+    )
 
     _fit_conc_keys_btn = [root for root in
                           (cname[:-1] if cname.endswith("0") else cname
@@ -5256,20 +7183,89 @@ with col2:
                           if st.session_state.get(f"fit_conc_{root}", False)]
     _fit_titrant_keys_btn = [tkey for tkey in titrant_keys
                              if st.session_state.get(f"fit_titrant_mM_{tkey}", False)]
-    fit_enabled = has_exp_data and (len(fit_keys) > 0 or
+    _has_itc_data_btn = (st.session_state.get("_itc_raw") is not None and
+                          len(st.session_state.get("_itc_q_exp", [])) > 0)
+    fit_enabled = (has_exp_data or _has_itc_data_btn) and (len(fit_keys) > 0 or
                                     len(_fit_conc_keys_btn) > 0 or
                                     len(_fit_titrant_keys_btn) > 0)
-    if st.button("🔧 Fit Parameters", disabled=not fit_enabled):
-        if fit_enabled:
-            # Snapshot user-set fit prefs into shadow keys so st.rerun()
-            # cannot lose them via Streamlit's widget-state cleanup
-            for _pref in ("fit_tolerance_log", "fit_timeout"):
+    _g_why = []
+    _g_ready = eqtabs.collect_experiments(st.session_state, _g_why)
+    _multi = len(st.session_state.get("_tabs") or []) > 1
+    if _multi:
+        st.session_state.setdefault("_global_weighted", True)
+        st.checkbox("Weight tabs by their own fit", key="_global_weighted",
+                    help="Each tab's objective is rescaled to its own misfit (re-estimated after each "
+                         "optimiser pass), so a titration the model fits worse cannot outvote a clean "
+                         "one.  Untick for a plain sum of the tabs' objectives.")
+        _share_shifts_checkbox(_g_ready)
+    # NOT disabled=not fit_enabled. The fit checkboxes live in fragments, so
+    # ticking one does not rerun the main script - fit_enabled would still
+    # hold its previous value and the button would stay greyed out, with no
+    # way to press it to trigger the rerun that would enable it. Clicking a
+    # button always reruns the whole app, so fit_enabled is recomputed from
+    # session_state at that moment and the guard below is authoritative.
+    _fb1, _fb2 = st.columns(2)
+    with _fb1:
+        if st.button("🔧 Fit Parameters", width="stretch"):
+            if fit_enabled:
+                # Snapshot user-set fit prefs into shadow keys so st.rerun()
+                # cannot lose them via Streamlit's widget-state cleanup
+                for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+                    if _pref in st.session_state:
+                        st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+                st.session_state["_fit_requested"] = True
+                st.rerun()
+            else:
+                st.info("Tick at least one 'fit' box (K, concentration, titrant "
+                        "or q_offset) and load experimental data first.")
+    with _fb2:
+        if _multi and st.button("🌐 Global fit (all tabs)", width="stretch",
+                                help="One fit across every tab that has data and a ticked constant.  "
+                                     "Constants with the same name share one value; concentrations stay "
+                                     "per tab; each tab's bounds and constraints apply."):
+            if len(_g_ready) >= 2 and not _use_itc_fit:
+                for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+                    if _pref in st.session_state:
+                        st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+                st.session_state["_global_fit_requested"] = True
+                st.rerun()
+            else:
+                st.info("The Global fit needs at least two tabs with data loaded and a 'fit' "
+                        "box ticked.  " + ("  ".join(_g_why) if _g_why else ""))
+    if _multi:
+        st.caption("Tabs in the global fit: " + (", ".join(_lab for _i, _lab, _fa in _g_ready) or "none yet")
+                   + ((".  Left out — " + "; ".join(_g_why)) if _g_why else ""))
+    _hpc_go = hpc_ui.controls("hpc_eq", label="the fit",
+                              submits=[("fit", "this tab's fit")] + ([("global", "the global fit")] if _multi else []))
+    if _hpc_go == "global":
+        if len(_g_ready) >= 2 and not _use_itc_fit:
+            for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
                 if _pref in st.session_state:
                     st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+            st.session_state["_global_fit_hpc"] = "hpc_eq"
+            st.session_state["_global_fit_requested"] = True
+            st.rerun()
+        else:
+            st.info("The Global fit needs at least two tabs with data loaded and a 'fit' "
+                    "box ticked.  " + ("  ".join(_g_why) if _g_why else ""))
+    elif _hpc_go == "fit":
+        if fit_enabled:
+            for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+                if _pref in st.session_state:
+                    st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+            st.session_state["_single_fit_hpc"] = "hpc_eq"
             st.session_state["_fit_requested"] = True
             st.rerun()
         else:
-            st.info("Load experimental data and check parameters to fit.")
+            st.info("Tick at least one 'fit' box (K, concentration, titrant "
+                    "or q_offset) and load experimental data first.")
+    hpc_ui.jobs_panel("hpc_eq", on_result=_hpc_store_fit)
+    if _multi:
+        if st.button("📤 Propagate ticked constants", key="_propagate_btn",
+                     help="Copy the constants ticked here, at the values in their boxes, into every "
+                          "other tab whose script has a constant of the same name.  Only the values "
+                          "move; the other tabs' ticks, bounds, data and scripts stay as they are."):
+            st.info(eqtabs.propagate_ticked(st.session_state, parse_script))
 
     # ── Export Data Button ──────────────────────
     st.subheader("Data Export")
@@ -5322,10 +7318,68 @@ with col2:
     # ── Experimental data ──────────────────────
     st.subheader("Experimental data")
 
+    # ── ITC: the experimental-data uploader below also accepts .itc files ──
+    if "_itc_uploader_nonce" not in st.session_state:
+        st.session_state["_itc_uploader_nonce"] = 0
+    if not IS_KINETICS and _itc_placeholder:
+        st.info("📂 Upload an ITC file below — concentrations and volumes will be set "
+                "automatically from the file header.")
+
+    def _handle_itc_upload(_file):
+        """Read a MicroCal .itc file dropped on the experimental-data uploader."""
+        try:
+            _itc_content = _file.read()
+            _itc_raw_new = parse_itc_file(_itc_content)
+            _itc_q_new, _itc_pre, _itc_post, _itc_eq = auto_integrate(_itc_raw_new)
+            # auto_integrate returns q_ucal (dummy at [0]) and pre_bl[1:]
+            # (n_total-1 values). Prepend the pre-eq window value so
+            # _itc_pre_full has n_total elements — needed for the baseline
+            # editor which loops over range(1, len(starts)).
+            _itc_pre_full  = np.concatenate([[_itc_pre[0]  if len(_itc_pre)  > 0 else 0.0], _itc_pre])
+            _itc_post_full = np.concatenate([[_itc_post[0] if len(_itc_post) > 0 else 0.0], _itc_post])
+            st.session_state["_itc_raw"]            = _itc_raw_new
+            st.session_state["_itc_q_exp"]          = _itc_q_new
+            st.session_state["_itc_baselines"]      = _itc_pre_full   # pre (for thermogram display)
+            st.session_state["_itc_post_baselines"] = _itc_post_full
+            st.session_state["_itc_eq_times"]       = _itc_eq
+            st.session_state.pop("_outliers_itc", None)
+            st.session_state.pop("_fit_stats", None)
+            # Pre-fill concentrations from file header
+            _cell_mM = _itc_raw_new.get("cell_conc_mM")
+            _syr_mM  = _itc_raw_new.get("syringe_conc_mM")
+            _temp_c  = _itc_raw_new.get("temperature_C", 25.0)
+            # Write cell conc to first $concentrations entry
+            _first_cname = (list(parsed.get("concentrations", {}).keys()) or [None])[0]
+            if _first_cname is not None and _cell_mM is not None:
+                _first_root = _first_cname[:-1] if _first_cname.endswith("0") else _first_cname
+                st.session_state[f"_pending_conc_{_first_root}"] = float(_cell_mM)
+            # Write syringe conc to first $titrant entry
+            _first_tkey = (list(parsed.get("titrant", {}).keys()) or [None])[0]
+            if _first_tkey is not None and _syr_mM is not None:
+                st.session_state[f"_pending_titrant_mM_{_first_tkey}"] = float(_syr_mM)
+            # Auto-set xmax to last injection equivalents (approx)
+            if _cell_mM and _syr_mM and _cell_mM > 0:
+                _n_real = max(0, len(_itc_q_new) - 1)  # exclude dummy
+                _total_vol_mL = sum(v / 1000.0 for v in _itc_raw_new["inj_vols_uL"][1:])
+                _approx_equiv = (_syr_mM * _total_vol_mL) / (
+                    _cell_mM * float(_itc_raw_new.get("cell_vol_mL", ITC200_CELL_VOLUME_ML)))
+                st.session_state["_pending_xmax"] = float(
+                    np.ceil(_approx_equiv * 10) / 10)
+            st.session_state["_itc_filename"] = _file.name
+            st.session_state["_exp_uploader_nonce"] += 1
+            st.rerun()
+        except Exception as _itc_e:
+            st.error(f"Could not read ITC file: {_itc_e}")
+
+
     if st.button("↺ Reset experimental data"):
         for k in list(st.session_state.keys()):
             if (k.startswith("_exp") or k.startswith("_nmr") or
                     k.startswith("_spectra") or k.startswith("_fit") or
+                    k.startswith("_itc_raw") or k.startswith("_itc_q_exp") or
+                    k.startswith("_itc_baselines") or k.startswith("_itc_post_baselines") or
+                    k.startswith("_itc_eq_times") or k.startswith("_itc_filename") or
+                    k.startswith("_outliers_itc") or
                     k.startswith("_pending_logK") or k == "_fit_requested" or
                     k == "_input_filename"):
                 del st.session_state[k]
@@ -5353,7 +7407,7 @@ with col2:
         _col_a_hint = "column A = volume added (mL)"
 
     if parsed.get("spectra") is not None:
-        _uploader_label = "Upload experimental data (.xlsx)"
+        _uploader_label = "Upload experimental data (.xlsx, or a MicroCal .itc file)"
         _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; row 1 = wavelengths (nm); body = absorbance"
     elif nmr_cfg is not None:
         if nmr_cfg["mode"] == "integration":
@@ -5361,18 +7415,31 @@ with col2:
                        f"{len(nmr_cfg.get('n_H_list', []))} signals")
         else:
             st.caption(f"NMR mode: **{nmr_cfg['mode']}** — targets: {', '.join(nmr_cfg['targets'])}")
-        _uploader_label = "Upload experimental data (.xlsx)"
+        _mm = _pinned_shift_mismatch(nmr_cfg, st.session_state.get("_nmr_data"))
+        if _mm:
+            _sp_mm, _off_mm, _n_mm, _same_sign = _mm
+            st.warning(f"The shifts pinned for **{_sp_mm}** (sheet 2) differ from the shifts observed at the "
+                       f"first titration point by {_off_mm:+.3f} ppm (median over {_n_mm} columns"
+                       f"{', same sign on every column' if _same_sign else ''}), i.e. the data and the "
+                       "pinned sheet are not referenced alike.  The fit works with shifts relative to the "
+                       "first point, so the result may not change, but the pinned values are then off by "
+                       "that amount: re-reference the data or the sheet.")
+        _uploader_label = "Upload experimental data (.xlsx, or a MicroCal .itc file)"
         _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; columns B+ = NMR observables"
     else:
-        _uploader_label = "Upload experimental data (.xlsx)"
+        _uploader_label = "Upload experimental data (.xlsx, or a MicroCal .itc file)"
         _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; columns B+ = species concentrations (mM)"
 
+    if not IS_KINETICS:
+        _uploader_hint += " — or drop a MicroCal .itc thermogram for ITC mode"
     st.caption(_uploader_hint)
     _uploaded = st.file_uploader(
-        _uploader_label, type=["xlsx"],
+        _uploader_label, type=(["xlsx"] if IS_KINETICS else ["xlsx", "itc"]),
         key=f"_exp_uploader_{st.session_state['_exp_uploader_nonce']}",
     )
-    if _uploaded is not None:
+    if _uploaded is not None and _uploaded.name.lower().endswith(".itc"):
+        _handle_itc_upload(_uploaded)           # routes by file type
+    elif _uploaded is not None:
         try:
             _raw_bytes = _uploaded.read()
             # Capture raw bytes + filename in session_state so the
@@ -5424,6 +7491,23 @@ with col2:
 
     if st.session_state.get("_input_filename"):
         st.markdown(f"<span style='background:#1a6bbf;color:white;font-weight:bold;padding:3px 10px;border-radius:12px;font-size:0.82rem'>📄 {st.session_state['_input_filename']}</span>", unsafe_allow_html=True)
+    if not IS_KINETICS:
+        _itc_loaded = st.session_state.get("_itc_raw")
+        if _itc_loaded is not None:
+            _itc_fname = st.session_state.get("_itc_filename", "")
+            st.markdown(f"<span style='background:#2d6a4f;color:white;font-weight:bold;"
+                        f"padding:3px 10px;border-radius:12px;font-size:0.82rem'>"
+                        f"📡 {_itc_fname}</span>", unsafe_allow_html=True)
+            _itc_n_inj = max(0, len(st.session_state.get("_itc_q_exp", [])) - 1)  # exclude dummy
+            _itc_temp  = _itc_loaded.get("temperature_C", 25.0)
+            st.caption(f"Loaded: {_itc_n_inj} injections · {_itc_temp:.1f} °C · "
+                       f"cell {_itc_loaded.get('cell_conc_mM', '?'):.4f} mM · "
+                       f"syringe {_itc_loaded.get('syringe_conc_mM', '?'):.4f} mM")
+            if st.button("↺ Clear ITC data", key="_itc_clear"):
+                for _k in ["_itc_raw","_itc_q_exp","_itc_baselines","_itc_filename",
+                           "_outliers_itc","_fit_stats"]:
+                    st.session_state.pop(_k, None)
+                st.rerun()
 
     # Show summary of what's loaded
     if parsed.get("spectra") is not None:
@@ -5449,7 +7533,87 @@ with col2:
         fit_mode_disp = fit_stats.get("fit_mode", "")
 
         # ── Warnings stay OUTSIDE the collapsible (always visible) ────
-        if fit_mode_disp == "spectra":
+        if fit_mode_disp == "itc":
+            # ── ITC statistics ──────────────────────────────────
+            if fit_stats.get("timed_out"):
+                st.warning("⏱️ **ITC fit timed out** — showing best result found.")
+            st.write(f"• R² = {fit_stats.get('r_squared', 0):.4f}")
+            st.write(f"• RMSE = {fit_stats.get('rmse', 0):.3f} µcal")
+            st.write(f"• Data points: {fit_stats.get('n_points', 0)} injections")
+            if fit_stats.get("n_points", 0) > fit_stats.get("n_params", 0):
+                _rchi2_itc = fit_stats["ssr"] / (fit_stats["n_points"] - fit_stats["n_params"])
+                st.write(f"• Reduced χ² = {_rchi2_itc:.3e}")
+            st.write(f"• q_offset = {fit_stats.get('q_offset', 0):.4f} µcal")
+            if fit_stats.get("n_iter"):
+                st.write(f"• Evaluations: {fit_stats['n_iter']}")
+
+            # ── Fitted constants table ───────────────────────────────
+            _dH_vals = fit_stats.get("dH_values", {})
+            _dH_errs = fit_stats.get("dH_errors", {})
+            _pv_itc  = fit_stats.get("param_values", {})
+            _pe_itc  = fit_stats.get("param_errors", {})
+            if _pv_itc or _dH_vals:
+                st.write("**Fitted constants:**")
+                _rows_itc = []
+                for kn, val in _pv_itc.items():
+                    err = _pe_itc.get(kn)
+                    k_lin   = 10.0 ** val
+                    err_lin = k_lin * 2.302585 * err if err is not None else None
+                    _rows_itc.append({
+                        "Parameter": kn,
+                        "log P":  f"{val:.2f}",
+                        "±log P": f"± {err:.2f}" if err is not None else "n/a",
+                        "P":      f"{k_lin:.2e}",
+                        "±P":     f"± {err_lin:.2e}" if err_lin is not None else "n/a",
+                    })
+                # ΔH omitted here — shown in thermodynamics table below
+                for root, mM in fit_stats.get("fitted_concs", {}).items():
+                    err = _pe_itc.get(root)
+                    _rows_itc.append({
+                        "Parameter": root,
+                        "log P": "—", "±log P": "—",
+                        "P": f"{mM:.2e} mM",
+                        "±P": f"± {err:.2e} mM" if err is not None else "n/a",
+                    })
+                if _rows_itc:
+                    st.dataframe(pd.DataFrame(_rows_itc).set_index("Parameter"),
+                                 width="stretch")
+
+            # ── Thermodynamics table ─────────────────────────────────────
+            if _pv_itc and _dH_vals:
+                import math as _math
+                _T_itc = float(parsed.get("temperature_K", 298.15))
+                _R_itc = 1.987e-3  # kcal/(mol·K)
+                _thermo_rows = []
+                for kn, val in _pv_itc.items():
+                    _err_K  = _pe_itc.get(kn)
+                    _dH     = _dH_vals.get(kn, float("nan"))
+                    _dH_err = _dH_errs.get(kn)
+                    _dG     = -_R_itc * _T_itc * _math.log(10) * val
+                    _dG_err = _R_itc * _T_itc * _math.log(10) * _err_K if _err_K is not None else None
+                    _dS     = (_dH - _dG) / _T_itc if _T_itc > 0 else float("nan")
+                    # error on ΔS = sqrt(σ_ΔH² + σ_ΔG²) / T
+                    _dS_err = (_math.sqrt(_dH_err**2 + _dG_err**2) / _T_itc
+                               if (_dH_err is not None and _dG_err is not None) else None)
+                    _TdS     = _T_itc * _dS
+                    _TdS_err = _T_itc * _dS_err if _dS_err is not None else None
+                    _thermo_rows.append({
+                        "Reaction": kn,
+                        "ΔG°":  f"{_dG:.2f}",
+                        "±ΔG°": f"± {_dG_err:.2f}" if _dG_err is not None else "n/a",
+                        "ΔH°":  f"{_dH:.2f}",
+                        "±ΔH°": f"± {_dH_err:.2f}" if _dH_err is not None else "n/a",
+                        "ΔS°":  f"{_dS * 1000:.2f}",
+                        "±ΔS°": f"± {_dS_err * 1000:.2f}" if _dS_err is not None else "n/a",
+                        "TΔS°": f"{_TdS:.2f}",
+                        "±TΔS°":f"± {_TdS_err:.2f}" if _TdS_err is not None else "n/a",
+                    })
+                if _thermo_rows:
+                    st.write(f"**Thermodynamics ({_T_itc:.2f} K):**")
+                    st.caption("Energy terms ΔG, ΔH and TΔS in kcal/mol, ΔS in cal/mol·K")
+                    st.dataframe(pd.DataFrame(_thermo_rows).set_index("Reaction"),
+                                 width="stretch")
+        elif fit_mode_disp == "spectra":
             if fit_stats.get("timed_out"):
                 st.warning(
                     "⏱️ **Fit timed out** — showing best parameters found within "
@@ -5477,6 +7641,7 @@ with col2:
         # hierarchy as "Show residual diagnostics".
         @_fragment
         def _stats_eq_frag():
+            _diag_scope_switch("_fit_args_eq")
             if st.checkbox("🔢 Show fit statistics",
                            value=False, key="_show_stats_eq",
                            help="R², RMSE, reduced χ², information "
@@ -5788,8 +7953,9 @@ with col2:
                              "well-determined parameter; flat regions "
                              "= unidentifiable.")
                     _prof = None
+                    _prof_fixed = {}
                     if _show_prof:
-                        _fa = st.session_state.get("_fit_args_eq")
+                        _fa = _diag_fa(st.session_state.get("_fit_args_eq"))
                         if not _fa:
                             st.info("Click **Fit** first to enable "
                                     "the parameter profile.")
@@ -5801,8 +7967,10 @@ with col2:
                                 key="_prof_span_eq")
                             _p_npts = col_b.number_input(
                                 "Grid points (odd)", min_value=5,
-                                max_value=51, value=11, step=2,
+                                max_value=201, value=11, step=2,
                                 key="_prof_npts_eq")
+                            (_pk_K, _pk_c, _pk_t, _prof_fixed, _pk_tag,
+                             _pk_default) = _profile_param_picker("eq", fit_stats, _fa)
                             _prof_par = st.checkbox(
                                 "Parallel (use all cores)",
                                 value=False, key="_prof_par_eq",
@@ -5810,6 +7978,7 @@ with col2:
                                      "in parallel via joblib.  Speeds up "
                                      "large profiles roughly linearly "
                                      "with core count.")
+                            _hpc_go_prof_eq = hpc_ui.controls("prof_eq", label="the 1D profile")
                             _prof_jobs = -1 if _prof_par else 1
                             # Cache key intentionally omits the fitted
                             # ``param_values`` tuple — see kinetics
@@ -5818,12 +7987,15 @@ with col2:
                             # tuple was fragile across JSON save/load).
                             _cache_key = ("_prof_cache_eq",
                                           float(_p_span), int(_p_npts))
+                            if not _pk_default:      # a custom selection gets its own cache entry
+                                _cache_key = _cache_key + (_pk_tag,)
                             _cached = st.session_state.get(_cache_key)
                             if _cached is not None:
                                 _prof = _cached
                             else:
                                 if st.button("Compute profile",
-                                             key="_prof_btn_eq"):
+                                             key="_prof_btn_eq",
+                                             disabled=not (_pk_K or _pk_c or _pk_t)) or _hpc_go_prof_eq:
                                     _bar = st.progress(0.0,
                                         text="Computing profile…")
                                     def _cb(f, m):
@@ -5834,24 +8006,39 @@ with col2:
                                             pass
                                     try:
                                         _fa_eq_prof = dict(_fa)
-                                        _fa_eq_prof["kind"] = "eq"
+                                        if _fa_eq_prof.get("kind") != "global":
+                                            _fa_eq_prof["kind"] = "eq"
+                                        # Seed every refit from the FITTED values and use a small
+                                        # initial simplex: the refits start next to the optimum.
+                                        _seed1d = dict(_fa_eq_prof.get("start_logK") or _fa_eq_prof.get("start_logk") or {})
+                                        for _n, _v in (fit_stats.get("param_values", {}) or {}).items():
+                                            try: _seed1d[_n] = float(_v)
+                                            except Exception: pass
+                                        _fa_eq_prof["start_logK"] = _seed1d
+                                        _fa_eq_prof["start_logk"] = dict(_seed1d)
+                                        _fa_eq_prof["simplex_step"] = 0.15
                                         _prof = compute_rmse_profile(
                                             _fa_eq_prof,
-                                            fit_stats.get("param_values", {}),
+                                            _pk_K,
                                             span=float(_p_span),
                                             n_pts=int(_p_npts),
-                                            fitted_concs_mM=fit_stats.get("fitted_concs"),
-                                            fitted_titrants_mM=fit_stats.get("fitted_titrants"),
+                                            fitted_concs_mM=_pk_c,
+                                            fitted_titrants_mM=_pk_t,
                                             n_jobs=_prof_jobs,
                                             progress_callback=_cb)
                                         _write_tuple_cache(_cache_key, _prof)
                                         _bar.empty()
+                                    except hpc_ui.CapturedCall as _hpc_cc:
+                                        _bar.empty()
+                                        hpc_ui.handle_capture(_hpc_cc, "prof_eq", "1D RMSE profile",
+                                                              context={"ck": list(_cache_key)})
                                     except Exception as _pe:
                                         _bar.empty()
                                         st.error(f"Profile failed: {_pe}")
+                            hpc_ui.jobs_panel("prof_eq", on_result=_hpc_store_tuple_cache)
                     render_diagnostics_panel(fit_stats, _res_eq,
                                              key="diag_eq",
-                                             rmse_profile=_prof)
+                                             rmse_profile=_profile_display(_prof, _prof_fixed))
 
                     # ── 2D RMSE profile (pairwise) — equilibrium ─────
                     _show_p2d_e = _indented_checkbox(
@@ -5864,7 +8051,7 @@ with col2:
                              "valleys = strong pairwise correlation; "
                              "round wells = independently identified.")
                     if _show_p2d_e:
-                        _fa_e_for2d = st.session_state.get("_fit_args_eq")
+                        _fa_e_for2d = _diag_fa(st.session_state.get("_fit_args_eq"))
                         if not _fa_e_for2d:
                             st.info("Click **Fit** first to enable "
                                     "the 2D profile.")
@@ -5888,9 +8075,22 @@ with col2:
                                     if _v > 0:
                                         _cands[_n] = float(np.log10(_v))
                                 except Exception: pass
+                            # Constants that were held FIXED in the last fit are offered too:
+                            # the refit engine pins both scanned parameters anyway, so a
+                            # fixed constant can be scanned against a fitted one while every
+                            # other fitted parameter is re-optimised at each grid point.
+                            _fixed_cands = {}
+                            _slk2d = (_fa_e_for2d.get("start_logK")
+                                      or _fa_e_for2d.get("start_logk") or {})
+                            for _n, _v in _slk2d.items():
+                                if _n in _cands or _n == "Kw": continue
+                                try: _fixed_cands[_n] = float(_v)
+                                except Exception: pass
+                            _cands.update(_fixed_cands)
+                            _lbl2d = lambda _n: (f"{_n} (fixed)" if _n in _fixed_cands else _n)
                             _names = list(_cands.keys())
                             if len(_names) < 2:
-                                st.info("Need at least 2 fitted "
+                                st.info("Need at least 2 "
                                         "parameters to build a 2D "
                                         "profile.")
                             else:
@@ -5898,15 +8098,25 @@ with col2:
                                     _p1_e, _p2_e = _names[0], _names[1]
                                     st.caption(f"Auto-selected: "
                                                f"**{_p1_e}** vs **{_p2_e}** "
-                                               "(only two fitted).")
+                                               "(only two available).")
                                 else:
                                     c1, c2 = st.columns(2)
                                     _p1_e = c1.selectbox(
                                         "X-axis parameter", _names,
-                                        index=0, key="_p2d_p1_eq")
+                                        index=0, key="_p2d_p1_eq",
+                                        format_func=_lbl2d)
                                     _p2_e = c2.selectbox(
                                         "Y-axis parameter", _names,
-                                        index=1, key="_p2d_p2_eq")
+                                        index=1, key="_p2d_p2_eq",
+                                        format_func=_lbl2d)
+                                _fx_sel = [_n for _n in (_p1_e, _p2_e) if _n in _fixed_cands]
+                                if _fx_sel:
+                                    st.caption("Held fixed in the last fit: " + ", ".join(
+                                        f"**{_n}** = {_fixed_cands[_n]:.2f}" for _n in _fx_sel) +
+                                        ". The map is centred on that value, which is not an "
+                                        "optimum — look for where the RMSE minimum actually "
+                                        "falls. All other fitted parameters are refit at each "
+                                        "grid point.")
                                 c_sx, c_sy, c_np = st.columns(3)
                                 _sx_e = c_sx.number_input(
                                     "Span X (log ±)", min_value=0.1,
@@ -5918,7 +8128,7 @@ with col2:
                                     key="_p2d_sy_eq")
                                 _np_e = c_np.number_input(
                                     "Grid (per axis, odd)",
-                                    min_value=5, max_value=31,
+                                    min_value=5, max_value=201,
                                     value=11, step=2,
                                     key="_p2d_np_eq")
                                 _par2_e = st.checkbox(
@@ -5926,6 +8136,7 @@ with col2:
                                     value=True, key="_p2d_par_eq",
                                     help="Strongly recommended — "
                                          "2D scans run n_pts² refits.")
+                                _hpc_go_p2d_eq = hpc_ui.controls("p2d_eq", label="the 2D profile")
                                 _p2d_jobs_e = -1 if _par2_e else 1
                                 if _p1_e == _p2_e:
                                     st.warning("Pick two **different** "
@@ -5944,7 +8155,7 @@ with col2:
                                         _scan2 = None
                                         if st.button(
                                                 "Compute 2D profile",
-                                                key="_p2d_btn_eq"):
+                                                key="_p2d_btn_eq") or _hpc_go_p2d_eq:
                                             _bar2 = st.progress(0.0,
                                                 text="Computing 2D profile…")
                                             def _cb2(f, m):
@@ -5952,7 +8163,19 @@ with col2:
                                                 except Exception: pass
                                             try:
                                                 _fa_e_prof2 = dict(_fa_e_for2d)
-                                                _fa_e_prof2["kind"] = "eq"
+                                                if _fa_e_prof2.get("kind") != "global":
+                                                    _fa_e_prof2["kind"] = "eq"
+                                                # Seed every grid refit from the FITTED
+                                                # constants (not the pre-fit start) so the
+                                                # remaining parameters converge quickly.
+                                                _seed2d = dict(_fa_e_for2d.get("start_logK")
+                                                               or _fa_e_for2d.get("start_logk") or {})
+                                                for _n, _v in (fit_stats.get("param_values", {}) or {}).items():
+                                                    try: _seed2d[_n] = float(_v)
+                                                    except Exception: pass
+                                                _fa_e_prof2["start_logK"] = _seed2d
+                                                _fa_e_prof2["start_logk"] = dict(_seed2d)
+                                                _fa_e_prof2["simplex_step"] = 0.15
                                                 _scan2 = compute_rmse_profile_2d(
                                                     _fa_e_prof2,
                                                     _p1_e, _cands[_p1_e],
@@ -5963,12 +8186,24 @@ with col2:
                                                     n_pts_y=int(_np_e),
                                                     n_jobs=_p2d_jobs_e,
                                                     progress_callback=_cb2)
+                                                _scan2["p1_fixed"] = bool(_p1_e in _fixed_cands)
+                                                _scan2["p2_fixed"] = bool(_p2_e in _fixed_cands)
                                                 _write_tuple_cache(_ck, _scan2)
                                                 _bar2.empty()
+                                            except hpc_ui.CapturedCall as _hpc_cc:
+                                                _bar2.empty()
+                                                hpc_ui.handle_capture(_hpc_cc, "p2d_eq", "2D RMSE profile",
+                                                                      context={"ck": list(_ck), "p1_fixed": bool(_p1_e in _fixed_cands), "p2_fixed": bool(_p2_e in _fixed_cands)})
                                             except Exception as _e2:
                                                 _bar2.empty()
                                                 st.error(f"2D profile failed: {_e2}")
+                                    hpc_ui.jobs_panel("p2d_eq", on_result=_hpc_store_tuple_cache)
                                     if _scan2 is not None:
+                                        _p2d_noleg = st.checkbox(
+                                            "No legend", value=False, key="_p2d_noleg_eq",
+                                            help="Draw the map without the legend box and the "
+                                                 "note in the corner — for publication, where "
+                                                 "that text goes in the figure caption.")
                                         try:
                                             _fig2 = make_2d_profile_figure(
                                                 _scan2,
@@ -5976,7 +8211,8 @@ with col2:
                                                       f"{_p1_e} vs {_p2_e}",
                                                 param_cov=fit_stats.get("param_cov"),
                                                 cov_names=fit_stats.get("param_cov_names"),
-                                                constraints=_fa_e_for2d.get("constraints"))
+                                                constraints=_fa_e_for2d.get("constraints"),
+                                                show_legend=not _p2d_noleg)
                                             st.pyplot(_fig2, clear_figure=False)
                                             import io as _io
                                             _buf2 = _io.BytesIO()
@@ -5995,6 +8231,7 @@ with col2:
                                         except Exception as _re:
                                             st.error(f"Could not render 2D "
                                                      f"figure: {_re}")
+                    _profile_trace_block("eq", fit_stats)
             _diag_eq_frag()
 
         # ── v2 bootstrap CIs (toggle, in fragment) ───────────────────────
@@ -6006,7 +8243,7 @@ with col2:
                     st.caption("Resamples fit residuals to estimate CIs without "
                                "assuming Gaussian errors. Recommended when "
                                "Shapiro p < 0.05 above. Each iteration is a full refit.")
-                    _fa = st.session_state.get("_fit_args_eq")
+                    _fa = _diag_fa(st.session_state.get("_fit_args_eq"))
                     if not _fa:
                         st.info("Click **Fit** once with the current script and data "
                                 "to enable bootstrap.  (The bootstrap reuses the exact "
@@ -6019,13 +8256,18 @@ with col2:
                                                index=0, key="_bs_mth_eq")
                         _bs_par = st.checkbox("Parallel (use all cores)",
                                               value=False, key="_bs_par_eq")
-                        if st.button("Run bootstrap", key="_bs_run_eq"):
+                        _hpc_go_bs_eq = hpc_ui.controls("bs_eq", label="the bootstrap")
+                        if st.button("Run bootstrap", key="_bs_run_eq") or _hpc_go_bs_eq:
                             _pb = st.progress(0.0, text="Bootstrap running…")
                             _cb = lambda i, N: _pb.progress(min(i / max(N,1), 1.0),
                                                             text=f"Bootstrap {i}/{N}")
                             _jobs = -1 if _bs_par else 1
                             try:
-                                if _fa["use_spectra_fit"]:
+                                if _fa.get("kind") == "global":
+                                    _r = eqglobal.bootstrap_global(
+                                        _fa, n_bootstrap=int(_bs_n), method=_bs_mth,
+                                        n_jobs=_jobs, seed=42, progress_callback=_cb)
+                                elif _fa["use_spectra_fit"]:
                                     _r = ebs.bootstrap_spectra(
                                         _fa["parsed_fit"], _fa["network"], _fa["spectra_data_fit"],
                                         _fa["params"], _fa["start_logK"],
@@ -6076,6 +8318,22 @@ with col2:
                                         fit_conc_keys=_fa["fit_conc_keys"],
                                         fit_titrant_keys=_fa["fit_titrant_keys"],
                                         progress_callback=_cb)
+                                elif _fa.get("use_itc_fit"):
+                                    _r = ebs.bootstrap_itc(
+                                        _fa["parsed_fit"], _fa["network"],
+                                        _fa["itc_q_exp"], _fa["itc_raw"],
+                                        _fa["params"], _fa["start_logK"],
+                                        _fa["fit_keys"], _fa["x_expr"],
+                                        n_bootstrap=int(_bs_n), method=_bs_mth,
+                                        n_jobs=_jobs, seed=42,
+                                        tolerance=_fa["tolerance"],
+                                        maxiter=_fa["maxiter"],
+                                        timeout_s=float(_fa.get("timeout_s", 30.0)),
+                                        constraints=_fa["constraints"],
+                                        fit_conc_keys=_fa["fit_conc_keys"],
+                                        q_offset_fixed=_fa.get("q_offset_fixed"),
+                                        excl_set=_fa.get("excl_set") or set(),
+                                        progress_callback=_cb)
                                 else:
                                     _exp = _fa["exp_data_fit"] or {}
                                     _xcol = _exp.get("_x_col_header", "")
@@ -6093,11 +8351,16 @@ with col2:
                                         progress_callback=_cb)
                                 _pb.empty()
                                 st.session_state["_bs_result_eq"] = _r
+                            except hpc_ui.CapturedCall as _hpc_cc:
+                                _pb.empty()
+                                hpc_ui.handle_capture(_hpc_cc, "bs_eq", "Bootstrap",
+                                                      context={})
                             except Exception as _bse:
                                 _pb.empty()
                                 import traceback as _tb_bs
                                 st.error(f"Bootstrap failed: {_bse}")
                                 st.caption(_tb_bs.format_exc())
+                        hpc_ui.jobs_panel("bs_eq", on_result=_hpc_store_state("_bs_result_eq"))
                         _br = st.session_state.get("_bs_result_eq")
                         if _br and _br.get("ci"):
                             st.caption(f"{_br['n_success']}/{_br['n_bootstrap']} bootstrap "
@@ -6160,14 +8423,15 @@ with col2:
                                     "spectra; all observed species at "
                                     "one time for kinetics) at one "
                                     "x-value, simultaneously."):
-                    _fa_jk = st.session_state.get("_fit_args_eq")
+                    _fa_jk = _diag_fa(st.session_state.get("_fit_args_eq"))
                     if not _fa_jk:
                         st.info("Click **Fit** once with the current "
                                 "script and data to enable jackknife.")
                     else:
                         _jk_par = st.checkbox("Parallel (use all cores)",
                                                value=False, key="_jk_par_eq")
-                        if st.button("Run jackknife", key="_jk_run_eq"):
+                        _hpc_go_jk_eq = hpc_ui.controls("jk_eq", label="the jackknife")
+                        if st.button("Run jackknife", key="_jk_run_eq") or _hpc_go_jk_eq:
                             _pb_jk = st.progress(0.0,
                                                   text="Jackknife running…")
                             _cb_jk = lambda i, N: _pb_jk.progress(
@@ -6178,7 +8442,10 @@ with col2:
                                 "fit_timeout", 30))
                             try:
                                 _jr = None
-                                if _fa_jk.get("use_spectra_fit"):
+                                if _fa_jk.get("kind") == "global":
+                                    _jr = eqglobal.jackknife_global(
+                                        _fa_jk, n_jobs=_jobs_jk, progress_callback=_cb_jk)
+                                elif _fa_jk.get("use_spectra_fit"):
                                     _jr = ebs.jackknife_spectra(
                                         _fa_jk["parsed_fit"], _fa_jk["network"],
                                         _fa_jk["spectra_data_fit"],
@@ -6236,6 +8503,21 @@ with col2:
                                         fit_conc_keys=_fa_jk["fit_conc_keys"],
                                         fit_titrant_keys=_fa_jk["fit_titrant_keys"],
                                         progress_callback=_cb_jk)
+                                elif _fa_jk.get("use_itc_fit"):
+                                    _jr = ebs.jackknife_itc(
+                                        _fa_jk["parsed_fit"], _fa_jk["network"],
+                                        _fa_jk["itc_q_exp"], _fa_jk["itc_raw"],
+                                        _fa_jk["params"], _fa_jk["start_logK"],
+                                        _fa_jk["fit_keys"], _fa_jk["x_expr"],
+                                        n_jobs=_jobs_jk,
+                                        tolerance=_fa_jk["tolerance"],
+                                        maxiter=_fa_jk["maxiter"],
+                                        timeout_s=float(_fa_jk.get("timeout_s", 30.0)),
+                                        constraints=_fa_jk["constraints"],
+                                        fit_conc_keys=_fa_jk["fit_conc_keys"],
+                                        q_offset_fixed=_fa_jk.get("q_offset_fixed"),
+                                        excl_set=_fa_jk.get("excl_set") or set(),
+                                        progress_callback=_cb_jk)
                                 else:
                                     # Default to CONC mode for equilibrium fits
                                     _jr = ebs.jackknife_conc(
@@ -6253,6 +8535,10 @@ with col2:
                                         progress_callback=_cb_jk)
                                 if _jr is not None:
                                     st.session_state["_jk_result_eq"] = _jr
+                            except hpc_ui.CapturedCall as _hpc_cc:
+                                _pb_jk.empty()
+                                hpc_ui.handle_capture(_hpc_cc, "jk_eq", "Jackknife",
+                                                      context={})
                             except Exception as _jke:
                                 _pb_jk.empty()
                                 import traceback as _tb_jk
@@ -6261,6 +8547,7 @@ with col2:
                             else:
                                 _pb_jk.empty()
 
+                        hpc_ui.jobs_panel("jk_eq", on_result=_hpc_store_state("_jk_result_eq"))
                         _jr = st.session_state.get("_jk_result_eq")
                         if _jr is not None and not _jr.get("jack_se"):
                             # Result exists but produced no usable
@@ -6370,7 +8657,7 @@ with col2:
                                     "contribution from experimental-prep "
                                     "uncertainty — invisible to the "
                                     "residual-noise bootstrap."):
-                    _fa_mc = st.session_state.get("_fit_args_eq")
+                    _fa_mc = _diag_fa(st.session_state.get("_fit_args_eq"))
                     if not _fa_mc:
                         st.info("Click **Fit** once with the current "
                                 "script and data to enable Monte Carlo.")
@@ -6412,7 +8699,10 @@ with col2:
                                                  f"{_params_mc['V0_mL']:.3g} mL)",
                                                  None))
 
-                        if not _all_inputs:
+                        _mc_is_nmr = bool(_fa_mc.get("use_nmr_fit")) or (
+                            _fa_mc.get("kind") == "global" and any(
+                                (e.get("fa") or {}).get("use_nmr_fit") for e in _fa_mc.get("experiments", [])))
+                        if not _all_inputs and not _mc_is_nmr:
                             st.info("No nuisance parameters to sample "
                                     "— every experimental quantity is "
                                     "already a fit variable.")
@@ -6435,6 +8725,24 @@ with col2:
                                         _specs[f"titrant:{_name}"] = _val / 100.0
                                     elif _kind == "V0_mL":
                                         _specs["V0_mL"]           = _val / 100.0
+                            if _mc_is_nmr:
+                                # Measurement noise on the NMR data itself: each
+                                # iteration also fits a perturbed copy of the data.
+                                _mn1, _mn2 = st.columns(2)
+                                _mc_integ_pct = _mn1.number_input(
+                                    "σ on NMR integrations (%)", min_value=0.0, max_value=50.0,
+                                    value=0.0, step=0.5, key="_mc_sig_eq_nmr_integ", format="%.2f",
+                                    help="Relative error of the peak integrals (per point).  "
+                                         "0 leaves the integrals untouched.")
+                                _mc_shift_ppm = _mn2.number_input(
+                                    "σ on chemical shifts (ppm)", min_value=0.0, max_value=1.0,
+                                    value=0.0, step=0.001, key="_mc_sig_eq_nmr_shift", format="%.4f",
+                                    help="Absolute error of the observed shifts (per point, ppm).  "
+                                         "0 leaves the shifts untouched.")
+                                if _mc_integ_pct > 0:
+                                    _specs["nmr_integ_rel"] = float(_mc_integ_pct) / 100.0
+                                if _mc_shift_ppm > 0:
+                                    _specs["nmr_shift_ppm"] = float(_mc_shift_ppm)
 
                             _ci_n, _ci_p = st.columns([1, 1])
                             _n_mc = _ci_n.number_input(
@@ -6444,6 +8752,7 @@ with col2:
                             _mc_par = _ci_p.checkbox(
                                 "Parallel (use all cores)",
                                 value=False, key="_mc_par_eq")
+                            _hpc_go_mc_eq = hpc_ui.controls("mc_eq", label="the Monte Carlo run")
 
                             if not _specs:
                                 st.warning("All uncertainties are 0 % — "
@@ -6453,7 +8762,7 @@ with col2:
 
                             if st.button("Run Monte Carlo",
                                           key="_mc_run_eq",
-                                          disabled=(not _specs)):
+                                          disabled=(not _specs)) or (_hpc_go_mc_eq and bool(_specs)):
                                 _pb_mc = st.progress(0.0, text="MC running…")
                                 _cb_mc = lambda i, N: _pb_mc.progress(
                                     min(i / max(N, 1), 1.0),
@@ -6461,7 +8770,11 @@ with col2:
                                 _jobs_mc = -1 if _mc_par else 1
                                 try:
                                     _mr = None
-                                    if _fa_mc.get("use_spectra_fit"):
+                                    if _fa_mc.get("kind") == "global":
+                                        _mr = eqglobal.monte_carlo_global(
+                                            _fa_mc, nuisance_specs=_specs, n_iter=int(_n_mc),
+                                            n_jobs=_jobs_mc, progress_callback=_cb_mc)
+                                    elif _fa_mc.get("use_spectra_fit"):
                                         _mr = ebs.monte_carlo_spectra(
                                             _fa_mc["parsed_fit"], _fa_mc["network"],
                                             _fa_mc["spectra_data_fit"],
@@ -6519,6 +8832,22 @@ with col2:
                                             fit_conc_keys=_fa_mc["fit_conc_keys"],
                                             fit_titrant_keys=_fa_mc["fit_titrant_keys"],
                                             progress_callback=_cb_mc)
+                                    elif _fa_mc.get("use_itc_fit"):
+                                        _mr = ebs.monte_carlo_itc(
+                                            _fa_mc["parsed_fit"], _fa_mc["network"],
+                                            _fa_mc["itc_q_exp"], _fa_mc["itc_raw"],
+                                            _fa_mc["params"], _fa_mc["start_logK"],
+                                            _fa_mc["fit_keys"], _fa_mc["x_expr"],
+                                            nuisance_specs=_specs,
+                                            n_iter=int(_n_mc), n_jobs=_jobs_mc,
+                                            tolerance=_fa_mc["tolerance"],
+                                            maxiter=_fa_mc["maxiter"],
+                                            timeout_s=float(_fa_mc.get("timeout_s", 30.0)),
+                                            constraints=_fa_mc["constraints"],
+                                            fit_conc_keys=_fa_mc["fit_conc_keys"],
+                                            q_offset_fixed=_fa_mc.get("q_offset_fixed"),
+                                            excl_set=_fa_mc.get("excl_set") or set(),
+                                            seed=42, progress_callback=_cb_mc)
                                     else:
                                         _mr = ebs.monte_carlo_conc(
                                             _fa_mc["parsed_fit"], _fa_mc["network"], _fa_mc["exp_data_fit"],
@@ -6536,6 +8865,10 @@ with col2:
                                             progress_callback=_cb_mc)
                                     if _mr is not None:
                                         st.session_state["_mc_result_eq"] = _mr
+                                except hpc_ui.CapturedCall as _hpc_cc:
+                                    _pb_mc.empty()
+                                    hpc_ui.handle_capture(_hpc_cc, "mc_eq", "Monte Carlo",
+                                                          context={})
                                 except Exception as _mce:
                                     _pb_mc.empty()
                                     import traceback as _tb_mc
@@ -6544,6 +8877,7 @@ with col2:
                                 else:
                                     _pb_mc.empty()
 
+                            hpc_ui.jobs_panel("mc_eq", on_result=_hpc_store_state("_mc_result_eq"))
                         _mr = st.session_state.get("_mc_result_eq")
                         if _mr is not None and not _mr.get("mc_se"):
                             st.warning(f"Monte Carlo: "
@@ -6611,7 +8945,7 @@ with col2:
                                     "coupling.  3^N grid evaluations — "
                                     "tractable up to ~6–7 selected "
                                     "variables."):
-                    _fa_lst = st.session_state.get("_fit_args_eq")
+                    _fa_lst = _diag_fa(st.session_state.get("_fit_args_eq"))
                     if not _fa_lst:
                         st.info("Click **Fit** once with the current "
                                 "script and data to enable the local "
@@ -6676,6 +9010,7 @@ with col2:
                         _par_lst = _cpar.checkbox(
                             "Parallel (use all cores)",
                             value=True, key="_lst_eq_par")
+                        _hpc_go_lst_eq = hpc_ui.controls("lst_eq", label="the local sensitivity test")
 
                         # Scaling warning + run button
                         _N = len(_selected)
@@ -6701,7 +9036,7 @@ with col2:
                             _can_run = True
 
                         if st.button("Run local sensitivity test",
-                                      key="_lst_eq_run", disabled=not _can_run):
+                                      key="_lst_eq_run", disabled=not _can_run) or (_hpc_go_lst_eq and _can_run):
                             _pb = st.progress(0.0, text="Local sensitivity running…")
                             _cb = lambda i, N: _pb.progress(
                                 min(i / max(N, 1), 1.0),
@@ -6720,6 +9055,10 @@ with col2:
                                     progress_callback=_cb)
                                 if _lr is not None:
                                     st.session_state["_lst_result_eq"] = _lr
+                            except hpc_ui.CapturedCall as _hpc_cc:
+                                _pb.empty()
+                                hpc_ui.handle_capture(_hpc_cc, "lst_eq", "Local sensitivity",
+                                                      context={})
                             except Exception as _le:
                                 _pb.empty()
                                 import traceback as _tb_lst
@@ -6728,7 +9067,10 @@ with col2:
                             else:
                                 _pb.empty()
 
+                        hpc_ui.jobs_panel("lst_eq", on_result=_hpc_store_state("_lst_result_eq"))
                         _lr = st.session_state.get("_lst_result_eq")
+                        if _lr is not None and not _lr.get("f") and _lr.get("best_message"):
+                            st.warning(f"Local sensitivity test: {_lr['best_message']}")
                         if _lr is not None and _lr.get("f"):
                             st.caption(
                                 f"{_lr['n_success']}/{_lr['n_grid']} "
@@ -6815,7 +9157,7 @@ with col2:
                         "(w_A / w_B = exp(ΔAIC / 2)).  Tick **Nested?** when the "
                         "simpler model is a special case of the more complex one "
                         "(e.g. 1:1 vs 1:2 binding) to enable the F-test.")
-                    _fa_eq = st.session_state.get("_fit_args_eq")
+                    _fa_eq = _diag_fa(st.session_state.get("_fit_args_eq"))
                     _alt_script = st.text_area(
                         "Alternative model script",
                         height=180, key="_alt_script_text",
@@ -6991,15 +9333,33 @@ with col2:
             st.write("**Fitted constants:**")
             rows = []
             # log-space parameters (K values)
+            _err_notes = fit_stats.get("param_error_notes", {}) or {}
+            def _nd_text(kname, val, log_space=True):
+                """Cell text for an undetermined error."""
+                if kname not in param_errors:
+                    return "n/a"
+                _nt = _err_notes.get(kname) or {}
+                _kind = _nt.get("kind") if isinstance(_nt, dict) else _nt
+                _sg   = _nt.get("sigma") if isinstance(_nt, dict) else None
+                if _kind == "upper-limit":
+                    if _sg is None: return "n/d (upper limit only)"
+                    return (f"≲ {val + _sg:.2f} (1σ)" if log_space
+                            else f"≲ {10.0 ** (val + _sg):.2e} (1σ)")
+                if _kind == "lower-limit":
+                    if _sg is None: return "n/d (lower limit only)"
+                    return (f"≳ {val - _sg:.2f} (1σ)" if log_space
+                            else f"≳ {10.0 ** (val - _sg):.2e} (1σ)")
+                return "n/d"
             for kname, val in param_values.items():
                 err     = param_errors.get(kname)
                 k_lin   = 10.0 ** val
                 err_lin = k_lin * 2.302585 * err if err is not None else None
+                _nd = _nd_text(kname, val)
                 rows.append({"Parameter": kname,
                              "log P":  f"{val:.2f}",
-                             "±log P": f"± {err:.2f}" if err is not None else "n/a",
+                             "±log P": f"± {err:.2f}" if err is not None else _nd,
                              "P":      f"{k_lin:.2e}",
-                             "±P":     f"± {err_lin:.2e}" if err_lin is not None else "n/a"})
+                             "±P":     f"± {err_lin:.2e}" if err_lin is not None else _nd_text(kname, val, log_space=False)})
             # linear-space concentration parameters (mM)
             for root, mM_val in fitted_concs_eq.items():
                 err_c = param_errors.get(root)
@@ -7018,6 +9378,31 @@ with col2:
                              "±P":     f"± {err_t:.2e} mM" if err_t is not None else "n/a"})
             if rows:
                 st.dataframe(pd.DataFrame(rows).set_index("Parameter"), width='stretch')
+                _undet = [k for k, v in param_errors.items() if v is None]
+                if _undet:
+                    _kind_of = lambda k: ((_err_notes.get(k) or {}).get("kind")
+                                          if isinstance(_err_notes.get(k), dict) else _err_notes.get(k))
+                    _flat  = [k for k in _undet if _kind_of(k) in (None, "flat", "large")]
+                    _upper = [k for k in _undet if _kind_of(k) == "upper-limit"]
+                    _lower = [k for k in _undet if _kind_of(k) == "lower-limit"]
+                    _parts = []
+                    if _flat:
+                        _parts.append("the objective is flat along " + ", ".join(_flat) +
+                                      " (error > 3 log units) — the fitted value is not "
+                                      "meaningful on its own")
+                    if _upper:
+                        _parts.append(", ".join(_upper) + ": the fit does not get worse when the "
+                                      "constant is lowered (it sits at the lower edge of its "
+                                      "search range, or the objective is flat there) — the data "
+                                      "give only an upper limit; the quoted value is the bound, "
+                                      "not a measurement")
+                    if _lower:
+                        _parts.append(", ".join(_lower) + ": the fit does not get worse when the "
+                                      "constant is raised (it sits at the upper edge of its "
+                                      "search range, or the objective is flat there) — the data "
+                                      "give only a lower limit; the quoted value is the bound, "
+                                      "not a measurement")
+                    st.caption("n/d = not determined by the data. " + "; ".join(_parts) + ".")
 
             # ── Free energy table ─────────────────────────────────────────
             if param_values:
@@ -7077,6 +9462,9 @@ with col2:
         _ps_anchored = bool(fit_stats.get("pure_shifts_anchored", False))
         _show_abs    = (not _nmr_noref) or _ps_anchored
         _ps_dfree    = fit_stats.get("delta_free", {}) or {}
+        _ps_und      = fit_stats.get("pure_shift_undetermined", {}) or {}
+        _ps_mf       = fit_stats.get("pure_shift_maxfrac", {}) or {}
+        _ps_pin      = fit_stats.get("pure_shift_pinned", {}) or {}
         if pure_shifts_disp:
             if _show_abs:
                 st.write("**Pure-species chemical shifts (ppm):**")
@@ -7090,6 +9478,11 @@ with col2:
                     df0 = float(_ps_dfree.get(col, 0.0)) if _show_abs else 0.0
                     for sp, dd_val in sp_dict.items():
                         row[sp] = f"{df0 + dd_val:.4f}"
+                        if sp in ((_ps_und.get(tgt) or {}).get(col) or []):
+                            row[sp] = f"({row[sp]})"
+                        elif (sp not in ((_ps_pin.get(tgt) or {}).get(col) or [])
+                              and float(((_ps_mf.get(tgt) or {}).get(col) or {}).get(sp, 1.0)) < 0.10):
+                            row[sp] = f"{row[sp]} *"
                         if sp not in all_sp_cols:
                             all_sp_cols.append(sp)
                     rows_ps.append(row)
@@ -7098,10 +9491,17 @@ with col2:
                 ordered = [c for c in all_sp_cols if c in df_ps.columns]
                 st.dataframe(df_ps[ordered], width='stretch')
                 if _show_abs:
-                    st.caption("Each row = one NMR signal; columns = δ of each pure species (ppm)")
+                    st.caption("Each row = one NMR signal; columns = δ of each pure species (ppm). "
+                               "( ) = species below 2 % of the pool over this titration: its shift is not "
+                               "determined by these data and is held at the free shift (or at the value "
+                               "shared from the other tabs).  * = species below 10 % of the pool: its shift "
+                               "is poorly determined and may absorb misfit; tie it to a related species in "
+                               "$constraints if its value is implausible.")
                 else:
                     st.caption("Each row = one NMR signal; columns = Δδ relative to math reference (ppm). "
                                "Add a `read:` anchor in $nmr to recover absolute δ.")
+
+        _render_pure_shift_comparison(fit_stats)
 
         # ── Mixed mode: summary ──────────────────────────────────────────────
         if fit_mode == "mixed":

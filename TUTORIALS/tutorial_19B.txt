@@ -1,0 +1,16 @@
+$concentrations
+G0
+
+$volumes
+V0
+
+$titrant
+Ht
+
+$reactions
+G + H = GH ; log K1 = 5.0
+
+$plot
+x    = H0/G0
+xmax = 2.4
+y    = G, H, GH

@@ -1,0 +1,21 @@
+$concentrations
+A0 = 2.00 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant
+Bt = 20.0 mM
+
+$equilibria
+A + B = C + D; log K1 = 1.0
+2 A = E; log K2 = 2.0
+
+$plot
+x = B0/A0
+xmax = 3.0
+y = A, B, C, D, E
+
+$nmr
+integration: 6, 3, 1, 3, 1
+standard: 1.00 mM

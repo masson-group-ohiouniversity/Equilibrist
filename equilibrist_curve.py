@@ -6,7 +6,7 @@ from equilibrist_network import compute_variable_curve, _sanitise_pct, _LN_LO, _
 from equilibrist_network import evaluate_variable_expression, resolve_variable_dependencies
 
 __all__ = ['compute_curve', 'evaluate_x_expression', 'convert_exp_x', '_solid_col_header_to_equiv',
-           '_x_per_equiv', '_find_maxEquiv', 'find_equiv_for_x', '_solid_frac_for_tkey', 'compute_single_point']
+           '_x_per_equiv', '_find_maxEquiv', 'find_equiv_for_x', 'params_covering_data', '_solid_frac_for_tkey', 'compute_single_point']
 
 
 def compute_curve(parsed: dict, network: dict, logK_vals: dict, params: dict) -> dict:
@@ -688,3 +688,45 @@ def compute_single_point(equiv, parsed, network, logK_vals, params, target_varia
 
 
 # ─────────────────────────────────────────────
+
+
+def params_covering_data(params: dict, parsed: dict, network: dict, x_expr: str,
+                         v_add_arrays, x_col_header: str = "") -> dict:
+    """A copy of ``params`` whose simulated range reaches every data point.
+
+    The fit functions compare data with the simulated curve by interpolation
+    on the equivalents grid 0..maxEquiv, and maxEquiv comes from the plot's
+    xmax.  A data point beyond that range (a 10-equivalent check point in a
+    titration plotted to 4) was silently compared with the END of the curve,
+    i.e. with the model at xmax and without its own dilution.  Here the range
+    is extended to the last data point (plus 2 %) at the same point density;
+    ``range_extended_to_x`` records the data x that forced it.  ``params`` is
+    returned unchanged when the plotted range already covers the data.
+    """
+    xs = []
+    for v in v_add_arrays:
+        try:
+            x = convert_exp_x(np.asarray(v, dtype=float), x_expr, parsed, params, network,
+                              x_col_header=x_col_header)
+            xs.extend(float(t) for t in np.ravel(x) if np.isfinite(t))
+        except Exception:
+            continue
+    if not xs:
+        return params
+    x_max = max(xs)
+    cur = float(params.get("maxEquiv") or 0.0)
+    try:
+        eq_last = float(find_equiv_for_x(x_max, parsed, params))
+        if not np.isfinite(eq_last) or eq_last <= cur * (1.0 + 1e-6):
+            return params                      # the plotted range already covers the data
+        eq_needed = float(find_equiv_for_x(x_max * 1.02 if x_max > 0 else x_max, parsed, params))
+    except Exception:
+        return params
+    if not np.isfinite(eq_needed) or eq_needed <= cur:
+        return params
+    out = dict(params)
+    n = int(params.get("nPts") or 200)
+    out["nPts"] = int(min(max(n, round(n * eq_needed / max(cur, 1e-9))), 4000))
+    out["maxEquiv"] = eq_needed
+    out["range_extended_to_x"] = float(x_max)
+    return out

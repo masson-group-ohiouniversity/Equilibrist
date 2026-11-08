@@ -1,0 +1,25 @@
+$concentrations
+A0 = 1.00 mM
+
+$volumes
+V0 = 500 uL
+
+$titrant
+Bt = 10.0 mM
+
+$equilibria
+A + B = C + D; log K1 = 1.0
+2 A = E; log K2 = 2.0
+
+$plot
+x = B0/A0
+xmax = 3.0
+y = A, B, C, D, E
+
+$variables
+Host = A + C + 2*E
+Xg = A + 2*E + D
+Yg = B + C
+
+$nmr
+shift: Host, Xg, Yg

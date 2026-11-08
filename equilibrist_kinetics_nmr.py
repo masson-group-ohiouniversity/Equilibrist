@@ -3,10 +3,11 @@
 import re
 import time
 import numpy as np
+import equilibrist_live as _live
 from scipy.optimize import minimize
-from equilibrist_kinetics import compute_kinetics_curve, _collect_all_kinetic_species
+from equilibrist_kinetics import compute_kinetics_curve, _collect_all_kinetic_species, kinetic_param_bounds
 from equilibrist_fit_nmr import _get_species_for_target, _hessian_errors, _resolve_c
-from equilibrist_parser import constraints_penalty
+from equilibrist_parser import constraints_penalty, PenaltyScale, FitTrace, simplex_step, tied_minimize
 from equilibrist_shift_constraints import solve_shifts, get_per_column_bounds
 
 __all__ = ['_build_kinetics_stoich', '_kinetics_nmr_integration_backCalc', 'fit_kinetics_nmr_shifts', 'fit_kinetics_nmr_integration', 'fit_kinetics_nmr_mixed']
@@ -130,14 +131,16 @@ def _kinetics_nmr_integration_backCalc(nmr_data: dict, n_H_list: list,
         entries.append((col, sp, n_H, raw_I, t_arr))
 
     # ── Average I/n_H across duplicate signals of each species ───────────────
-    sp_ratio = {}; sp_t = {}
+    # The duplicate columns of a species need not have the same rows filled
+    # (blank cells where a signal could not be integrated): they are averaged
+    # row by row, over the columns that have a value there.
+    from equilibrist_fit_nmr import _merge_duplicate_integrals, _ratio_on_grid, BackCalc
+    _dups = {}
     for col, sp, n_H, raw_I, t_arr in entries:
-        r = raw_I / n_H
-        if sp not in sp_ratio:
-            sp_ratio[sp] = []; sp_t[sp] = t_arr
-        sp_ratio[sp].append(r)
-    for sp in sp_ratio:
-        sp_ratio[sp] = np.mean(np.vstack(sp_ratio[sp]), axis=0)
+        _dups.setdefault(sp, []).append((t_arr, np.asarray(raw_I, float) / n_H))
+    sp_ratio = {}; sp_t = {}
+    for sp, cols_ in _dups.items():
+        sp_t[sp], sp_ratio[sp] = _merge_duplicate_integrals(cols_)
 
     # ── G-containing species only go into the denominator ────────────────────
     g_sp_stoich = {sp: _effective_stoich(sp)
@@ -145,24 +148,27 @@ def _kinetics_nmr_integration_backCalc(nmr_data: dict, n_H_list: list,
     if not g_sp_stoich:
         return {}   # stoich failed — no back-calc possible
 
-    ref_sp    = next(iter(g_sp_stoich))
-    t_ref_arr = sp_t[ref_sp]
+    # the common grid: every time at which at least one species has an integral
+    t_ref_arr = np.unique(np.concatenate([sp_t[sp] for sp in sp_ratio]))
     n_pts     = len(t_ref_arr)
 
     denom = np.zeros(n_pts)
     for sp, stoich_coeff in g_sp_stoich.items():
-        ratio_on_ref = np.interp(t_ref_arr, sp_t[sp], sp_ratio[sp])
-        denom += stoich_coeff * ratio_on_ref
+        denom += stoich_coeff * _ratio_on_grid(t_ref_arr, sp_t[sp], sp_ratio[sp])
     denom = np.maximum(denom, 1e-20)
 
     G_conc = G0_mM / denom   # mM
 
-    # [Sp](t) = ratio_sp(t) × G_conc(t)  for ALL measured species
-    result = {}
+    # [Sp](t) = ratio_sp(t) × G_conc(t)  for ALL measured species, reported only
+    # where that species was measured (a blank cell is not a data point)
+    result = BackCalc()
+    filled = {}
     for sp, ratio_arr in sp_ratio.items():
-        ratio_on_ref = np.interp(t_ref_arr, sp_t[sp], ratio_arr)
-        c_bc = np.clip(ratio_on_ref * G_conc, 0.0, None)
-        result[sp] = (t_ref_arr, c_bc)
+        at = np.searchsorted(t_ref_arr, sp_t[sp])
+        c_bc = np.clip(ratio_arr * G_conc[at], 0.0, None)
+        result[sp] = (t_ref_arr[at], c_bc)
+        filled[sp] = np.clip(_ratio_on_grid(t_ref_arr, sp_t[sp], ratio_arr) * G_conc, 0.0, None)
+    result.filled = (t_ref_arr, filled)
     return result
 
 
@@ -171,7 +177,7 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
                              tolerance: float, maxiter: int,
                              timeout_s: float = 30.0, constraints=None,
                              fit_conc_keys=None,
-                             *, compute_hessian: bool = True):
+                             *, compute_hessian: bool = True, _objective_only: bool = False):
     """
     Fit rate constants to fast-exchange NMR chemical shift data (kinetics mode).
 
@@ -183,14 +189,9 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
     nmr_cfg      = parsed["nmr"]
     all_kin_sp   = _collect_all_kinetic_species(parsed)
 
-    # Per-K soft bounds: read from equilibria entries (kinetic rxns currently lack bounds)
-    _DEFAULT_LO_K_KN, _DEFAULT_HI_K_KN = -2.0, 14.0
-    _eq_by_kname_kn = {eq["kname"]: eq for eq in parsed.get("equilibria", [])}
-    def _resolve_k_bound_kn(k, attr, default):
-        v = _eq_by_kname_kn.get(k, {}).get(attr)
-        return float(v) if v is not None else float(default)
-    _k_lo_kn = np.array([_resolve_k_bound_kn(k, "logK_lo", _DEFAULT_LO_K_KN) for k in fit_keys])
-    _k_hi_kn = np.array([_resolve_k_bound_kn(k, "logK_hi", _DEFAULT_HI_K_KN) for k in fit_keys])
+    # Soft bounds per constant: pre-equilibria -2..14 (or their "from X to Y"),
+    # rate constants unrestricted beyond the generic |log k| <= 12 penalty
+    _k_lo_kn, _k_hi_kn = kinetic_param_bounds(parsed, fit_keys)
     fake_network = {"all_species": all_kin_sp}
 
     # ── Column → target mapping ───────────────────────────────────────────────
@@ -215,13 +216,15 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
         delta_free[col] = float(col_data["y"][0])
         t_free_val[col] = float(col_data["v_add_mL"][0])
 
+    _t_exp_all = np.unique(np.concatenate([np.asarray(_d["v_add_mL"], dtype=float)
+                                           for _c, _d in nmr_data.items() if not _c.startswith("_")]))
     def _simulate(params_vec):
         lk_v, cd = _unpack_ck(params_vec)
         lk = logk_dict.copy()
         for i, k in enumerate(fit_keys):
             lk[k] = lk_v[i]
         try:
-            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim)
+            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim, t_extra=_t_exp_all)
         except Exception:
             return None
 
@@ -315,7 +318,10 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
             calc = X @ dd
             return dd, calc, float(np.sum((dobs_rel - calc)**2))
 
+    _pscale = PenaltyScale()   # fixed reference for the constraint penalty (see equilibrist_parser)
+    _trace = FitTrace()   # how did the fit end? (see equilibrist_parser)
     def objective(params_vec):
+        _trace(params_vec)
         lk_v, _ = _unpack_ck(params_vec)
         lk = logk_dict.copy()
         for i, k in enumerate(fit_keys):
@@ -338,7 +344,8 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
         for kv, _lo, _hi in zip(lk_v, _k_lo_kn, _k_hi_kn):
             if kv < _lo: bound_penalty += 1e6 * (kv - _lo) ** 2
             elif kv > _hi: bound_penalty += 1e6 * (kv - _hi) ** 2
-        cp = constraints_penalty(constraints or [], lk, ssr_scale=total_ssr)
+        cp = constraints_penalty(constraints or [], lk, ssr_scale=_pscale(total_ssr))
+        _live.notify(lk, total_ssr + cp + bound_penalty)
         return total_ssr + cp + bound_penalty
 
     def data_objective(params_vec):
@@ -407,6 +414,18 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
 
     x0  = np.concatenate([np.array([logk_dict[k] for k in fit_keys]), _x0_c])
     n_p = len(x0)
+
+    # ── Objective handed out for a GLOBAL fit (equilibrist_global) ───────
+    if _objective_only:
+        
+        return {
+            "objective": (lambda t: float(objective(np.asarray(t, dtype=float)))),
+            "data_ssr":  None,
+            "x0": np.asarray(x0, dtype=float),
+            "names": list(fit_keys) + list(fit_conc_keys),
+            "n_log_params": len(fit_keys),
+            "n_data": int(sum(len(np.asarray(nmr_data[c]['y'])) for c in nmr_data if not str(c).startswith('_'))),
+        }
     # Global timer starts here — covers Phase 1 AND main optimisation
     _fit_start = time.time()
 
@@ -420,7 +439,7 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
         _sp1 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                          for i in range(_n_k)])
         try:
-            _r1 = minimize(_phase1_obj_p, x0[:_n_k], method="Nelder-Mead",
+            _r1 = tied_minimize(_phase1_obj_p, x0[:_n_k], names=list(fit_keys), constraints=constraints or [], fixed=logk_dict,
                            options={"maxiter": maxiter//10,
                                     "xatol": tolerance,
                                     "fatol": tolerance * 1e-4,
@@ -429,7 +448,7 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
         except (_TimeoutP1, Exception):
             pass
 
-    _steps = np.array([(1e-9 if maxiter <= 1 else 1.5)] * _n_k + [max(abs(_x0_c[i]) * 0.1, 0.05)
+    _steps = np.array([(1e-9 if maxiter <= 1 else simplex_step(1.5))] * _n_k + [max(abs(_x0_c[i]) * 0.1, 0.05)
                        for i in range(_n_c)])
     init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _steps[i]
                                      for i in range(n_p)])
@@ -445,7 +464,7 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
         return f
 
     try:
-        result = minimize(_obj_timed, x0, method="Nelder-Mead",
+        result = tied_minimize(_obj_timed, x0, names=list(fit_keys) + list(fit_conc_keys), constraints=constraints or [], fixed=logk_dict,
                           options={"maxiter": maxiter, "xatol": tolerance,
                                    "fatol": tolerance * 1e-4, "adaptive": True,
                                    "initial_simplex": init_simplex})
@@ -563,6 +582,7 @@ def fit_kinetics_nmr_shifts(parsed: dict, logk_dict: dict, nmr_data: dict,
     if _to and r2 >= 0.99:
         stats["timed_out"] = False
     _conv = result.success or ssr < 1e-6 or (_to and r2 >= 0.99)
+    stats.update(_trace.summary(result, not getattr(result, "success", True), tolerance))
     return _conv, fitted_logks, stats, "Kinetics NMR shift fit complete"
 
 
@@ -571,7 +591,7 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
                                   tolerance: float, maxiter: int,
                                   timeout_s: float = 30.0, constraints=None,
                                   fit_conc_keys=None,
-                                  *, compute_hessian: bool = True):
+                                  *, compute_hessian: bool = True, _objective_only: bool = False):
     """Fit rate constants to slow-exchange NMR integration data (kinetics mode)."""
     from scipy.optimize import minimize
 
@@ -579,14 +599,9 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
     n_H_list   = nmr_cfg.get("n_H_list", [])
     all_kin_sp = _collect_all_kinetic_species(parsed)
 
-    # Per-K soft bounds: read from equilibria entries (kinetic rxns currently lack bounds)
-    _DEFAULT_LO_K_KN, _DEFAULT_HI_K_KN = -2.0, 14.0
-    _eq_by_kname_kn = {eq["kname"]: eq for eq in parsed.get("equilibria", [])}
-    def _resolve_k_bound_kn(k, attr, default):
-        v = _eq_by_kname_kn.get(k, {}).get(attr)
-        return float(v) if v is not None else float(default)
-    _k_lo_kn = np.array([_resolve_k_bound_kn(k, "logK_lo", _DEFAULT_LO_K_KN) for k in fit_keys])
-    _k_hi_kn = np.array([_resolve_k_bound_kn(k, "logK_hi", _DEFAULT_HI_K_KN) for k in fit_keys])
+    # Soft bounds per constant: pre-equilibria -2..14 (or their "from X to Y"),
+    # rate constants unrestricted beyond the generic |log k| <= 12 penalty
+    _k_lo_kn, _k_hi_kn = kinetic_param_bounds(parsed, fit_keys)
 
     signal_cols = [col for col in nmr_data if not col.startswith("_")]
     if not signal_cols:
@@ -605,17 +620,22 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
         col_to_sp[col] = sp
         col_to_nH[col] = float(n_H_list[idx]) if idx < len(n_H_list) else 1.0
 
+    _t_exp_all = np.unique(np.concatenate([np.asarray(_d["v_add_mL"], dtype=float)
+                                           for _c, _d in nmr_data.items() if not _c.startswith("_")]))
     def _simulate(params_vec):
         lk_v, cd = _unpack_ck(params_vec)
         lk = logk_dict.copy()
         for i, k in enumerate(fit_keys):
             lk[k] = lk_v[i]
         try:
-            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim)
+            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim, t_extra=_t_exp_all)
         except Exception:
             return None
 
+    _pscale = PenaltyScale()   # fixed reference for the constraint penalty (see equilibrist_parser)
+    _trace = FitTrace()   # how did the fit end? (see equilibrist_parser)
     def objective(params_vec, bc_frozen):
+        _trace(params_vec)
         # bc_frozen is fixed for the entire optimizer pass (computed once at the
         # top of each re-fit loop pass from the current x0).  This prevents the
         # moving-target problem: when G0 is free, calling bc(G0_trial) inside the
@@ -637,7 +657,8 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
         for kv, _lo, _hi in zip(lk_v2, _k_lo_kn, _k_hi_kn):
             if kv < _lo: bound_penalty += 1e6 * (kv - _lo) ** 2
             elif kv > _hi: bound_penalty += 1e6 * (kv - _hi) ** 2
-        cp = constraints_penalty(constraints or [], lk, ssr_scale=ssr)
+        cp = constraints_penalty(constraints or [], lk, ssr_scale=_pscale(ssr))
+        _live.notify(lk, ssr + cp + bound_penalty)
         return ssr + cp + bound_penalty
 
     def data_objective(params_vec, bc_frozen):
@@ -723,6 +744,18 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
 
     x0  = np.concatenate([np.array([logk_dict[k] for k in fit_keys]), _x0_c])
     n_p = len(x0)
+
+    # ── Objective handed out for a GLOBAL fit (equilibrist_global) ───────
+    if _objective_only:
+        
+        return {
+            "objective": (lambda t: float(objective(np.asarray(t, dtype=float), _get_bc(np.asarray(t, dtype=float))))),
+            "data_ssr":  None,
+            "x0": np.asarray(x0, dtype=float),
+            "names": list(fit_keys) + list(fit_conc_keys),
+            "n_log_params": len(fit_keys),
+            "n_data": int(sum(len(np.asarray(nmr_data[c]['y'])) for c in nmr_data if not str(c).startswith('_'))),
+        }
     # Global timer starts here — covers Phase 1 AND the re-fit loop
     _global_start  = time.time()
 
@@ -737,7 +770,7 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
         _sp1 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                          for i in range(_n_k)])
         try:
-            _r1 = minimize(_phase1_obj_p, x0[:_n_k], method="Nelder-Mead",
+            _r1 = tied_minimize(_phase1_obj_p, x0[:_n_k], names=list(fit_keys), constraints=constraints or [], fixed=logk_dict,
                            options={"maxiter": maxiter//10,
                                     "xatol": tolerance,
                                     "fatol": tolerance * 1e-4,
@@ -771,7 +804,7 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
         # missed regardless of where x0 sits.  Any smaller fraction is arbitrary and
         # can leave unreachable basins.
         # logK dims are unbounded here; 1.5 is a practical heuristic for log-space.
-        k_steps = np.full(_n_k, (1e-9 if maxiter <= 1 else 1.5))
+        k_steps = np.full(_n_k, (1e-9 if maxiter <= 1 else simplex_step(1.5)))
         c_steps = np.array([_bds_c[i][1] - _bds_c[i][0] for i in range(_n_c)])
         return np.concatenate([k_steps, c_steps]) if _n_c else k_steps
 
@@ -821,7 +854,7 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
             return f
 
         try:
-            result = minimize(_obj_timed, x0, method="Nelder-Mead",
+            result = tied_minimize(_obj_timed, x0, names=list(fit_keys) + list(fit_conc_keys), constraints=constraints or [], fixed=logk_dict,
                               options={"maxiter": maxiter, "xatol": tolerance,
                                        "fatol": tolerance * 1e-4, "adaptive": True,
                                        "initial_simplex": init_simplex})
@@ -925,6 +958,7 @@ def fit_kinetics_nmr_integration(parsed: dict, logk_dict: dict, nmr_data: dict,
     _to = stats["timed_out"]
     if _to and r2 >= 0.99: stats["timed_out"] = False
     _conv = result.success or ssr < 1e-6 or (_to and r2 >= 0.99)
+    stats.update(_trace.summary(result, _any_timed_out, tolerance))
     return _conv, fitted_logks, stats, "Kinetics NMR integration fit complete"
 
 
@@ -934,7 +968,7 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
                             tolerance: float, maxiter: int,
                             timeout_s: float = 30.0, constraints=None,
                             fit_conc_keys=None,
-                            *, compute_hessian: bool = True):
+                            *, compute_hessian: bool = True, _objective_only: bool = False):
     """Fit rate constants to mixed slow+fast exchange NMR data (kinetics mode)."""
     from scipy.optimize import minimize
 
@@ -944,14 +978,9 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
     shift_targets = nmr_cfg.get("targets", [])
     all_kin_sp    = _collect_all_kinetic_species(parsed)
 
-    # Per-K soft bounds: read from equilibria entries (kinetic rxns currently lack bounds)
-    _DEFAULT_LO_K_KN, _DEFAULT_HI_K_KN = -2.0, 14.0
-    _eq_by_kname_kn = {eq["kname"]: eq for eq in parsed.get("equilibria", [])}
-    def _resolve_k_bound_kn(k, attr, default):
-        v = _eq_by_kname_kn.get(k, {}).get(attr)
-        return float(v) if v is not None else float(default)
-    _k_lo_kn = np.array([_resolve_k_bound_kn(k, "logK_lo", _DEFAULT_LO_K_KN) for k in fit_keys])
-    _k_hi_kn = np.array([_resolve_k_bound_kn(k, "logK_hi", _DEFAULT_HI_K_KN) for k in fit_keys])
+    # Soft bounds per constant: pre-equilibria -2..14 (or their "from X to Y"),
+    # rate constants unrestricted beyond the generic |log k| <= 12 penalty
+    _k_lo_kn, _k_hi_kn = kinetic_param_bounds(parsed, fit_keys)
     fake_network  = {"all_species": all_kin_sp}
     _shift_constraints = parsed.get("shift_constraints", []) or []
 
@@ -1020,13 +1049,15 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
     # noref flag (default False = legacy auto-pin to ref)
     _nmr_noref = bool(nmr_cfg.get("noref", False))
 
+    _t_exp_all = np.unique(np.concatenate([np.asarray(_d["v_add_mL"], dtype=float)
+                                           for _c, _d in nmr_data.items() if not _c.startswith("_")]))
     def _simulate(params_vec):
         lk_v, cd = _unpack_ck(params_vec)
         lk = logk_dict.copy()
         for i, k in enumerate(fit_keys):
             lk[k] = lk_v[i]
         try:
-            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim)
+            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim, t_extra=_t_exp_all)
         except Exception:
             return None
 
@@ -1074,7 +1105,10 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
                 total += float(np.sum(dobs_rel**2))
         return total
 
+    _pscale = PenaltyScale()   # fixed reference for the constraint penalty (see equilibrist_parser)
+    _trace = FitTrace()   # how did the fit end? (see equilibrist_parser)
     def objective(params_vec, bc_frozen):
+        _trace(params_vec)
         lk_v, _ = _unpack_ck(params_vec)
         lk = logk_dict.copy()
         for i, k in enumerate(fit_keys):
@@ -1096,7 +1130,8 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
         for kv, _lo, _hi in zip(lk_v, _k_lo_kn, _k_hi_kn):
             if kv < _lo: bound_penalty += 1e6 * (kv - _lo) ** 2
             elif kv > _hi: bound_penalty += 1e6 * (kv - _hi) ** 2
-        cp = constraints_penalty(constraints or [], lk, ssr_scale=total_ssr)
+        cp = constraints_penalty(constraints or [], lk, ssr_scale=_pscale(total_ssr))
+        _live.notify(lk, total_ssr + cp + bound_penalty)
         return total_ssr + cp + bound_penalty
 
     def data_objective(params_vec, bc_frozen):
@@ -1177,13 +1212,25 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
             integ_data, n_H_list[:n_integ], p_patched, all_kin_sp) or bc
 
     def _make_simplex_steps():
-        k_steps = np.full(_n_k, (1e-9 if maxiter <= 1 else 1.5))
+        k_steps = np.full(_n_k, (1e-9 if maxiter <= 1 else simplex_step(1.5)))
         c_steps = np.array([_bds_c[i][1] - _bds_c[i][0] for i in range(_n_c)])
         return np.concatenate([k_steps, c_steps]) if _n_c else k_steps
 
     x0  = np.concatenate([np.array([logk_dict[k] for k in fit_keys]), _x0_c])
     n_p = len(x0)
 
+
+    # ── Objective handed out for a GLOBAL fit (equilibrist_global) ───────
+    if _objective_only:
+        
+        return {
+            "objective": (lambda t: float(objective(np.asarray(t, dtype=float), _get_bc_mixed(np.asarray(t, dtype=float))))),
+            "data_ssr":  None,
+            "x0": np.asarray(x0, dtype=float),
+            "names": list(fit_keys) + list(fit_conc_keys),
+            "n_log_params": len(fit_keys),
+            "n_data": int(sum(len(np.asarray(nmr_data[c]['y'])) for c in nmr_data if not str(c).startswith('_'))),
+        }
     # Global timer starts here — covers Phase 1 AND the re-fit loop
     _global_start  = time.time()
 
@@ -1198,7 +1245,7 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
         _sp1 = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                          for i in range(_n_k)])
         try:
-            _r1 = minimize(_phase1_obj_p, x0[:_n_k], method="Nelder-Mead",
+            _r1 = tied_minimize(_phase1_obj_p, x0[:_n_k], names=list(fit_keys), constraints=constraints or [], fixed=logk_dict,
                            options={"maxiter": maxiter//10, "xatol": tolerance,
                                     "fatol": tolerance * 1e-4, "adaptive": True,
                                     "initial_simplex": _sp1})
@@ -1243,7 +1290,7 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
             return f
 
         try:
-            result = minimize(_obj_timed, x0, method="Nelder-Mead",
+            result = tied_minimize(_obj_timed, x0, names=list(fit_keys) + list(fit_conc_keys), constraints=constraints or [], fixed=logk_dict,
                               options={"maxiter": maxiter, "xatol": tolerance,
                                        "fatol": tolerance * 1e-4, "adaptive": True,
                                        "initial_simplex": init_simplex})
@@ -1466,4 +1513,5 @@ def fit_kinetics_nmr_mixed(parsed: dict, logk_dict: dict, nmr_data: dict,
     _r2v = stats["r_squared"]
     if timed_out and _r2v >= 0.99: stats["timed_out"] = False
     _conv = result.success or ssr < 1e-6 or (timed_out and _r2v >= 0.99)
+    stats.update(_trace.summary(result, timed_out, tolerance))
     return _conv, fitted_logks, stats, "Kinetics mixed NMR fit complete"

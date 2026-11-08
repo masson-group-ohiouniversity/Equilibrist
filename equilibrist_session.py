@@ -244,10 +244,12 @@ def _capture_widget_state(session_state) -> dict:
         # ``_specs`` is empty.
         "_mc_sig_",
         # 1-D RMSE profile
-        "_prof_span_", "_prof_npts_", "_prof_par_",
+        "_prof_span_", "_prof_npts_", "_prof_par_", "_prof_sel_",
         # 2-D RMSE colormap
         "_p2d_p1_", "_p2d_p2_", "_p2d_sx_", "_p2d_sy_",
         "_p2d_np_", "_p2d_par_",
+        # Profile trace
+        "_ptr_x_", "_ptr_span_", "_ptr_np_", "_ptr_sel_", "_ptr_par_",
         # Masson ξ (LST): step, parallel, per-variable checkboxes,
         # variable multiselect
         "_lst_kin_step", "_lst_eq_step",
@@ -301,7 +303,7 @@ def _serialize_tuple_caches(session_state) -> list:
     Returns a list of ``[encoded_key, value]`` pairs; consumed by
     the load handler in ``app.py``.
     """
-    prefixes = ("_prof_cache_", "_p2d_cache_", "_lst_cache_")
+    prefixes = ("_prof_cache_", "_p2d_cache_", "_ptr_cache_", "_lst_cache_")
     registry = session_state.get("_tuple_cache_registry")
     if not isinstance(registry, (list, tuple)):
         return []

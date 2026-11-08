@@ -1,0 +1,17 @@
+$concentrations
+G0
+
+$volumes
+V0
+
+$titrant
+Ht
+
+$reactions
+G + H = GHin ; log Kin = 5.0
+G + H = GHex ; log Kex = 3.54
+
+$plot
+x    = H0/G0
+xmax = 2.4
+y    = G, H, GHin, GHex

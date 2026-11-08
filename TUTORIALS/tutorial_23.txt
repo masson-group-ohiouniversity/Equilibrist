@@ -1,0 +1,30 @@
+# ITC experiment: host G (cell) + guest H (syringe), iTC200, T = 25 C
+# File: tutorial_23_input.itc
+# Three-step network with one ENDOTHERMIC step (GH + H = GH2).
+#
+# Cell:    G = 0.3 mM
+# Syringe: H = 5.0 mM
+# Cell volume: 0.2039 mL (from the .itc header)
+# 28 injections of 1.2 uL after a 0.4 uL dummy, 180 s apart.
+
+$concentrations
+G0 = 0.3 mM
+
+$volumes
+V0 = 0.2039 mL
+
+$titrant
+Ht = 5.0 mM
+
+$temperature
+T = 25 C
+
+$reactions
+G + H = GH ; log K1 = 5.0
+GH + H = GH2 ; log K2 = 4.0
+GH2 + G = G2H2 ; log K3 = 4.0
+
+$plot
+x = H0/G0
+xmax = 3.5
+y = G, H, GH, GH2, G2H2

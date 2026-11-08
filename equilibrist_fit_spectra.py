@@ -2,12 +2,13 @@
 """equilibrist_fit_spectra.py"""
 import time
 import numpy as np
+import equilibrist_live as _live
 from scipy.optimize import minimize
 from scipy.optimize import nnls as _nnls
 from equilibrist_network import solve_equilibria_general
 from equilibrist_fit_nmr import _hessian_errors
 from equilibrist_curve import convert_exp_x, _solid_col_header_to_equiv
-from equilibrist_parser import constraints_penalty
+from equilibrist_parser import constraints_penalty, PenaltyScale, FitTrace, simplex_step, tied_minimize
 
 __all__ = ['_compute_at_volumes', '_optimal_spectral_range', '_identifiability_check', 'fit_spectra']
 
@@ -234,7 +235,8 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
                 constraints=None,
                 fit_conc_keys=None, fit_titrant_keys=None,
                 allow_negative_eps: bool = False,
-                *, compute_hessian: bool = True):
+                *, compute_hessian: bool = True,
+                _objective_only: bool = False):
     """
     Fit equilibrium constants to UV-Vis absorbance data using Beer-Lambert law.
 
@@ -470,6 +472,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
             lk[j] = logk_trial[i]
         return lk
 
+    _trace = FitTrace()   # how did the fit end? (see equilibrist_parser)
     def _run_fit(A_fit, known_E_rows=None):
         """Run Nelder-Mead with timeout and best-so-far tracking.
         If fit_conc_keys / fit_titrant_keys are set, concentrations are appended
@@ -552,7 +555,9 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
 
         n_k = len(fit_keys)
 
+        _pscale = PenaltyScale()   # fixed reference for the constraint penalty (see equilibrist_parser)
         def objective(trial):
+            _trace(trial)
             logk_trial = trial[:n_k]
             # Soft-wall penalty: grows quadratically outside per-parameter bounds
             penalty = 0.0
@@ -604,8 +609,9 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
 
             E = _solve_E(C, A_fit, known_E_rows)
             f  = float(np.sum((A_fit - C @ E) ** 2))
-            cp = constraints_penalty(constraints or [], {**logK_vals, **lk_dict}, ssr_scale=f)
+            cp = constraints_penalty(constraints or [], {**logK_vals, **lk_dict}, ssr_scale=_pscale(f))
             f_total = f + cp
+            _live.notify({**logK_vals, **lk_dict}, f_total)
             if f_total < best_tracker["f"]:
                 best_tracker["f"] = f_total
                 best_tracker["x"] = trial.copy()
@@ -618,15 +624,27 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
         n_p = len(fit_keys)
         bounds = [(_k_lo[i], _k_hi[i]) for i in range(n_p)] + _bounds_conc + _bounds_titrant
 
+        if _objective_only:
+            # handed out for a GLOBAL fit (equilibrist_global); the caller owns the timeout
+            _n_data_hint = int(np.sum([np.size(spectra_data.get("A", [])) ]) ) if spectra_data.get("A") is not None else 0
+            return {
+                "objective": (lambda t: float(objective(np.asarray(t, dtype=float)))),
+                "data_ssr": None,
+                "x0": np.asarray(x0, dtype=float),
+                "names": list(fit_keys) + list(_conc_names) + list(_titrant_names),
+                "n_log_params": len(fit_keys),
+                "n_data": _n_data_hint,
+            }
+
         # Phase 1: warm-start logK before joint optimisation
         if _n_conc > 0 and n_k > 0:
             def _phase1_obj_spfit(lk_vec):
                 full = np.concatenate([lk_vec, x0[n_k:]])
                 return objective(full)
             _sp1_sf = np.vstack([x0[:n_k]] +
-                                [x0[:n_k] + np.eye(n_k)[i] * (1e-9 if maxiter <= 1 else 1.5) for i in range(n_k)])
+                                [x0[:n_k] + np.eye(n_k)[i] * (1e-9 if maxiter <= 1 else simplex_step(1.5)) for i in range(n_k)])
             try:
-                _r1_sf = minimize(_phase1_obj_spfit, x0[:n_k], method="Nelder-Mead",
+                _r1_sf = tied_minimize(_phase1_obj_spfit, x0[:n_k], names=list(fit_keys), constraints=constraints or [], fixed=logK_vals,
                                   options={"maxiter": maxiter//2,
                                            "xatol": tolerance, "fatol": tolerance * 1e-4,
                                            "adaptive": True,
@@ -652,7 +670,8 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
             C  = _fast_solve_all(lk)
             E = _solve_E(C, A_fit, known_E_rows)
             f_safe = float(np.sum((A_fit - C @ E) ** 2))
-            cp_safe = constraints_penalty(constraints or [], {**logK_vals, **lk_dict}, ssr_scale=f_safe)
+            cp_safe = constraints_penalty(constraints or [], {**logK_vals, **lk_dict}, ssr_scale=_pscale(f_safe))
+            _live.notify({**logK_vals, **lk_dict}, f_safe + cp_safe)
             return f_safe + cp_safe
 
         # ── Stage 1: L-BFGS-B ──────────────────────────────────────
@@ -676,12 +695,12 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
         # ── Stage 2: Nelder-Mead (always runs, warm-started if BFGS helped) ──
         init_simplex = np.vstack([x0] +
                                   [x0 + np.eye(n_p)[i] * (
-                                      (1e-9 if maxiter <= 1 else 1.5)
+                                      (1e-9 if maxiter <= 1 else simplex_step(1.5))
                                        if i < len(fit_keys)
                                       else max(abs(x0[i]) * 0.1, 0.05))
                                    for i in range(n_p)])
         try:
-            result = minimize(objective, x0, method="Nelder-Mead",
+            result = tied_minimize(objective, x0, names=list(fit_keys) + list(fit_conc_keys) + list(fit_titrant_keys), constraints=constraints or [], fixed=logK_vals,
                               options={"maxiter": maxiter, "xatol": tolerance,
                                        "fatol": tolerance * 1e-4, "adaptive": True,
                                        "initial_simplex": init_simplex})
@@ -707,7 +726,10 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
         return False, {}, {}, "No wavelengths in selected range"
 
     _known1  = _known_eps_for_mask(wl_mask1)
-    result1, _obj1 = _run_fit(A_fit1, _known1)
+    _h1 = _run_fit(A_fit1, _known1)
+    if _objective_only:
+        return _h1          # the global fit's handle (dict), not a (result, objective) pair
+    result1, _obj1 = _h1
     fitted_logKs   = {fit_keys[i]: result1.x[i] for i in range(len(fit_keys))}
     # Extract fitted concentrations/titrant from extended vector
     _n_k = len(fit_keys)
@@ -869,6 +891,7 @@ def fit_spectra(parsed: dict, network: dict, spectra_data: dict,
         combos = [("WARNING: unphysical values", 0.0, 0.0, 0.0)]
 
     stats["timed_out"]       = timed_out
+    stats.update(_trace.summary(result1, timed_out, tolerance))
     stats["is_correlated"]   = is_corr
     stats["cond_number"]     = cond_num
     stats["identifiable"]    = combos   # [(label, value, stderr, ratio), ...]

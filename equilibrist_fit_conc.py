@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """equilibrist_fit_conc.py"""
 import numpy as np
+import equilibrist_live as _live
 from scipy.optimize import minimize
 from equilibrist_curve import compute_single_point, find_equiv_for_x, convert_exp_x
-from equilibrist_parser import constraints_penalty
+from equilibrist_parser import constraints_penalty, PenaltyScale, FitTrace, simplex_step, tied_minimize, equality_ties
 
 __all__ = ['fit_parameters']
 
@@ -46,7 +47,8 @@ def fit_parameters(parsed, network, exp_data, params, logK_vals, fit_keys, x_exp
                    use_lbfgsb=True, use_neldermead=True,
                    constraints=None,
                    fit_conc_keys=None, fit_titrant_keys=None,
-                   *, compute_hessian: bool = True):
+                   *, compute_hessian: bool = True,
+                   _objective_only: bool = False):
     """
     Fit selected log K / rate constants (and optionally concentrations/titrant) to
     experimental data.
@@ -151,7 +153,7 @@ def fit_parameters(parsed, network, exp_data, params, logK_vals, fit_keys, x_exp
             bounds = bounds_logK + bounds_conc + bounds_titrant
 
         def _make_simplex_steps_fp():
-            k_steps = np.full(n_logK, (1e-9 if maxiter <= 1 else 1.5))
+            k_steps = np.full(n_logK, (1e-9 if maxiter <= 1 else simplex_step(1.5)))
             c_steps = np.array([bounds_conc[i][1]    - bounds_conc[i][0]
                                 for i in range(n_conc)])
             t_steps = np.array([bounds_titrant[i][1] - bounds_titrant[i][0]
@@ -207,7 +209,10 @@ def fit_parameters(parsed, network, exp_data, params, logK_vals, fit_keys, x_exp
 
         _constraints = constraints or []
 
+        _pscale = PenaltyScale()   # fixed reference for the constraint penalty (see equilibrist_parser)
+        _trace = FitTrace()   # how did the fit end? (see equilibrist_parser)
         def objective(fp):
+            _trace(fp)
             try:
                 logKs_d, conc_d, tit_d = _unpack(fp)
                 cur_logKs = logK_vals.copy()
@@ -243,37 +248,54 @@ def fit_parameters(parsed, network, exp_data, params, logK_vals, fit_keys, x_exp
                 t = float(np.sum(residuals))
                 if not np.isfinite(t):
                     return 1e9
-                cp = constraints_penalty(_constraints, cur_logKs, ssr_scale=t)
+                cp = constraints_penalty(_constraints, cur_logKs, ssr_scale=_pscale(t))
+                _live.notify(cur_logKs, t + cp)
                 return t + cp
             except Exception:
                 return 1e9
 
+        if _objective_only:
+            # handed out for a GLOBAL fit (equilibrist_global)
+            return {
+                "objective": (lambda t: float(objective(np.asarray(t, dtype=float)))),
+                "data_ssr": None,
+                "x0": np.asarray(x0, dtype=float),
+                "names": list(logK_names) + list(conc_names) + list(titrant_names),
+                "n_log_params": len(logK_names),
+                "n_data": int(len(exp_points)),
+            }
         import time as _time_fp
         obj_start = objective(x0)
         if not np.isfinite(obj_start):
             return False, {}, {}, "Initial objective evaluation failed"
 
-        def _nm_fp(obj_fn, start, steps, max_it=None):
+        _all_names_fp = list(logK_names) + list(conc_names) + list(titrant_names)
+        # ties among the constants are solved exactly (equality_ties): L-BFGS-B
+        # cannot do that, so with a tie the Nelder-Mead passes do the work
+        _has_ties_fp = equality_ties(_constraints, _all_names_fp, x0, logK_vals) is not None
+
+        def _nm_fp(obj_fn, start, steps, max_it=None, names=None):
             simplex = np.vstack([start] + [start + np.eye(len(start))[i] * steps[i]
                                             for i in range(len(start))])
-            return minimize(obj_fn, start, method='Nelder-Mead',
+            return tied_minimize(obj_fn, start, names=(names if names is not None else _all_names_fp),
+                            constraints=_constraints, fixed=logK_vals, method='Nelder-Mead',
                             options={'maxiter': max_it or maxiter,
-                                     'xatol': max(tolerance ** 0.5, 1e-6),
-                                     'fatol': max(tolerance, 1e-8),
+                                     'xatol': tolerance,
+                                     'fatol': tolerance * 1e-4,
                                      'adaptive': True,
                                      'initial_simplex': simplex})
 
-        _logk_steps = np.full(n_logK, (1e-9 if maxiter <= 1 else 1.5))
+        _logk_steps = np.full(n_logK, (1e-9 if maxiter <= 1 else simplex_step(1.5)))
         result      = None
         best_x      = x0.copy()
 
         if not fitting_concs:
             # ── No concentration fitting: original L-BFGS-B + Nelder-Mead ─────
             improved = False
-            if use_lbfgsb:
+            if use_lbfgsb and not _has_ties_fp:
                 result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds,
-                                  options={'maxiter': maxiter, 'ftol': tolerance,
-                                           'gtol': tolerance})
+                                  options={'maxiter': maxiter, 'ftol': tolerance * 1e-3,
+                                           'gtol': tolerance * 1e-3})
                 # Accept "no worse than 0.1% above start" as improved.
                 # This catches the common case where x0 is already at the global
                 # minimum (e.g. after a previous fit) and L-BFGS-B terminates in
@@ -294,13 +316,13 @@ def fit_parameters(parsed, network, exp_data, params, logK_vals, fit_keys, x_exp
             if n_logK > 0:
                 def _logk_only_obj(lk_vec):
                     return objective(np.concatenate([lk_vec, x0[n_logK:]]))
-                _r_p0 = _nm_fp(_logk_only_obj, x0[:n_logK], _logk_steps)
-                if use_lbfgsb:
+                _r_p0 = _nm_fp(_logk_only_obj, x0[:n_logK], _logk_steps, names=list(logK_names))
+                if use_lbfgsb and not _has_ties_fp:
                     try:
                         _r_lb = minimize(_logk_only_obj, x0[:n_logK], method="L-BFGS-B",
                                          bounds=bounds[:n_logK],
-                                         options={"maxiter": maxiter, "ftol": tolerance,
-                                                  "gtol": tolerance})
+                                         options={"maxiter": maxiter, "ftol": tolerance * 1e-3,
+                                                  "gtol": tolerance * 1e-3})
                         if np.isfinite(_r_lb.fun) and _r_lb.fun < _r_p0.fun:
                             _r_p0 = _r_lb
                     except Exception:
@@ -406,6 +428,8 @@ def fit_parameters(parsed, network, exp_data, params, logK_vals, fit_keys, x_exp
                 "per_col_y_calc":  {k: np.asarray(v, dtype=float)
                                     for k, v in _per_col_yc.items()},
             }
+            stats.update(_trace.summary(result, False, tolerance))   # before any further objective calls
+            stats["final_spread"] = None   # last stage may be L-BFGS-B: its probes are not a simplex
 
             # Hessian-based uncertainties (data-only).  Skipped when
             # the caller has set ``compute_hessian=False`` (e.g.

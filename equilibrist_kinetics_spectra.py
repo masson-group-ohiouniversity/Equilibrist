@@ -2,14 +2,15 @@
 """equilibrist_kinetics_spectra.py"""
 import time
 import numpy as np
+import equilibrist_live as _live
 from scipy.optimize import minimize
 from scipy.optimize import nnls as _nnls
-from equilibrist_kinetics import compute_kinetics_curve, _collect_all_kinetic_species
+from equilibrist_kinetics import compute_kinetics_curve, _collect_all_kinetic_species, kinetic_param_bounds
 from equilibrist_fit_spectra import _optimal_spectral_range
 from equilibrist_fit_nmr import _get_species_for_target, _hessian_errors, _resolve_c
 from equilibrist_kinetics_nmr import _kinetics_nmr_integration_backCalc
 from equilibrist_curve import convert_exp_x
-from equilibrist_parser import constraints_penalty
+from equilibrist_parser import constraints_penalty, PenaltyScale, FitTrace, simplex_step, tied_minimize
 
 __all__ = ['fit_kinetics_spectra']
 
@@ -22,7 +23,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
                          use_lbfgsb: bool = True, use_neldermead: bool = True,
                          constraints=None, fit_conc_keys=None,
                          allow_negative_eps: bool = False,
-                         *, compute_hessian: bool = True):
+                         *, compute_hessian: bool = True, _objective_only: bool = False):
     """
     Fit rate constants to UV-Vis kinetics spectra using Beer-Lambert law.
 
@@ -173,7 +174,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         for i, k in enumerate(fit_keys):
             lk[k] = lk_v[i]
         try:
-            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim)
+            return compute_kinetics_curve(_patched_parsed_k(cd), lk, t_max, n_pts_sim, t_extra=t_exp)
         except Exception:
             return None
 
@@ -185,7 +186,10 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
             C[:, j] = np.interp(t_exp, t_sim, c_sim)
         return np.maximum(C, 0.0)
 
+    _pscale = PenaltyScale()   # fixed reference for the constraint penalty (see equilibrist_parser)
+    _trace = FitTrace()   # how did the fit end? (see equilibrist_parser)
     def objective(params_vec):
+        _trace(params_vec)
         lk_v, _ = _unpack_ck(params_vec)
         lk = logk_dict.copy()
         for i, k in enumerate(fit_keys):
@@ -196,7 +200,8 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         C = _build_C(curve)
         E = _solve_E(C, A_fit, _known)
         ssr = float(np.sum((A_fit - C @ E) ** 2))
-        cp = constraints_penalty(constraints or [], lk, ssr_scale=ssr)
+        cp = constraints_penalty(constraints or [], lk, ssr_scale=_pscale(ssr))
+        _live.notify(lk, ssr + cp)
         return ssr + cp
 
     def data_objective(params_vec):
@@ -214,6 +219,18 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
     x0  = np.concatenate([np.array([logk_dict[k] for k in fit_keys]), _x0_c])
     n_p = len(x0)
 
+
+    # ── Objective handed out for a GLOBAL fit (equilibrist_global) ───────
+    if _objective_only:
+        
+        return {
+            "objective": (lambda t: float(objective(np.asarray(t, dtype=float)))),
+            "data_ssr":  (lambda t: float(data_objective(np.asarray(t, dtype=float)))),
+            "x0": np.asarray(x0, dtype=float),
+            "names": list(fit_keys) + list(fit_conc_keys),
+            "n_log_params": len(fit_keys),
+            "n_data": int(np.size(A_fit)),
+        }
     # Phase 1: warm-start logK before joint optimisation
     if _n_c > 0 and _n_k > 0:
         def _phase1_obj_sp(lk_vec):
@@ -221,7 +238,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         _sp1_sp = np.vstack([x0[:_n_k]] + [x0[:_n_k] + np.eye(_n_k)[i]*1.5
                                             for i in range(_n_k)])
         try:
-            _r1_sp = minimize(_phase1_obj_sp, x0[:_n_k], method="Nelder-Mead",
+            _r1_sp = tied_minimize(_phase1_obj_sp, x0[:_n_k], names=list(fit_keys), constraints=constraints or [], fixed=logk_dict,
                               options={"maxiter": maxiter//2,
                                        "xatol": tolerance, "fatol": tolerance * 1e-4,
                                        "adaptive": True,
@@ -234,16 +251,9 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
                     "start": time.time(), "timed_out": False}
 
     # ── Stage 1: L-BFGS-B (timeout-free, warm-starts Nelder-Mead) ────────
-    # Per-K bounds from the script's "from X to Y" syntax; loose defaults if absent.
-    _DEFAULT_LO_K, _DEFAULT_HI_K = -6.0, 9.0
-    _eq_by_kname_ks = {eq["kname"]: eq for eq in parsed.get("equilibria", [])}
-    _eq_by_kname_ks.update({rxn.get("kname"):  rxn for rxn in parsed.get("kinetics", []) if rxn.get("kname")})
-    _eq_by_kname_ks.update({rxn.get("krname"): rxn for rxn in parsed.get("kinetics", []) if rxn.get("krname")})
-    def _resolve_k_bound_ks(k, attr, default):
-        v = _eq_by_kname_ks.get(k, {}).get(attr)
-        return float(v) if v is not None else float(default)
-    _k_lo_user = np.array([_resolve_k_bound_ks(k, "logK_lo", _DEFAULT_LO_K) for k in fit_keys])
-    _k_hi_user = np.array([_resolve_k_bound_ks(k, "logK_hi", _DEFAULT_HI_K) for k in fit_keys])
+    # Per-K bounds from the script's "from X to Y" syntax; loose defaults if absent
+    # (pre-equilibria -6..9, rate constants unrestricted beyond |log k| <= 12)
+    _k_lo_user, _k_hi_user = kinetic_param_bounds(parsed, fit_keys, eq_default=(-6.0, 9.0))
     _k_lo = np.concatenate([_k_lo_user, np.array([b[0] for b in _bds_c])])
     _k_hi = np.concatenate([_k_hi_user, np.array([b[1] for b in _bds_c])])
     bounds = list(zip(_k_lo.tolist(), _k_hi.tolist()))
@@ -266,7 +276,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
                 res_lbfgs = minimize(objective_safe, x0, method="L-BFGS-B",
                                      bounds=bounds,
                                      options={"maxiter": maxiter,
-                                              "ftol": tolerance,
+                                              "ftol": tolerance * 1e-3,
                                               "gtol": tolerance * 1e-3})
             if res_lbfgs.fun < obj_start * 0.999:
                 x0 = res_lbfgs.x
@@ -285,13 +295,13 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
             raise _Timeout()
         return f
 
-    _steps = np.array([(1e-9 if maxiter <= 1 else 1.5)] * _n_k + [max(abs(_x0_c[i]) * 0.1, 0.05)
+    _steps = np.array([(1e-9 if maxiter <= 1 else simplex_step(1.5))] * _n_k + [max(abs(_x0_c[i]) * 0.1, 0.05)
                        for i in range(_n_c)])
     init_simplex = np.vstack([x0] + [x0 + np.eye(n_p)[i] * _steps[i]
                                      for i in range(n_p)])
     if use_neldermead:
         try:
-            result = minimize(_obj_timed, x0, method="Nelder-Mead",
+            result = tied_minimize(_obj_timed, x0, names=list(fit_keys) + list(fit_conc_keys), constraints=constraints or [], fixed=logk_dict,
                               options={"maxiter": maxiter, "xatol": tolerance,
                                        "fatol": tolerance * 1e-4, "adaptive": True,
                                        "initial_simplex": init_simplex})
@@ -328,7 +338,7 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
                 best_tracker["f"] = np.inf
                 best_tracker["start"] = time.time()
                 try:
-                    result = minimize(_obj_timed, result.x, method="Nelder-Mead",
+                    result = tied_minimize(_obj_timed, result.x, names=list(fit_keys) + list(fit_conc_keys), constraints=constraints or [], fixed=logk_dict,
                                       options={"maxiter": maxiter, "xatol": tolerance,
                                                "fatol": tolerance * 1e-4, "adaptive": True})
                 except _Timeout:
@@ -424,4 +434,5 @@ def fit_kinetics_spectra(parsed: dict, logk_dict: dict, spectra_data: dict,
         "A_obs":     A_fit,
         "A_calc":    A_calc,
     }
+    stats.update(_trace.summary(result, best_tracker["timed_out"], tolerance))
     return _conv, fitted_logks, stats, "Kinetics UV-Vis spectra fit complete"
