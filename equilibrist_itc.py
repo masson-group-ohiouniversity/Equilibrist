@@ -64,8 +64,8 @@ def parse_itc_file(content: bytes) -> dict:
     dict with keys:
         n_injections      : int   — number of injections declared in header
         temperature_C     : float — experiment temperature (°C)
-        cell_conc_mM      : float — cell concentration (mM) from # block
-        syringe_conc_mM   : float — syringe concentration (mM) from # block
+        cell_conc_mM      : float — cell concentration [mM] from # block
+        syringe_conc_mM   : float — syringe concentration [mM] from # block
         inj_vols_uL       : list[float]  — per-injection volumes [µL], index 0 = dummy
         inj_rates         : list[float]  — per-injection rates [µL/min]
         time_s            : np.ndarray   — time axis [s]
@@ -999,7 +999,7 @@ def fit_itc(parsed: dict, network: dict, q_exp: np.ndarray,
             V0 = float(params["V0_mL"])
             # Columns must be reaction EXTENTS, not product concentrations,
             # or dH for every step after the first silently becomes cumulative.
-            A = (dC_masked @ _rxn_usage_M) * V0 * 1000.0   # µcal / (kcal/mol)
+            A = (dC_masked @ _rxn_usage_M) * V0 * 1000.0   # µcal / [kcal/mol]
             if q_offset_fixed is None:
                 A = np.column_stack([A, np.ones(A.shape[0])])
             return A
@@ -1413,9 +1413,9 @@ def fit_itc(parsed: dict, network: dict, q_exp: np.ndarray,
             "y_obs":        np.asarray(q_exp, dtype=float),
             "y_calc":       np.asarray(q_theo, dtype=float),
             "residuals":    np.asarray(q_exp, dtype=float) - np.asarray(q_theo, dtype=float),
-            "per_col_y_obs":  {"q (ucal)": np.asarray(q_exp, dtype=float)},
-            "per_col_y_calc": {"q (ucal)": np.asarray(q_theo, dtype=float)},
-            "per_col_x":      {"q (ucal)": np.asarray(x_inj, dtype=float)},
+            "per_col_y_obs":  {"q [µcal]": np.asarray(q_exp, dtype=float)},
+            "per_col_y_calc": {"q [µcal]": np.asarray(q_theo, dtype=float)},
+            "per_col_x":      {"q [µcal]": np.asarray(x_inj, dtype=float)},
             "param_errors": param_errs,
             "param_cov":       _cov_full,
             "param_cov_names": _cov_names,

@@ -205,7 +205,7 @@ def _fit_progress(slot, timeout_s, label="Fitting parameters…"):
 
 # ── Fits run in the background; the page stays live ─────────────────────
 def _live_refresh():
-    """The 'Refresh (s)' setting (0 = no intermediate redraws)."""
+    """The 'Refresh [s]' setting (0 = no intermediate redraws)."""
     try:
         return float(st.session_state.get("_shadow_fit_refresh", st.session_state.get("fit_refresh", 60)) or 0)
     except Exception:
@@ -217,7 +217,7 @@ def _fit_turn(slot, flag="_fit_requested"):
 
     A fit started by :func:`_fit_async` runs in a background thread.  While it
     is alive the request stays pending, a small fragment in ``slot`` keeps the
-    progress bar moving and, every 'Refresh (s)' seconds, writes the best
+    progress bar moving and, every 'Refresh [s]' seconds, writes the best
     constants found so far into the sidebar and reruns the page -- the normal
     plots update in place, nothing else changes -- and False is returned so the
     rest of the page renders as usual.  Once the thread has finished (or when
@@ -302,7 +302,7 @@ def _fit_async(slot, timeout_s, run_fit, start_logK, label="Fitting parameters�
     in a background thread.  First call: start the thread, keep ``flag`` set so
     the call site is entered again, and rerun; the page then renders normally
     while :func:`_fit_turn` keeps the request pending and redraws the plots at
-    the best constants every 'Refresh (s)' seconds.  Final call (thread
+    the best constants every 'Refresh [s]' seconds.  Final call (thread
     finished): return the fit's result to the call site, which handles it
     exactly as it did when the fit was synchronous."""
     ss = st.session_state
@@ -787,7 +787,7 @@ def _render_pure_shift_comparison(fit_stats):
             rows.append(row)
     if not rows:
         return
-    st.write("**Pure-species shifts across tabs (ppm):**")
+    st.write("**Pure-species shifts across tabs [ppm]:**")
     st.dataframe(pd.DataFrame(rows).set_index(["Proton (free δ)", "Species"]), width="stretch")
     st.caption(("Protons matched by their free shift" if how == "fingerprint" else "Columns paired by position")
                + "; ( ) = not determined in that tab; Δ = spread across tabs, i.e. what "
@@ -1436,7 +1436,7 @@ def _pka_input_with_fit(label, pka_key, logk_key, default_pka):
 
 def _conc_input_with_fit(label, key, default):
     """
-    One row: [concentration number_input (mM)  |  fit checkbox]
+    One row: [concentration number_input [mM]  |  fit checkbox]
     Works in mM space. Fit checkbox enabled when experimental data is loaded,
     but disabled when only UV-Vis spectra data is present (concentration is
     not identifiable from spectra with analytical extinction coefficients).
@@ -1596,7 +1596,7 @@ if "_persist_xmax" in st.session_state:
 # ── Script upload ─────────────────────────────
 with st.sidebar:
     st.subheader("Equilibrist Script")
-    st.caption("Equilibrist v3.0 beta")
+    st.caption("Equilibrist v3.0.1 beta")
 
     # A "Clear & reload" button that wipes everything and resets the uploader
     if st.button("↺ Reset / load new script"):
@@ -1677,16 +1677,67 @@ with st.sidebar:
                 # data dict.  Without _input_filename the badge stays
                 # empty and the user can't tell that the data is
                 # actually loaded — they assume it isn't and re-upload.
+                _data_is_itc = bool(_data_in and "bytes" in _data_in and str(
+                    _data_in.get("filename", "") or "").lower().endswith(".itc"))
                 if _data_in and "bytes" in _data_in:
-                    st.session_state["_exp_data_bytes"]    = _data_in["bytes"]
-                    st.session_state["_exp_data_filename"] = _data_in.get(
-                        "filename", "restored_data.xlsx")
-                    st.session_state["_input_filename"]    = _data_in.get(
-                        "filename", "restored_data.xlsx")
+                    if not _data_is_itc:
+                        st.session_state["_exp_data_bytes"]    = _data_in["bytes"]
+                        st.session_state["_exp_data_filename"] = _data_in.get(
+                            "filename", "restored_data.xlsx")
+                        st.session_state["_input_filename"]    = _data_in.get(
+                            "filename", "restored_data.xlsx")
                     try:
                         _r_parsed = parse_script(_obj.get("script", ""))
                         _raw = _data_in["bytes"]
-                        if _r_parsed.get("spectra") is not None:
+                        if _data_is_itc:
+                            # ITC session: integrate the thermogram as an upload does, then
+                            # put back what the user had changed before saving
+                            _raw_itc_r = parse_itc_file(_raw)
+                            _q_r, _pre_r, _post_r, _eq_r = auto_integrate(_raw_itc_r)
+                            _pre_full_r  = np.concatenate([[_pre_r[0]  if len(_pre_r)  > 0 else 0.0], _pre_r])
+                            _post_full_r = np.concatenate([[_post_r[0] if len(_post_r) > 0 else 0.0], _post_r])
+                            _itc_in = (_obj.get("fit_state") or {}).get("itc") or {}
+                            _pre_s  = np.asarray(_itc_in.get("pre_baselines")  or [], dtype=float)
+                            _post_s = np.asarray(_itc_in.get("post_baselines") or [], dtype=float)
+                            if (len(_pre_s) == len(_pre_full_r) and len(_post_s) == len(_post_full_r)
+                                    and not (np.allclose(_pre_s, _pre_full_r) and np.allclose(_post_s, _post_full_r))):
+                                # baselines edited before saving: integrate with those
+                                _q_r = integrate_with_baselines(_raw_itc_r, _pre_s, _post_s)
+                                _pre_full_r, _post_full_r = _pre_s, _post_s
+                            st.session_state["_itc_raw"]            = _raw_itc_r
+                            st.session_state["_itc_q_exp"]          = _q_r
+                            st.session_state["_itc_baselines"]      = _pre_full_r
+                            st.session_state["_itc_post_baselines"] = _post_full_r
+                            st.session_state["_itc_eq_times"]       = _eq_r
+                            st.session_state["_itc_file_bytes"]     = _raw
+                            st.session_state["_itc_filename"]       = str(_data_in.get("filename") or "thermogram.itc")
+                            _excl_r = set(int(_i) for _i in (_itc_in.get("excluded") or []))
+                            if _excl_r:
+                                st.session_state["_outliers_itc"] = _excl_r
+                            else:
+                                st.session_state.pop("_outliers_itc", None)
+                            if "q_offset" in _itc_in:
+                                st.session_state["_pending_itc_q_offset"] = float(_itc_in["q_offset"])
+                            if "fit_q_offset" in _itc_in:
+                                st.session_state["fit_itc_q_offset"] = bool(_itc_in["fit_q_offset"])
+                            # concentrations from the file header, as on upload (and the
+                            # cell volume too when the script leaves it blank)
+                            _cn_r = list((_r_parsed.get("concentrations") or {}).keys())
+                            _tk_r = list((_r_parsed.get("titrant") or {}).keys())
+                            _cell_r, _syr_r = _raw_itc_r.get("cell_conc_mM"), _raw_itc_r.get("syringe_conc_mM")
+                            if _cn_r and _cell_r:
+                                _root_r = _cn_r[0][:-1] if _cn_r[0].endswith("0") else _cn_r[0]
+                                st.session_state[f"_pending_conc_{_root_r}"] = float(_cell_r)
+                                if _r_parsed["concentrations"][_cn_r[0]] is None:
+                                    st.session_state[f"conc_{_root_r}"] = float(_cell_r)
+                            if _tk_r and _syr_r:
+                                st.session_state[f"_pending_titrant_mM_{_tk_r[0]}"] = float(_syr_r)
+                                if _r_parsed["titrant"][_tk_r[0]] is None:
+                                    st.session_state[f"titrant_mM_{_tk_r[0]}"] = float(_syr_r)
+                            if (_raw_itc_r.get("cell_vol_mL") and any(
+                                    _v is None for _v in (_r_parsed.get("volumes") or {}).values())):
+                                st.session_state["V0_mL"] = float(_raw_itc_r["cell_vol_mL"])
+                        elif _r_parsed.get("spectra") is not None:
                             _loaded_r = load_spectra_data(_raw)
                             st.session_state["_spectra_data"] = _loaded_r
                             # Default wavelength range to the spectrum extent
@@ -2018,6 +2069,13 @@ with st.sidebar:
                                                    summarize_stats)
                 _data_bytes = st.session_state.get("_exp_data_bytes")
                 _data_name  = st.session_state.get("_exp_data_filename")
+                # ITC: the thermogram is the data file.  It used to be left out, so
+                # a reloaded ITC session had its constants but no thermogram.
+                _itc_on_save = (st.session_state.get("_itc_raw") is not None
+                                and bool(st.session_state.get("_itc_file_bytes")))
+                if _itc_on_save:
+                    _data_bytes = st.session_state["_itc_file_bytes"]
+                    _data_name  = st.session_state.get("_itc_filename") or "thermogram.itc"
                 _fit_stats  = st.session_state.get("_fit_stats") or {}
                 _fa_eq      = st.session_state.get("_fit_args_eq")
                 _fa_kin     = st.session_state.get("_fit_args_kin")
@@ -2066,6 +2124,21 @@ with st.sidebar:
                     try:
                         _fit_state_save["xmax"] = float(_xmax_widget)
                     except (TypeError, ValueError):
+                        pass
+                if _itc_on_save:
+                    # what the user did to the thermogram: excluded injections, edited
+                    # baselines, and the heat offset with its fit tick
+                    try:
+                        _fit_state_save["itc"] = {
+                            "excluded": sorted(int(_i) for _i in (st.session_state.get("_outliers_itc") or set())),
+                            "pre_baselines": [float(_v) for _v in np.asarray(
+                                st.session_state.get("_itc_baselines", []), dtype=float)],
+                            "post_baselines": [float(_v) for _v in np.asarray(
+                                st.session_state.get("_itc_post_baselines", []), dtype=float)],
+                            "q_offset": float(st.session_state.get("itc_q_offset", 0.0) or 0.0),
+                            "fit_q_offset": bool(st.session_state.get("fit_itc_q_offset", False)),
+                        }
+                    except Exception:
                         pass
                 _notes = st.text_input(
                     "Notes (optional)", value="",
@@ -2125,7 +2198,7 @@ with st.sidebar:
                         profile_caches=_serialize_tuple_caches(st.session_state),
                         seed=42,
                         notes=_notes,
-                        app_version="equilibrist-v3.0-beta",
+                        app_version="equilibrist-v3.0.1-beta",
                     )
                     _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     _stem = "session"
@@ -2695,7 +2768,7 @@ if IS_KINETICS:
 
     # ── Sidebar ──────────────────────────────────────────────────
     with st.sidebar:
-        st.header("Initial concentrations (mM)")
+        st.header("Initial concentrations [mM]")
         conc_vals_kin = {}
         for cname, cval in parsed["concentrations"].items():
             root = cname[:-1] if cname.endswith("0") else cname
@@ -2703,7 +2776,7 @@ if IS_KINETICS:
                 f"{root}₀", key=f"conc_{root}", default=float(cval))
 
         st.header("Plot settings")
-        t_max_ui = _num_input("Time max (s)", key="xmax",
+        t_max_ui = _num_input("Time max [s]", key="xmax",
                                default=t_max, step=0.1, format="%.4f")
         nPts_kin = st.number_input("# points", value=200, step=10, min_value=20)
 
@@ -2712,7 +2785,7 @@ if IS_KINETICS:
         if parsed.get("spectra") is not None and _kin_sp_wl_sb:
             _wl_lo_k = float(_kin_sp_wl_sb["wavelengths"][0])
             _wl_hi_k = float(_kin_sp_wl_sb["wavelengths"][-1])
-            st.caption("Wavelength range (nm)")
+            st.caption("Wavelength range [nm]")
             _wl_c1k, _wl_c2k = st.columns(2)
             with _wl_c1k:
                 _num_input("Min", key="spectra_wl_min", default=_wl_lo_k, step=1.0, format="%.0f")
@@ -3328,10 +3401,10 @@ if IS_KINETICS:
             )
         with _fc2:
             fit_timeout = _num_input(
-                "Timeout (s)", key="fit_timeout", default=30, step=5, format="%d"
+                "Timeout [s]", key="fit_timeout", default=30, step=5, format="%d"
             )
         fit_refresh = _num_input(
-            "Refresh (s)", key="fit_refresh", default=60, step=5, format="%d",
+            "Refresh [s]", key="fit_refresh", default=60, step=5, format="%d",
             help="While a fit runs, redraw data and model at the best constants found so far "
                  "every this many seconds (0 = off).  NMR and global fits for now."
         )
@@ -3466,15 +3539,15 @@ if IS_KINETICS:
             if _kin_mode_up == "integration":
                 st.caption(f"NMR mode: **integration** (slow exchange) — "
                            f"{len(_kin_nmr_cfg_up.get('n_H_list', []))} signals")
-                _kin_hint = "💧 column A = time (s); columns B+ = species names (normalised integrals)"
+                _kin_hint = "💧 column A = time [s]; columns B+ = species names (normalised integrals)"
             elif _kin_mode_up == "shift":
                 st.caption(f"NMR mode: **shift** — targets: {', '.join(_kin_nmr_cfg_up['targets'])}")
-                _kin_hint = "💧 column A = time (s); columns B+ = NMR observables"
+                _kin_hint = "💧 column A = time [s]; columns B+ = NMR observables"
             else:  # mixed
                 st.caption(f"NMR mode: **mixed** — targets: {', '.join(_kin_nmr_cfg_up['targets'])}")
-                _kin_hint = "💧 column A = time (s); columns B+ = NMR observables"
+                _kin_hint = "💧 column A = time [s]; columns B+ = NMR observables"
         else:
-            _kin_hint = "💧 column A = time (s); other columns = species (mM)"
+            _kin_hint = "💧 column A = time [s]; other columns = species [mM]"
         st.caption(_kin_hint)
         if st.button("↺ Reset experimental data"):
             for k in list(st.session_state.keys()):
@@ -3488,7 +3561,7 @@ if IS_KINETICS:
             st.session_state["_exp_uploader_nonce"] = 0
         _kin_has_spectra = parsed.get("spectra") is not None
         if _kin_has_spectra:
-            st.caption("column A = time (s); row 1 = wavelengths (nm); body = absorbance")
+            st.caption("column A = time [s]; row 1 = wavelengths [nm]; body = absorbance")
         exp_uploaded = st.file_uploader(
             "Upload experimental data (.xlsx)", type=["xlsx"],
             key=f"_exp_uploader_{st.session_state['_exp_uploader_nonce']}")
@@ -4585,7 +4658,7 @@ if IS_KINETICS:
                                 for _ii, (_kind, _label, _name) in enumerate(_all_inputs_k):
                                     _col = _cols_inp_k[_ii % _ncols_inp]
                                     _val = _col.number_input(
-                                        f"σ on {_label} (%)",
+                                        f"σ on {_label} [%]",
                                         min_value=0.0, max_value=50.0,
                                         value=0.0, step=0.1,
                                         key=f"_mc_sig_kin_{_kind}_{_name}",
@@ -4598,11 +4671,11 @@ if IS_KINETICS:
                                 if _mc_is_nmr_k:
                                     _mn1, _mn2 = st.columns(2)
                                     _mc_integ_pct_k = _mn1.number_input(
-                                        "σ on NMR integrations (%)", min_value=0.0, max_value=50.0,
+                                        "σ on NMR integrations [%]", min_value=0.0, max_value=50.0,
                                         value=0.0, step=0.5, key="_mc_sig_kin_nmr_integ", format="%.2f",
                                         help="Relative error of the peak integrals (per point).")
                                     _mc_shift_ppm_k = _mn2.number_input(
-                                        "σ on chemical shifts (ppm)", min_value=0.0, max_value=1.0,
+                                        "σ on chemical shifts [ppm]", min_value=0.0, max_value=1.0,
                                         value=0.0, step=0.001, key="_mc_sig_kin_nmr_shift", format="%.4f",
                                         help="Absolute error of the observed shifts (per point, ppm).")
                                     if _mc_integ_pct_k > 0:
@@ -4972,7 +5045,7 @@ if IS_KINETICS:
                                                     "other variables": _other_str or "—",
                                                     "RMSE (unp.)":  f"{_rec.get('rmse_unp', float('nan')):.6e}",
                                                     "RMSE (pert.)": f"{_rec.get('rmse_pert', float('nan')):.6e}",
-                                                    "diff r (%)": f"{_rec['diff']*100:+.4f}%",
+                                                    "diff r [%]": f"{_rec['diff']*100:+.4f}%",
                                                 })
                                             st.dataframe(_drows, hide_index=True,
                                                           use_container_width=True)
@@ -5177,7 +5250,7 @@ if IS_KINETICS:
                                      "±log P": "—",
                                      "P":      f"{k_lin:.2e}",
                                      "±P":     f"± {err_lin:.2e}" if err_lin is not None else "n/a"})
-                # linear-space concentration parameters (mM)
+                # linear-space concentration parameters [mM]
                 for root, mM_val in fitted_concs_kin.items():
                     err_c = param_errors.get(root)
                     rows.append({"Parameter": root,
@@ -5206,13 +5279,13 @@ if IS_KINETICS:
                             _dG = _R * _T * (_lnKT - _math.log(10) * _val)
                             _dG_err = _R * _T * _math.log(10) * _err if _err is not None else None
                             _energy_rows.append({"Parameter": _kn + " *",
-                                                 "ΔG (kcal/mol)": f"{_dG:.2f}",
+                                                 "ΔG [kcal/mol]": f"{_dG:.2f}",
                                                  "±ΔG": f"± {_dG_err:.2f}" if _dG_err is not None else "n/a"})
                         else:
                             _dG = -_R * _T * _math.log(10) * _val
                             _dG_err = _R * _T * _math.log(10) * _err if _err is not None else None
                             _energy_rows.append({"Parameter": _kn,
-                                                 "ΔG (kcal/mol)": f"{_dG:.2f}",
+                                                 "ΔG [kcal/mol]": f"{_dG:.2f}",
                                                  "±ΔG": f"± {_dG_err:.2f}" if _dG_err is not None else "n/a"})
                     if _energy_rows:
                         st.write(f"**Free energies ({_T:.2f} K):**")
@@ -5261,9 +5334,9 @@ if IS_KINETICS:
             _ps_pin      = fit_stats.get("pure_shift_pinned", {}) or {}
             if pure_shifts_disp:
                 if _show_abs:
-                    st.write("**Pure-species chemical shifts (ppm):**")
+                    st.write("**Pure-species chemical shifts [ppm]:**")
                 else:
-                    st.write("**Pure-species chemical shifts — Δδ relative to math reference (ppm):**")
+                    st.write("**Pure-species chemical shifts — Δδ relative to math reference [ppm]:**")
                 all_sp_cols = []; rows_ps = []
                 for tgt, col_dict in pure_shifts_disp.items():
                     for col, sp_dict in col_dict.items():
@@ -5284,14 +5357,14 @@ if IS_KINETICS:
                     ordered = [c for c in all_sp_cols if c in df_ps.columns]
                     st.dataframe(df_ps[ordered], width='stretch')
                     if _show_abs:
-                        st.caption("Each row = one NMR signal; columns = δ of each pure species (ppm). "
+                        st.caption("Each row = one NMR signal; columns = δ of each pure species [ppm]. "
                                    "( ) = species below 2 % of the pool over this titration: its shift is not "
                                    "determined by these data and is held at the free shift (or at the value "
                                    "shared from the other tabs).  * = species below 10 % of the pool: its shift "
                                    "is poorly determined and may absorb misfit; tie it to a related species in "
                                    "$constraints if its value is implausible.")
                     else:
-                        st.caption("Each row = one NMR signal; columns = Δδ relative to math reference (ppm). "
+                        st.caption("Each row = one NMR signal; columns = Δδ relative to math reference [ppm]. "
                                    "Add a `read:` anchor in $nmr to recover absolute δ.")
 
             _render_pure_shift_comparison(fit_stats)
@@ -5351,9 +5424,23 @@ if _itc_placeholder:
     )
     if _ph_uploaded is not None:
         try:
-            from equilibrist_itc import parse_itc_file as _parse_itc
-            _itc_raw_ph = _parse_itc(_ph_uploaded.read())
+            from equilibrist_itc import parse_itc_file as _parse_itc, auto_integrate as _auto_int_ph
+            _itc_bytes_ph = _ph_uploaded.read()
+            st.session_state["_itc_file_bytes"] = _itc_bytes_ph    # embedded in a saved session
+            _itc_raw_ph = _parse_itc(_itc_bytes_ph)
             st.session_state["_itc_raw"] = _itc_raw_ph
+            # Integrate the peaks here as the regular uploader does (_handle_itc_upload):
+            # this branch used to store the raw trace only, so a script with blank
+            # values (tutorials 19B, 20B) showed "Loaded: 0 injections" and could
+            # not be fitted until the file was dropped a second time.
+            _q_ph, _pre_ph, _post_ph, _eq_ph = _auto_int_ph(_itc_raw_ph)
+            st.session_state["_itc_q_exp"]          = _q_ph
+            st.session_state["_itc_baselines"]      = np.concatenate([[_pre_ph[0]  if len(_pre_ph)  > 0 else 0.0], _pre_ph])
+            st.session_state["_itc_post_baselines"] = np.concatenate([[_post_ph[0] if len(_post_ph) > 0 else 0.0], _post_ph])
+            st.session_state["_itc_eq_times"]       = _eq_ph
+            st.session_state["_itc_filename"]       = _ph_uploaded.name
+            st.session_state.pop("_outliers_itc", None)
+            st.session_state.pop("_fit_stats", None)
             # Fill in concentrations/volumes/titrant from file header
             _cell_conc_ph   = _itc_raw_ph.get("cell_conc_mM")
             _syr_conc_ph    = _itc_raw_ph.get("syringe_conc_mM")
@@ -5371,6 +5458,11 @@ if _itc_placeholder:
                 st.session_state[f"_pending_titrant_mM_{_tkey_ph}"]   = float(_syr_conc_ph)
             if _cell_vol_ph:
                 st.session_state["V0_mL"] = float(_cell_vol_ph)
+            # x-axis maximum: the molar ratio reached by the last injection (as _handle_itc_upload)
+            if _cell_conc_ph and _syr_conc_ph and _cell_conc_ph > 0:
+                _tot_ph = sum(v / 1000.0 for v in _itc_raw_ph["inj_vols_uL"][1:])
+                st.session_state["_pending_xmax"] = float(np.ceil(
+                    (_syr_conc_ph * _tot_ph) / (_cell_conc_ph * float(_cell_vol_ph or ITC200_CELL_VOLUME_ML)) * 10) / 10)
             st.rerun()
         except Exception as _e:
             st.error(f"Could not read ITC file: {_e}")
@@ -5393,7 +5485,7 @@ for _k in list(parsed["volumes"]):
 # ── Sidebar: concentrations, volume, titrant ──
 with st.sidebar:
 
-    st.header("Initial concentrations (mM)")
+    st.header("Initial concentrations [mM]")
     conc_vals = {}
     _is_acid_base = parsed.get("is_acid_base", False)
     for root, default in conc_roots.items():
@@ -5411,7 +5503,7 @@ with st.sidebar:
     _v0_raw     = list(parsed["volumes"].values())[0]  if parsed["volumes"]  else 0.5
     V0_default  = float(_v0_raw) if _v0_raw is not None else \
                   float(st.session_state.get("V0_mL", ITC200_CELL_VOLUME_ML))
-    V0_mL = _num_input("V₀ (mL)", key="V0_mL", default=V0_default, step=0.01, format="%.4f")
+    V0_mL = _num_input("V₀ [mL]", key="V0_mL", default=V0_default, step=0.01, format="%.4f")
 
     titrant_mMs    = {}
     titrant_ratios = {}
@@ -5434,7 +5526,7 @@ with st.sidebar:
             tfree = tkey[:-1] if (tkey.endswith("t") or tkey.endswith("0")) else tkey
             tit_default = parsed["titrant"].get(tkey, 10.0)
             titrant_mMs[tfree] = _conc_input_with_fit(
-                f"{tkey} stock (mM)", key=f"titrant_mM_{tkey}",
+                f"{tkey} stock [mM]", key=f"titrant_mM_{tkey}",
                 default=float(tit_default),
             )
             titrant_ratios[tfree] = 1.0
@@ -5453,7 +5545,7 @@ with st.sidebar:
     if parsed.get("spectra") is not None and _sd:
         _wl_lo = float(_sd["wavelengths"][0])
         _wl_hi = float(_sd["wavelengths"][-1])
-        st.caption("Wavelength range (nm)")
+        st.caption("Wavelength range [nm]")
         _wl_c1, _wl_c2 = st.columns(2)
         with _wl_c1:
             _num_input("Min", key="spectra_wl_min", default=_wl_lo, step=1.0, format="%.0f")
@@ -5549,7 +5641,7 @@ if _itc_raw_sb is not None:
         _qoff_c1, _qoff_c2 = st.columns([0.86, 0.14])
         with _qoff_c1:
             _itc_q_offset = _num_input(
-                "q_offset (µcal)", key="itc_q_offset",
+                "q_offset [µcal]", key="itc_q_offset",
                 default=_qoffset_default, step=0.01, format="%.4f")
         with _qoff_c2:
             # No value= : defaults to False, consistent with every other
@@ -6842,7 +6934,7 @@ with col1:
             # Raw power trace
             fig_itc.add_trace(go.Scatter(
                 x=_itc_time, y=_itc_power, mode="lines",
-                name="Power (µcal/s)",
+                name="Power [µcal/s]",
                 line=dict(color="#7c9eff", width=1.2),
                 showlegend=True,
             ))
@@ -6904,7 +6996,7 @@ with col1:
                 if _itc_dot_t:
                     fig_itc.add_trace(go.Scatter(
                         x=_itc_dot_t, y=_itc_dot_q, mode="markers",
-                        name="q (µcal)", yaxis="y2",
+                        name="q [µcal]", yaxis="y2",
                         customdata=[[_itc_dot_orig_idx[i]] for i in range(len(_itc_dot_t))],
                         marker=dict(color="#00CC96", size=8, symbol="circle",
                                     line=dict(width=1, color="white")),
@@ -7017,8 +7109,8 @@ with col1:
                 # Header row
                 _hc = st.columns([1, 3, 3])
                 _hc[0].caption("**Inj**")
-                _hc[1].caption("**Pre (µcal/s)**")
-                _hc[2].caption("**Post (µcal/s)**")
+                _hc[1].caption("**Pre [µcal/s]**")
+                _hc[2].caption("**Post [µcal/s]**")
 
                 for _im in range(1, _n_inj_ui):  # skip dummy (index 0)
                     _rc = st.columns([1, 3, 3])
@@ -7166,12 +7258,12 @@ with col2:
         )
     with _fc2:
         fit_timeout = _num_input(
-            "Timeout (s)", key="fit_timeout", default=30, step=5, format="%d",
+            "Timeout [s]", key="fit_timeout", default=30, step=5, format="%d",
             help="Wall-clock limit for one fit.  When it expires the best point found "
                  "so far is kept and the message says the fit was not converged."
         )
     fit_refresh = _num_input(
-        "Refresh (s)", key="fit_refresh", default=60, step=5, format="%d",
+        "Refresh [s]", key="fit_refresh", default=60, step=5, format="%d",
         help="While a fit runs, redraw data and model at the best constants found so far "
              "every this many seconds, under the progress bar (0 = off).  Each redraw costs "
              "one model evaluation.  NMR fits and the global fit for now."
@@ -7329,6 +7421,7 @@ with col2:
         """Read a MicroCal .itc file dropped on the experimental-data uploader."""
         try:
             _itc_content = _file.read()
+            st.session_state["_itc_file_bytes"] = _itc_content     # embedded in a saved session
             _itc_raw_new = parse_itc_file(_itc_content)
             _itc_q_new, _itc_pre, _itc_post, _itc_eq = auto_integrate(_itc_raw_new)
             # auto_integrate returns q_ucal (dummy at [0]) and pre_bl[1:]
@@ -7404,11 +7497,11 @@ with col2:
             f"or equivalency ratio (e.g. **{_ratio_ex}**)"
         )
     else:
-        _col_a_hint = "column A = volume added (mL)"
+        _col_a_hint = "column A = volume added [mL]"
 
     if parsed.get("spectra") is not None:
         _uploader_label = "Upload experimental data (.xlsx, or a MicroCal .itc file)"
-        _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; row 1 = wavelengths (nm); body = absorbance"
+        _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; row 1 = wavelengths [nm]; body = absorbance"
     elif nmr_cfg is not None:
         if nmr_cfg["mode"] == "integration":
             st.caption(f"NMR mode: **integration** (slow exchange) — "
@@ -7428,7 +7521,7 @@ with col2:
         _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; columns B+ = NMR observables"
     else:
         _uploader_label = "Upload experimental data (.xlsx, or a MicroCal .itc file)"
-        _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; columns B+ = species concentrations (mM)"
+        _uploader_hint  = f"{'🪨' if _is_solid_up else '💧'} {_col_a_hint}; columns B+ = species concentrations [mM]"
 
     if not IS_KINETICS:
         _uploader_hint += " — or drop a MicroCal .itc thermogram for ITC mode"
@@ -7505,7 +7598,7 @@ with col2:
                        f"syringe {_itc_loaded.get('syringe_conc_mM', '?'):.4f} mM")
             if st.button("↺ Clear ITC data", key="_itc_clear"):
                 for _k in ["_itc_raw","_itc_q_exp","_itc_baselines","_itc_filename",
-                           "_outliers_itc","_fit_stats"]:
+                           "_itc_file_bytes","_outliers_itc","_fit_stats"]:
                     st.session_state.pop(_k, None)
                 st.rerun()
 
@@ -8713,7 +8806,7 @@ with col2:
                             for _ii, (_kind, _label, _name) in enumerate(_all_inputs):
                                 _col = _cols_inp[_ii % _ncols_inp]
                                 _val = _col.number_input(
-                                    f"σ on {_label} (%)",
+                                    f"σ on {_label} [%]",
                                     min_value=0.0, max_value=50.0,
                                     value=0.0, step=0.1,
                                     key=f"_mc_sig_eq_{_kind}_{_name}",
@@ -8730,12 +8823,12 @@ with col2:
                                 # iteration also fits a perturbed copy of the data.
                                 _mn1, _mn2 = st.columns(2)
                                 _mc_integ_pct = _mn1.number_input(
-                                    "σ on NMR integrations (%)", min_value=0.0, max_value=50.0,
+                                    "σ on NMR integrations [%]", min_value=0.0, max_value=50.0,
                                     value=0.0, step=0.5, key="_mc_sig_eq_nmr_integ", format="%.2f",
                                     help="Relative error of the peak integrals (per point).  "
                                          "0 leaves the integrals untouched.")
                                 _mc_shift_ppm = _mn2.number_input(
-                                    "σ on chemical shifts (ppm)", min_value=0.0, max_value=1.0,
+                                    "σ on chemical shifts [ppm]", min_value=0.0, max_value=1.0,
                                     value=0.0, step=0.001, key="_mc_sig_eq_nmr_shift", format="%.4f",
                                     help="Absolute error of the observed shifts (per point, ppm).  "
                                          "0 leaves the shifts untouched.")
@@ -9138,7 +9231,7 @@ with col2:
                                                 "other variables": _other_str or "—",
                                                 "RMSE (unp.)":  f"{_rec.get('rmse_unp', float('nan')):.6e}",
                                                 "RMSE (pert.)": f"{_rec.get('rmse_pert', float('nan')):.6e}",
-                                                "diff r (%)": f"{_rec['diff']*100:+.4f}%",
+                                                "diff r [%]": f"{_rec['diff']*100:+.4f}%",
                                             })
                                         st.dataframe(_drows, hide_index=True,
                                                       use_container_width=True)
@@ -9360,7 +9453,7 @@ with col2:
                              "±log P": f"± {err:.2f}" if err is not None else _nd,
                              "P":      f"{k_lin:.2e}",
                              "±P":     f"± {err_lin:.2e}" if err_lin is not None else _nd_text(kname, val, log_space=False)})
-            # linear-space concentration parameters (mM)
+            # linear-space concentration parameters [mM]
             for root, mM_val in fitted_concs_eq.items():
                 err_c = param_errors.get(root)
                 rows.append({"Parameter": root,
@@ -9368,7 +9461,7 @@ with col2:
                              "±log P": "—",
                              "P":      f"{mM_val:.2e} mM",
                              "±P":     f"± {err_c:.2e} mM" if err_c is not None else "n/a"})
-            # linear-space titrant concentration parameters (mM)
+            # linear-space titrant concentration parameters [mM]
             for tkey, mM_val in fitted_tits_eq.items():
                 err_t = param_errors.get(tkey)
                 rows.append({"Parameter": tkey,
@@ -9415,7 +9508,7 @@ with col2:
                     _dG = -_R * _T * _math.log(10) * _val
                     _dG_err = _R * _T * _math.log(10) * _err if _err is not None else None
                     _energy_rows_eq.append({"Parameter": _kn,
-                                            "ΔG° (kcal/mol)": f"{_dG:.2f}",
+                                            "ΔG° [kcal/mol]": f"{_dG:.2f}",
                                             "±ΔG°": f"± {_dG_err:.2f}" if _dG_err is not None else "n/a"})
                 if _energy_rows_eq:
                     st.write(f"**Free energies ({_T:.2f} K):**")
@@ -9467,9 +9560,9 @@ with col2:
         _ps_pin      = fit_stats.get("pure_shift_pinned", {}) or {}
         if pure_shifts_disp:
             if _show_abs:
-                st.write("**Pure-species chemical shifts (ppm):**")
+                st.write("**Pure-species chemical shifts [ppm]:**")
             else:
-                st.write("**Pure-species chemical shifts — Δδ relative to math reference (ppm):**")
+                st.write("**Pure-species chemical shifts — Δδ relative to math reference [ppm]:**")
             all_sp_cols = []
             rows_ps = []
             for tgt, col_dict in pure_shifts_disp.items():
@@ -9491,14 +9584,14 @@ with col2:
                 ordered = [c for c in all_sp_cols if c in df_ps.columns]
                 st.dataframe(df_ps[ordered], width='stretch')
                 if _show_abs:
-                    st.caption("Each row = one NMR signal; columns = δ of each pure species (ppm). "
+                    st.caption("Each row = one NMR signal; columns = δ of each pure species [ppm]. "
                                "( ) = species below 2 % of the pool over this titration: its shift is not "
                                "determined by these data and is held at the free shift (or at the value "
                                "shared from the other tabs).  * = species below 10 % of the pool: its shift "
                                "is poorly determined and may absorb misfit; tie it to a related species in "
                                "$constraints if its value is implausible.")
                 else:
-                    st.caption("Each row = one NMR signal; columns = Δδ relative to math reference (ppm). "
+                    st.caption("Each row = one NMR signal; columns = Δδ relative to math reference [ppm]. "
                                "Add a `read:` anchor in $nmr to recover absolute δ.")
 
         _render_pure_shift_comparison(fit_stats)

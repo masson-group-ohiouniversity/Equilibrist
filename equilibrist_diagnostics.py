@@ -384,7 +384,7 @@ def collect_residuals_from_stats(stats: dict, *,
                 for i in range(n_spectra):
                     lb.extend([f"spectrum {i+1}"] * n_wl)
                 _xlabel = (xlabel if xlabel else
-                           ("Wavelength / nm" if len(wl) and wl[-1] > 100
+                           ("Wavelength [nm]" if len(wl) and wl[-1] > 100
                             else "Wavelength index"))
                 _ylabel = ylabel if ylabel else "Absorbance"
                 return {"y_obs": yo, "y_calc": yc, "x": x, "labels": lb,
@@ -428,18 +428,18 @@ def collect_residuals_from_stats(stats: dict, *,
                 # Caller hint > kinetics detection > x_expr from script > generic
                 if not xlabel:
                     if _is_kin:
-                        xlabel = "Time / s"
+                        xlabel = "Time [s]"
                     elif x_expr:
                         xlabel = x_expr
                     else:
                         xlabel = "Titration coordinate"
                 if not ylabel:
                     if fit_mode in ("shift", "mixed"):
-                        ylabel = "Δδ / ppm"
+                        ylabel = "Δδ [ppm]"
                     elif fit_mode == "integration":
-                        ylabel = "Concentration / mM"
+                        ylabel = "Concentration [mM]"
                     elif _is_kin:
-                        ylabel = "Concentration / mM"
+                        ylabel = "Concentration [mM]"
                     else:
                         ylabel = "Observed signal"
                 return {
@@ -479,9 +479,9 @@ def collect_residuals_from_stats(stats: dict, *,
         elif fit_mode.startswith("kinetics"):  xlabel = "Data-point index"
         else:                                   xlabel = "Data-point index"
     if not ylabel:
-        if   fit_mode in ("shift", "mixed"):  ylabel = "Δδ / ppm"
-        elif fit_mode == "integration":       ylabel = "Concentration / mM"
-        elif fit_mode == "kinetics":          ylabel = "Concentration / mM"
+        if   fit_mode in ("shift", "mixed"):  ylabel = "Δδ [ppm]"
+        elif fit_mode == "integration":       ylabel = "Concentration [mM]"
+        elif fit_mode == "kinetics":          ylabel = "Concentration [mM]"
         else:                                  ylabel = "Observed signal"
     return {
         "y_obs":  yo, "y_calc": yc,
@@ -540,7 +540,7 @@ def collect_residuals_conc(parsed, network, exp_data, params, final_logKs,
         "x":      np.asarray(x_list,      dtype=float),
         "labels": lab_list,
         "xlabel": "Titration coordinate",
-        "ylabel": "Concentration / mM",
+        "ylabel": "Concentration [mM]",
     }
 
 
@@ -596,7 +596,7 @@ def collect_residuals_nmr_shift(stats: dict, nmr_data: dict) -> dict:
         "x":      np.asarray(x_list,      dtype=float),
         "labels": lab_list,
         "xlabel": "Titration coordinate",
-        "ylabel": "δ / ppm",
+        "ylabel": "δ [ppm]",
     }
 
 
@@ -624,7 +624,7 @@ def collect_residuals_spectra(stats: dict) -> dict:
             "y_calc": np.array([], dtype=float),
             "x":      np.array([], dtype=float),
             "labels": [],
-            "xlabel": "Wavelength / nm",
+            "xlabel": "Wavelength [nm]",
             "ylabel": "Absorbance",
         }
     A_obs  = np.asarray(A_obs,  dtype=float)
@@ -647,7 +647,7 @@ def collect_residuals_spectra(stats: dict) -> dict:
         "y_calc": np.asarray(y_calc_list, dtype=float),
         "x":      np.asarray(x_list,      dtype=float),
         "labels": lab_list,
-        "xlabel": "Wavelength / nm",
+        "xlabel": "Wavelength [nm]",
         "ylabel": "Absorbance",
     }
 
@@ -689,8 +689,8 @@ def collect_residuals_kinetics(stats: dict, exp_data: dict,
         "y_calc": np.asarray(y_calc_list, dtype=float),
         "x":      np.asarray(x_list,      dtype=float),
         "labels": lab_list,
-        "xlabel": "Time / s",
-        "ylabel": "Concentration / mM",
+        "xlabel": "Time [s]",
+        "ylabel": "Concentration [mM]",
     }
 
 
@@ -3506,7 +3506,7 @@ def make_jackknife_figure(jack_result: dict,
         elif kind == "linear_k":
             ax.set_ylabel(f"Δ {name}\n(θ_full − θ_drop)", fontsize=9)
         else:  # linear_mM
-            ax.set_ylabel(f"Δ {name} / mM\n(θ_full − θ_drop)", fontsize=9)
+            ax.set_ylabel(f"Δ {name} [mM]\n(θ_full − θ_drop)", fontsize=9)
         ax.set_title(f"Parameter: {name}", fontsize=10, loc="left")
 
     axes[-1].set_xlabel(xlabel, fontsize=9)

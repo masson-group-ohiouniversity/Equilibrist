@@ -3,7 +3,7 @@
 A browser-based thermodynamic and kinetic solver built with Python and Streamlit.  
 Define a chemical system in a plain-text script, simulate titration or time-resolved curves, and fit binding or rate constants to experimental data.  
 Runs entirely on your local machine — no data is sent anywhere.  
-**Version 3.0 beta** adds tabs with a global fit across techniques, isothermal titration calorimetry, supercomputer offload, live fits and 24 tutorials, on top of the statistical-validation, identifiability and uncertainty-quantification layer of 2.0.
+**Version 3.0.1 beta** adds tabs with a global fit across techniques, isothermal titration calorimetry, supercomputer offload, live fits and 24 tutorials, on top of the statistical-validation, identifiability and uncertainty-quantification layer of 2.0.
 
 ---
 
@@ -16,7 +16,7 @@ Runs entirely on your local machine — no data is sent anywhere.
 - **Solution and solid titrant modes** — volume-based dilution, or solid addition with fixed cell volume
 - **UV-Vis global spectral fitting** — Beer–Lambert analysis; molar absorptivities solved analytically (variable projection); known spectra for individual species can be provided in a second sheet of the data file via `read:` in `$spectra`, pinning those species' ε(λ) during the fit
 - **NMR fitting** — fast-exchange chemical shift, slow-exchange integration, and simultaneous slow + fast mixed mode; all three available in both equilibrium and kinetics modes. `read:` in `$nmr` pins per-column intrinsic shifts from a second sheet of the data file; `noref` releases the auto-pinned reference so an externally anchored absolute shift scale is recovered when `read:` is also present
-- **Concentration fitting** — direct fitting of measured species concentrations (mM)
+- **Concentration fitting** — direct fitting of measured species concentrations [mM]
 - **Tabs and global fit** — several experiments, of the same or different kinds, fitted at once; constants shared by name, each tab weighted by its own misfit, per-tab information shares, diagnostics on all tabs or on one
 - **ITC** — MicroCal `.itc` thermograms integrated in the app; binding constants with stepwise enthalpies and a heat offset; ΔG°/ΔH°/ΔS° table; competition experiments with fixed enthalpies
 - **Dual optimizer** — L-BFGS-B warm-start followed by Nelder-Mead; user-selectable per run
@@ -55,6 +55,8 @@ cd path/to/Equilibrist
 conda env create -f environment.yml
 conda activate equilibrist
 ```
+
+Upgrading from 2.0: an existing `equilibrist` environment still runs the app. To add the two packages that the new optional features need (`paramiko` for supercomputer submission, `nmrglue` for the NMR stack tool), run `conda env update -n equilibrist -f environment.yml` instead of `conda env create` (which stops if the environment already exists).
 
 ### Option B — pip
 
@@ -144,7 +146,7 @@ A `__pycache__` folder may appear after the first run — this is normal.
 ## Troubleshooting
 
 **`PackagesNotFoundError: nmrglue` during `conda env create`**  
-The `environment.yml` of the first 3.0 beta download (8 November 2026) listed `nmrglue` as a conda package; it is not on the conda-forge or default channels, so the environment was not created. Replace `environment.yml` with the current one from this repository, or open it in a text editor and move the line `nmrglue>=0.10` under `- pip:` (same indentation as `streamlit`), then run `conda env create -f environment.yml` again.
+The `environment.yml` of 3.0 beta (8 November 2026) listed `nmrglue` as a conda package; it is not on the conda-forge or default channels, so the environment was not created. This is corrected in 3.0.1 beta. If you still have the 3.0 beta files: replace `environment.yml` with the current one from this repository, or open it in a text editor and move the line `nmrglue>=0.10` under `- pip:` (same indentation as `streamlit`), then run `conda env create -f environment.yml` again.
 
 **"streamlit: command not found"**  
 Run `pip install streamlit`, or make sure the conda environment is activated first.
@@ -172,5 +174,5 @@ Open `Equilibrist_manual.html` in any browser for the full user manual, includin
 
 ---
 
-*Equilibrist v3.0 beta — built with Python & Streamlit · all computation local, no data transmitted*  
+*Equilibrist v3.0.1 beta — built with Python & Streamlit · all computation local, no data transmitted*  
 *© Eric Masson, Ohio University, 2026*

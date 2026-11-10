@@ -100,7 +100,7 @@
 <body>
 
 <header>
-  <div class="badge">User Manual · v3.0 beta</div>
+  <div class="badge">User Manual · v3.0.1 beta</div>
   <h1>Equilibrist</h1>
   <p class="subtitle">A thermodynamic and kinetic solver — with a full statistical-validation, identifiability and uncertainty-quantification layer</p>
   <span class="version">Python · Streamlit · Open Source</span>
@@ -220,7 +220,7 @@
 <p>Equilibrist is a browser-based scientific application built with Python and Streamlit. It runs locally on your machine. You define a chemical system via a plain-text script, simulate titration or time-resolved curves, and optionally fit binding or rate constants to experimental data.</p>
 
 <div class="callout success">
-<div class="callout-title">New in this revision (v3.0 beta, November 2026)</div>
+<div class="callout-title">New in 3.0 (this revision: v3.0.1 beta, November 2026)</div>
 <ul>
   <li><strong>Global fits across techniques.</strong> Tabs holding different kinds of data (NMR integrals with an internal standard, NMR shifts, UV-Vis, ITC, kinetic runs) are fitted together; the fit message and the Tabs list report each tab's share of the information on every shared constant; the residual diagnostics and the identifiability tools are available in every tab after a global fit (Tutorials 21 and 22).</li>
   <li><strong>ITC documented.</strong> The calorimetry mode has its own chapter (<a href="#itc">ITC</a>); Tutorial 23 adds a three-step network with an endothermic step.</li>
@@ -298,7 +298,7 @@
 </div>
 <div class="callout warn">
 <div class="callout-title">PackagesNotFoundError: nmrglue</div>
-<p>The <code>environment.yml</code> of the first 3.0 beta download (8 November 2026) listed <code>nmrglue</code> as a conda package; it is not on the conda-forge or default channels, so <code>conda env create</code> stopped and no environment was made. Replace the file with the current one from the repository, or move the line <code>nmrglue&gt;=0.10</code> under <code>- pip:</code>, then create the environment again.</p>
+<p>The <code>environment.yml</code> of 3.0 beta (8 November 2026) listed <code>nmrglue</code> as a conda package; it is not on the conda-forge or default channels, so <code>conda env create</code> stopped and no environment was made. This is corrected in 3.0.1 beta. With the 3.0 beta files, replace the file with the current one from the repository, or move the line <code>nmrglue&gt;=0.10</code> under <code>- pip:</code>, then create the environment again.</p>
 </div>
 
 <h3>Method B — pip</h3>
@@ -600,8 +600,8 @@ T = <span class="val">310.15</span> K    <span class="cmt"># 310.15 K</span></co
 <table class="kw-table">
   <thead><tr><th>Prefix</th><th>Meaning</th><th>Used for</th></tr></thead>
   <tbody>
-    <tr><td><code>DG = value</code></td><td>Reaction free energy ΔG° (kcal/mol), van 't Hoff: K = exp(−ΔG°/RT)</td><td>Equilibrium reactions (<code>=</code>)</td></tr>
-    <tr><td><code>DG# = value</code></td><td>Activation free energy ΔG‡ (kcal/mol), Eyring: k = (k_BT/h) · exp(−ΔG‡/RT)</td><td>Kinetic reactions (<code>&gt;</code>, <code>&lt;&gt;</code>)</td></tr>
+    <tr><td><code>DG = value</code></td><td>Reaction free energy ΔG° [kcal/mol], van 't Hoff: K = exp(−ΔG°/RT)</td><td>Equilibrium reactions (<code>=</code>)</td></tr>
+    <tr><td><code>DG# = value</code></td><td>Activation free energy ΔG‡ [kcal/mol], Eyring: k = (k_BT/h) · exp(−ΔG‡/RT)</td><td>Kinetic reactions (<code>&gt;</code>, <code>&lt;&gt;</code>)</td></tr>
   </tbody>
 </table>
 
@@ -991,7 +991,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <table class="kw-table">
   <thead><tr><th>Column</th><th>Shift mode</th><th>Integration mode</th></tr></thead>
   <tbody>
-    <tr><td>A</td><td colspan="2">Volume added (mL) in solution mode. In solid mode, cell A1 must contain the column-A header: either a titrant concentration name (e.g. <code>H0</code>) or an equivalency ratio (e.g. <code>H0/G0</code>) — same rules as for concentration data files.</td></tr>
+    <tr><td>A</td><td colspan="2">Volume added [mL] in solution mode. In solid mode, cell A1 must contain the column-A header: either a titrant concentration name (e.g. <code>H0</code>) or an equivalency ratio (e.g. <code>H0/G0</code>) — same rules as for concentration data files.</td></tr>
     <tr><td>B, C…</td><td>Observed δ in <strong>ppm</strong>. Header = target name (<code>Gtot</code>) or <code>Gtot.1</code>, <code>Gtot_2</code> for duplicates.</td><td>Integrated signal areas (arbitrary units, self-consistent within each spectrum). Header = species name (<code>GH</code>) or <code>GH.1</code>, <code>GH_2</code>.</td></tr>
   </tbody>
 </table>
@@ -1083,18 +1083,18 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
   <tbody>
     <tr><td><code>$concentrations</code></td><td>The first entry is the species in the cell (<code>G0</code>). Further entries are other cell components (a competitor <code>M0</code>), diluted like the first.</td></tr>
     <tr><td><code>$titrant</code></td><td>The species in the syringe and its stock concentration (<code>Ht</code>).</td></tr>
-    <tr><td><code>$volumes</code></td><td><code>V0</code> is the cell volume (iTC200 about 0.20 mL, VP-ITC 1.42 mL). It is not taken from the file: type it in the script or in the V₀ box.</td></tr>
+    <tr><td><code>$volumes</code></td><td><code>V0</code> is the cell volume (iTC200 about 0.20 mL, VP-ITC 1.42 mL). A value written in the script is kept; left blank, it is read from the file header.</td></tr>
     <tr><td><code>$temperature</code></td><td>The temperature used for ΔG° and ΔS° (default 25 °C).</td></tr>
-    <tr><td><code>$reactions</code></td><td>Equilibria as usual, log K in M<sup>−1</sup>. <code>; dH = −3.5</code> on a reaction line holds that reaction's enthalpy (kcal/mol) fixed.</td></tr>
+    <tr><td><code>$reactions</code></td><td>Equilibria as usual, log K in M<sup>−1</sup>. <code>; dH = −3.5</code> on a reaction line holds that reaction's enthalpy [kcal/mol] fixed.</td></tr>
   </tbody>
 </table>
-<p>The values may be left out (<code>G0</code>, <code>V0</code>, <code>Ht</code> as bare names, Tutorial 19B): the app then asks for the file first. When the file is loaded, its header sets the cell and syringe concentrations (overwriting values written in the script) and the x-axis maximum, estimated as the molar ratio reached by the last injection.</p>
+<p>The values may be left out (<code>G0</code>, <code>V0</code>, <code>Ht</code> as bare names, Tutorial 19B): the app then asks for the file first and takes the cell and syringe concentrations and the cell volume from its header. With values in the script, loading a file still sets the cell and syringe concentrations from the header (overwriting the script's) and keeps the script's cell volume. In both cases the x-axis maximum is set to the molar ratio reached by the last injection.</p>
 
 <h3>The .itc file</h3>
 <p>The parser reads the MicroCal raw format: a header with the injection table, the cell and syringe concentrations, the cell volume and the temperature, followed by the power trace (time in s, differential power in µcal/s) with an <code>@N</code> marker at every injection. Injection 0 is the dummy: it is integrated and displayed, its volume counts in the running concentrations, but it is never fitted. Files holding integrated heats only (spreadsheets, Origin exports) are not read.</p>
 
 <h3>Integration</h3>
-<p>Each injection window is corrected with a straight baseline from the plateau before the injection to the plateau before the next one (12 points each) and integrated from the injection to the point where the corrected signal has settled within 3.5 × the baseline noise, plus 8 further points (40 s at the usual 5 s interval). The thermogram plot shows the trace, the baselines and the integrated heats as dots on a right-hand axis (µcal); after a fit the calculated heats are added. Under <strong>⚙️ Adjust per-injection baselines</strong> the pre- and post-injection levels of every injection can be edited and the peaks re-integrated (<em>Re-integrate</em>). Click a dot to exclude that injection from the fit (it turns hollow; click again to restore it, or <em>✕ Clear all</em>). <strong>↺ Clear ITC data</strong> removes the file. Synthetic thermograms must use realistic, fast peaks: with a 22 s decay the integration window loses 1.5 % of every large peak, which lands directly in the enthalpies.</p>
+<p>Each injection window is corrected with a straight baseline from the plateau before the injection to the plateau before the next one (12 points each) and integrated from the injection to the point where the corrected signal has settled within 3.5 × the baseline noise, plus 8 further points (40 s at the usual 5 s interval). The thermogram plot shows the trace, the baselines and the integrated heats as dots on a right-hand axis [µcal]; after a fit the calculated heats are added. Under <strong>⚙️ Adjust per-injection baselines</strong> the pre- and post-injection levels of every injection can be edited and the peaks re-integrated (<em>Re-integrate</em>). Click a dot to exclude that injection from the fit (it turns hollow; click again to restore it, or <em>✕ Clear all</em>). <strong>↺ Clear ITC data</strong> removes the file. Synthetic thermograms must use realistic, fast peaks: with a 22 s decay the integration window loses 1.5 % of every large peak, which lands directly in the enthalpies.</p>
 
 <h3>Model</h3>
 <p>Concentrations follow the overflow model of a constant-volume cell: after an injection of volume ΔV every cell species is diluted by V<sub>0</sub>/(V<sub>0</sub> + ΔV) and the titrant gains H<sub>syringe</sub>·ΔV/(V<sub>0</sub> + ΔV). The equilibrium composition is solved at every injection with the script's network, and the heat of injection <em>i</em> is</p>
@@ -1102,7 +1102,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <p>where ξ<sub>k</sub> is the <em>extent</em> of reaction k, obtained from the species concentrations (for sequential binding ξ<sub>1</sub> = [GH] + [GH<sub>2</sub>] and ξ<sub>2</sub> = [GH<sub>2</sub>]), and Δξ<sub>k</sub> its change over the injection once the previous state has been diluted. The ΔH<sub>k</sub> are therefore the <strong>stepwise</strong> enthalpies of the reactions as written, not cumulative ones; q<sub>offset</sub> is a heat common to every injection (dilution).</p>
 
 <h3>Fitting</h3>
-<p>Tick the constants to fit and press <em>Fit Parameters</em>. The log K are optimised by Nelder–Mead with the usual Tol and Timeout; at every step the ΔH<sub>k</sub> and q<sub>offset</sub> are solved by linear least squares. The <strong>q_offset (µcal)</strong> box in the sidebar has its own fit tick: unticked (the default) the offset is held at the value in the box, 0 unless you type one. A reaction carrying <code>dH = …</code> keeps that enthalpy; this is required in displacement or competition experiments, where the competitor's enthalpy comes from a separate titration (its column would otherwise be collinear with the offset). Initial concentrations can be fitted as in any titration.</p>
+<p>Tick the constants to fit and press <em>Fit Parameters</em>. The log K are optimised by Nelder–Mead with the usual Tol and Timeout; at every step the ΔH<sub>k</sub> and q<sub>offset</sub> are solved by linear least squares. The <strong>q_offset [µcal]</strong> box in the sidebar has its own fit tick: unticked (the default) the offset is held at the value in the box, 0 unless you type one. A reaction carrying <code>dH = …</code> keeps that enthalpy; this is required in displacement or competition experiments, where the competitor's enthalpy comes from a separate titration (its column would otherwise be collinear with the offset). Initial concentrations can be fitted as in any titration.</p>
 
 <h3>Results</h3>
 <p>Below the plot: R², the RMSE in µcal, the number of injections fitted, the reduced χ², q<sub>offset</sub> and the number of evaluations; the <em>Fitted constants</em> table (log K ± and K ±); and the <em>Thermodynamics</em> table at the script temperature: ΔG° = −RT ln K, ΔH°, ΔS° = (ΔH° − ΔG°)/T in cal mol<sup>−1</sup> K<sup>−1</sup>, and TΔS° in kcal/mol. The ± on ΔH° is the linear least-squares error at the fitted K and does not include the uncertainty of K; in a three-step network it can understate the real spread by an order of magnitude (Tutorial 23). Use the bootstrap for combined errors: the bootstrap, the jackknife and the Monte Carlo have ITC versions, and ITC tabs take part in the global fit like any other.</p>
@@ -1158,7 +1158,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
   <thead><tr><th>Control</th><th>Meaning</th><th>Default</th></tr></thead>
   <tbody>
     <tr><td>Tol (−log)</td><td>Convergence target for the fitted constants, in log units: the fit is declared converged when the search has narrowed to 10<sup>−n</sup> in every constant. Errors on constants are typically 0.01&ndash;0.1 log units, so 3&ndash;4 is usually sufficient; 6 is very tight and is rarely reached before the Timeout.</td><td>3.0</td></tr>
-    <tr><td>Timeout (s)</td><td>Maximum wall-clock time for one fit. When it expires the best point found so far is kept, and the fit message says so.</td><td>30</td></tr>
+    <tr><td>Timeout [s]</td><td>Maximum wall-clock time for one fit. When it expires the best point found so far is kept, and the fit message says so.</td><td>30</td></tr>
   </tbody>
 </table>
 <p>After every fit the banner above the controls states how the fit ended: <em>converged</em> (the search narrowed below Tol, with the number of evaluations, the time taken and how much the constants still moved over the last iterations), <em>stopped by the Timeout</em> (not converged &mdash; the message gives the movement of the constants in the last iterations so you can judge how far from converged it was; pressing Fit again continues from the current values), or <em>stopped at the iteration cap</em>.</p>
@@ -1212,7 +1212,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <p>After UV-Vis fitting, a third plot shows the fitted molar absorptivity ε(λ) [mM⁻¹] for each absorbing species.</p>
 
 <h3>NMR chemical shift plot</h3>
-<p>After NMR shift fitting, a plot shows the experimental Δδ points and fitted Δδ curves for each signal column. Y-axis: Δδ (ppm).</p>
+<p>After NMR shift fitting, a plot shows the experimental Δδ points and fitted Δδ curves for each signal column. Y-axis: Δδ [ppm].</p>
 
 <h3 id="outlier-flagging">Outlier Flagging</h3>
 <p>Every experimental data plot supports interactive outlier exclusion. Click any experimental data point to toggle its excluded state. A hint bar below each chart shows the current status and a clear button when points are excluded.</p>
@@ -1358,7 +1358,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
   <tbody>
     <tr><td>Equilibrium constant (K)</td><td>log P, ±log P, P, ±P</td></tr>
     <tr><td>Rate constant (k)</td><td>P, ±P (no log columns)</td></tr>
-    <tr><td>Concentration (mM)</td><td>P (mM), ±P (no log columns)</td></tr>
+    <tr><td>Concentration [mM]</td><td>P [mM], ±P (no log columns)</td></tr>
   </tbody>
 </table>
 <p>Fitted values are written back to the sidebar inputs immediately after the fit completes.</p>
@@ -1368,8 +1368,8 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <table class="kw-table">
   <thead><tr><th>Parameter type</th><th>Formula</th><th>Column</th></tr></thead>
   <tbody>
-    <tr><td>Equilibrium constant K</td><td>ΔG° = −RT ln(K) = −RT ln(10) · log K</td><td>ΔG° (kcal/mol)</td></tr>
-    <tr><td>Rate constant k</td><td>ΔG‡ = RT (ln(k_BT/h) − ln(10) · log k)  (Eyring, assuming elementary step)</td><td>ΔG (kcal/mol) *</td></tr>
+    <tr><td>Equilibrium constant K</td><td>ΔG° = −RT ln(K) = −RT ln(10) · log K</td><td>ΔG° [kcal/mol]</td></tr>
+    <tr><td>Rate constant k</td><td>ΔG‡ = RT (ln(k_BT/h) − ln(10) · log k)  (Eyring, assuming elementary step)</td><td>ΔG [kcal/mol] *</td></tr>
   </tbody>
 </table>
 <p>Rate constant rows are marked with <code>*</code> and a caption "ΔG‡: assuming elementary steps" appears below the table. R = 1.9872 × 10⁻³ kcal mol⁻¹ K⁻¹.</p>
@@ -1558,12 +1558,12 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <p><strong>Share pure-species shifts across tabs</strong> (below the weighting box). In a plain global fit only the constants are shared: each tab still solves its own chemical shift for every species of its shift columns (GHM, GH2M, GH2M2 …) by linear least squares, so two titrations of the same compound can end with different "pure" shifts for the same species and each tab can absorb part of a misfit in its own shifts. With the box ticked the species shifts are solved <em>once</em> for all tabs: at every evaluation the tabs' shift columns are matched proton by proton through their free shift (the V = 0 row: the same proton has the same free shift in every tab within referencing noise, whatever column it was typed in; a proton found in one tab only keeps its own shifts, and when two protons of one tab lie within 0.05 ppm the columns are paired by position instead), their rows stacked and weighted like the objective itself, and the common shifts solved under the usual <code>read:</code> pins, per-column bounds and shift constraints; every tab's statistics, curves and residuals then describe that common solution. The box is ticked by default when the tabs' shift columns can be matched (same target variables, at least one common proton; the fit refuses otherwise with a message), and the fit message lists the free shifts of the protons that were shared and should be unticked when the tabs follow different protons or different conditions (solvent, temperature, referencing). Expect the residuals to rise a little and the correlated constants to tighten: a misfit that separate shifts could hide becomes visible.</p>
 <p>Independently of the plotted range, every NMR fit now simulates the model out to the last data point: a point beyond the script's <code>xmax</code> (a 10-equivalent check point in a titration plotted to 4) used to be compared with the end of the curve, i.e. with the model at <code>xmax</code> without its own dilution. The fit message says when the range was extended; raise <code>xmax</code> to see the curve there.</p>
 <p><strong><code>standard:</code> in <code>$nmr</code></strong> (integration mode). <code>standard: 1.0 mM</code> declares an internal standard dissolved in the solvent (its concentration is the same in every solution, so no dilution correction). In the data file a column headed <code>Std</code> (or <code>Standard</code>) holds its integrals and normalises the columns that follow it, up to the next <code>Std</code> column: every integral per nucleus is divided by the standard's integral per nucleus of the same spectrum and multiplied by the standard's concentration. Blocks from different nuclei (a 19F block and a 1H block, each with its own <code>Std</code> column) thus land on one absolute scale and are averaged as duplicates of the same species or variable. <code>integration:</code> lists the nuclei per signal for every column, standard columns included. Without <code>pool:</code> the fit uses these absolute concentrations; with <code>pool:</code> it uses only their fractions, renormalised to the known total of complexes, which is robust to an error on the standard.</p>
-<p><strong>Refresh (s)</strong> (under Tol and Timeout). Fits now run in the background, so the page stays live while a fit runs: the progress bar shows the elapsed time, the number of evaluations and the best objective so far (for a global fit, the rms objective of every tab at the current best point: the weighted global objective changes scale whenever the tab weights are re-estimated, and a weighted fit trades one tab's misfit for another's, so no single number is meaningful there), and every Refresh seconds the best constants found so far are written into the sidebar and the page is redrawn with them, so the usual plots update in place. The default is 60 s (a ten-minute fit redraws about ten times); set 5–10 s to watch a short fit, or 0 for no intermediate redraws. This holds for every fit (NMR, concentrations, spectra, ITC, kinetics and the global fit); tabs are locked while a fit runs, and fits sent to the cluster show their progress text instead.</p>
+<p><strong>Refresh [s]</strong> (under Tol and Timeout). Fits now run in the background, so the page stays live while a fit runs: the progress bar shows the elapsed time, the number of evaluations and the best objective so far (for a global fit, the rms objective of every tab at the current best point: the weighted global objective changes scale whenever the tab weights are re-estimated, and a weighted fit trades one tab's misfit for another's, so no single number is meaningful there), and every Refresh seconds the best constants found so far are written into the sidebar and the page is redrawn with them, so the usual plots update in place. The default is 60 s (a ten-minute fit redraws about ten times); set 5–10 s to watch a short fit, or 0 for no intermediate redraws. This holds for every fit (NMR, concentrations, spectra, ITC, kinetics and the global fit); tabs are locked while a fit runs, and fits sent to the cluster show their progress text instead.</p>
 <p>The global Nelder–Mead optimiser first settles the tab weights with two or three short passes (the weights are re-estimated after each), then runs a full pass, and restarts from its best point with a fresh full-size simplex until a restart no longer lowers the objective (at most five restarts, within the Timeout). A pass is also ended as <em>stationary</em> when the objective has improved by less than Tol/100 (relative) over the last 20 × (n + 1) evaluations: in a flat direction — two constants whose product alone is determined — the simplex never shrinks although the fit stopped changing long before, and without this rule such a fit always ran to the Timeout and was reported as not converged. The message then reads "converged (objective stationary)"; when the Hessian error of a shared constant is missing or exceeds one log unit, it adds that these constants "lie along a flat direction and their individual values are not determined" and names them. Both are converged fits, the second with a warning about identifiability; a timeout is reported only when the objective was still falling when the clock ran out. The number of restarts appears in the fit message.</p>
 <h3>Propagating constants between tabs</h3>
 <p><strong>📤 Propagate ticked constants</strong>, next to the Global fit button, copies the constants that are ticked for fitting in the current tab, at the values shown in their boxes (right after a fit, the fitted values), into every other tab whose script defines a constant of the same name. Only the values move, exactly as a fit writes them back: the other tabs keep their own fit ticks, bounds, data and script text, and a constant with no namesake in a tab is left alone. A notice lists what went to which tab. Since the global fit starts from the boxes of every tab, propagating after a single-tab fit gives all tabs the same starting constants.</p>
 <h3>Monte Carlo with measurement noise on NMR data</h3>
-<p>For any NMR fit (equilibrium or kinetics, single or global) the Monte Carlo panel offers two more inputs besides the uncertainties on the nuisance quantities: <strong>σ on NMR integrations (%)</strong>, a relative error applied point by point to every integration column, and <strong>σ on chemical shifts (ppm)</strong>, an absolute error added point by point to every shift column. Each iteration then fits a freshly perturbed copy of the data (together with the perturbed concentrations, if any), so the spread of the fitted constants reflects the noise level you specify rather than the one inferred from the residuals, which is what the bootstrap does. Which columns are integrals and which are shifts follows the <code>$nmr</code> block of each script.</p>
+<p>For any NMR fit (equilibrium or kinetics, single or global) the Monte Carlo panel offers two more inputs besides the uncertainties on the nuisance quantities: <strong>σ on NMR integrations [%]</strong>, a relative error applied point by point to every integration column, and <strong>σ on chemical shifts [ppm]</strong>, an absolute error added point by point to every shift column. Each iteration then fits a freshly perturbed copy of the data (together with the perturbed concentrations, if any), so the spread of the fitted constants reflects the noise level you specify rather than the one inferred from the residuals, which is what the bootstrap does. Which columns are integrals and which are shifts follows the <code>$nmr</code> block of each script.</p>
 </section>
 
 <!-- ─────────────────────────── 1D RMSE profile ─────────────────────────── -->
@@ -2054,7 +2054,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
   <tbody>
     <tr><td><code>eq.logK</code>, <code>eq.K</code></td><td>Every equilibrium constant, as log<sub>10</sub> K and as K, at the values in the sidebar.</td></tr>
     <tr><td><code>eq.x</code>, <code>eq.x_label</code></td><td>The x axis of the simulated curve, as defined by <code>$plot x</code>.</td></tr>
-    <tr><td><code>eq.conc</code>, <code>eq.species</code></td><td>Concentration array (mM) of every species along <code>eq.x</code>.</td></tr>
+    <tr><td><code>eq.conc</code>, <code>eq.species</code></td><td>Concentration array [mM] of every species along <code>eq.x</code>.</td></tr>
     <tr><td><code>eq.var("name")</code></td><td>A <code>$variables</code> expression evaluated along <code>eq.x</code>.</td></tr>
     <tr><td><code>eq.simulate(KGHM=7.0, …)</code></td><td>Recomputes the curves with some constants changed; returns <code>(x, conc)</code>.</td></tr>
     <tr><td><code>eq.data</code></td><td>The loaded NMR, concentration or spectral data, as Equilibrist holds them.</td></tr>
@@ -2093,7 +2093,7 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
 <table class="kw-table">
   <thead><tr><th>Column</th><th>Equilibrium mode</th><th>Kinetics mode</th></tr></thead>
   <tbody>
-    <tr><td>First column</td><td>V_add(mL) — volume added (solution mode only)</td><td>Time [s]</td></tr>
+    <tr><td>First column</td><td>V_add [mL] — volume added (solution mode only)</td><td>Time [s]</td></tr>
     <tr><td>Second column</td><td>Evaluated x-axis expression (e.g. H0/G0)</td><td>— (absent)</td></tr>
     <tr><td>Species columns</td><td colspan="2">Concentration [mM] for every species in the network</td></tr>
     <tr><td>Variable columns</td><td colspan="2">Evaluated <code>$variables</code> expressions [mM]</td></tr>
@@ -2144,9 +2144,9 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
     <tr><td><code>notes</code></td><td>Your free-text label.</td></tr>
     <tr><td><code>script</code></td><td>Full Equilibrist script (concentrations, volumes, titrant, reactions, plot, nmr, spectra, constraints, ...) — the model definition.</td></tr>
     <tr><td><code>script_filename</code></td><td>Original .txt filename for the sidebar badge after restore.</td></tr>
-    <tr><td><code>data</code></td><td>The raw bytes of the experimental data file (xlsx / csv / ...), base64-encoded, with a SHA-256 checksum so the integrity can be verified on load.</td></tr>
+    <tr><td><code>data</code></td><td>The raw bytes of the experimental data file (the xlsx file, or the MicroCal <code>.itc</code> thermogram in ITC mode), base64-encoded, with a SHA-256 checksum so the integrity can be verified on load.</td></tr>
     <tr><td><code>data_filename</code> / <code>data_kind</code></td><td>Original filename and free-text type label (<code>experimental</code>, <code>nmr</code>, <code>spectra</code>, ...).</td></tr>
-    <tr><td><code>fit_state</code></td><td>Selected fit parameters, tolerance, maxiter, timeout, wavelength range, NMR mode, allow-negative-ε flag, constraint set, starting log K values, xmax — exactly the configuration that produced <em>fit_result_summary</em>.</td></tr>
+    <tr><td><code>fit_state</code></td><td>Selected fit parameters, tolerance, maxiter, timeout, wavelength range, NMR mode, allow-negative-ε flag, constraint set, starting log K values, xmax — exactly the configuration that produced <em>fit_result_summary</em>. In ITC mode also the excluded injections, the edited baselines and the heat offset with its fit tick; on load the thermogram is integrated again with them.</td></tr>
     <tr><td><code>fit_result_summary</code></td><td>Fitted parameters, R², RMSE, AIC, AICc, BIC, Durbin–Watson, Shapiro <em>p</em> from the last successful fit. Excludes bulky arrays (raw residuals, spectra matrices) to keep the file small.</td></tr>
     <tr><td><code>uq.bootstrap</code></td><td>Summary of the last bootstrap run — method, n_success / n_bootstrap, wall time, per-parameter CI tuples (lo, median, hi). Bulky per-iteration samples are dropped.</td></tr>
     <tr><td><code>uq.jackknife</code></td><td>Summary of the last jackknife — per-parameter jack_se, n_jack, wall time.</td></tr>
@@ -2392,7 +2392,7 @@ y    = A, B, AB</code></pre>
 
 <section id="ex-kinetics-nmr">
 <h2>Example: Kinetics + NMR Integration</h2><div class="section-line"></div>
-<p>Data file: column A = time (s), columns B–E = integrated signal areas for G, H, GH, GH2. The n_H list mirrors the signal column order.</p>
+<p>Data file: column A = time [s], columns B–E = integrated signal areas for G, H, GH, GH2. The n_H list mirrors the signal column order.</p>
 <pre><code><span class="sec">$concentrations</span>
 <span class="sp">G0</span> = <span class="val">1.00</span> mM
 <span class="sp">H0</span> = <span class="val">2.00</span> mM
@@ -2857,7 +2857,7 @@ y    = A, B, C, D</code></pre>
 </div>
 
 <footer>
-  <p>Equilibrist — built with Python &amp; Streamlit &nbsp;·&nbsp; all computation local, no data transmitted &nbsp;·&nbsp; v3.0 beta (November 2026)</p>
+  <p>Equilibrist — built with Python &amp; Streamlit &nbsp;·&nbsp; all computation local, no data transmitted &nbsp;·&nbsp; v3.0.1 beta (November 2026)</p>
 </footer>
 
 </body>

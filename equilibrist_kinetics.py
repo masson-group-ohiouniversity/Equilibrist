@@ -594,7 +594,7 @@ def fit_kinetics(parsed: dict, exp_data: dict, logk_dict: dict, fit_keys: list,
         "residuals":       np.asarray(residuals,         dtype=float),
         # v2 per-column arrays — same convention as NMR/CONC modules;
         # for kinetics the per_col_x entries hold TIME values (in
-        # seconds), so the residuals plot ends up labeled "Time / s".
+        # seconds), so the residuals plot ends up labeled "Time (s)".
         "per_col_x":       {c: np.asarray(v, dtype=float)
                             for c, v in _per_col_t.items()},
         "per_col_y_obs":   {c: np.asarray(v, dtype=float)

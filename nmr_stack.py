@@ -353,7 +353,7 @@ use_1r = st.sidebar.checkbox("Use TopSpin's processed spectra (1r) as they are",
                              key="_use_1r",
                              help="Skip the FID processing and read the spectrum TopSpin "
                                   "wrote.  Phasing cannot be changed in that case.")
-lb = st.sidebar.number_input("Line broadening LB (Hz)", 0.0, 20.0, 0.3, 0.1, key="_lb",
+lb = st.sidebar.number_input("Line broadening LB [Hz]", 0.0, 20.0, 0.3, 0.1, key="_lb",
                              disabled=use_1r)
 zf = st.sidebar.select_slider("Zero-fill factor", [1, 2, 4], value=2, key="_zf", disabled=use_1r)
 phase_source = st.sidebar.radio(
@@ -469,7 +469,7 @@ with st.expander("Experiments (tick to show, edit labels, reaction times and the
         column_config={
             "show": st.column_config.CheckboxColumn("show"),
             "label": st.column_config.TextColumn("label"),
-            "time_h": st.column_config.NumberColumn("time (h)", format="%.3f"),
+            "time_h": st.column_config.NumberColumn("time [h]", format="%.3f"),
             "x": st.column_config.NumberColumn("x (s or mL)", format="%.4f"),
             "acquired": st.column_config.DatetimeColumn("acquired", format="YYYY-MM-DD HH:mm"),
             "path": None,
@@ -1049,7 +1049,7 @@ if view == "map (ppm × spectrum)":
     fig = go.Figure(go.Heatmap(x=xg, y=labels, z=np.vstack(Z), colorscale="Viridis",
                                colorbar=dict(title="intensity")))
     fig.update_yaxes(autorange="reversed")
-    fig.update_xaxes(title="δ (ppm)", autorange="reversed", range=[hi, lo])
+    fig.update_xaxes(title="δ [ppm]", autorange="reversed", range=[hi, lo])
     fig.update_layout(height=max(360, 28 * len(cal_specs) + 120), margin=dict(l=40, r=20, t=30, b=50),
                       template="simple_white")
     st.plotly_chart(fig, width="stretch", key="_map_fig")
@@ -1109,7 +1109,7 @@ else:
         colors=COLORS, full=[ppm_lo_all, ppm_hi_all],
         fit_k=float(sig_cfg.get("fit_k", 6.0)), fit_k_spec={l: float(v) for l, v in fitk_spec.items()},
         n_undo=len(st.session_state.get("_hist") or []), n_redo=len(st.session_state.get("_redo") or []),
-        xlabel=("V (mL)" if str(st.session_state.get("_x_kind", "")).startswith("titr") else "t (s)"),
+        xlabel=("V [mL]" if str(st.session_state.get("_x_kind", "")).startswith("titr") else "t [s]"),
         calib_ppm=st.session_state.get("_calib_click"), key="_wb", default=None)
 
 # ── tables: calibration, signals, export ───────────────────────────────────
@@ -1118,7 +1118,7 @@ tab_cal, tab_sig, tab_exp, tab_proc = st.tabs(
 
 with tab_cal:
     cc1, cc2, cc3 = st.columns([1, 1, 2])
-    st.session_state["_calib_ref"] = cc1.number_input("Reference peak is at (ppm)", value=float(calib_ref),
+    st.session_state["_calib_ref"] = cc1.number_input("Reference peak is at [ppm]", value=float(calib_ref),
                                                       step=0.01, format="%.3f", key="_calib_ref_in",
                                                       help="HDO 4.79, TMS/DSS 0.00, CHCl3 7.26 ...")
     st.session_state["_calib_win"] = cc2.number_input("Search window (± ppm)", value=float(calib_win),
@@ -1128,11 +1128,11 @@ with tab_cal:
                 "spectrum is aligned on the most prominent peak within the window, following the "
                 "peak from one spectrum to the next. Correct an individual spectrum in ↔ mode or "
                 "in the table.")
-    odf = pd.DataFrame({"spectrum": labels, "offset (ppm)": [float(offsets.get(l, 0.0)) for l in labels]})
+    odf = pd.DataFrame({"spectrum": labels, "offset [ppm]": [float(offsets.get(l, 0.0)) for l in labels]})
     oed = st.data_editor(odf, hide_index=True, width="stretch", key="_off_editor",
                          disabled=["spectrum"],
-                         column_config={"offset (ppm)": st.column_config.NumberColumn(format="%.4f")})
-    for l, v in zip(oed["spectrum"], oed["offset (ppm)"]):
+                         column_config={"offset [ppm]": st.column_config.NumberColumn(format="%.4f")})
+    for l, v in zip(oed["spectrum"], oed["offset [ppm]"]):
         v = float(v) if pd.notna(v) else 0.0
         if abs(v - float(offsets.get(l, 0.0))) > 1e-9:
             _push(); offsets[l] = v
@@ -1258,7 +1258,7 @@ with tab_sig:
             j = mm.get("J_hz")
             return (mm.get("pattern") or "") + (f", J = {j:.1f} Hz" if j else "")
 
-        st.markdown("**Chemical shifts (ppm)**")
+        st.markdown("**Chemical shifts [ppm]**")
         st.dataframe(pd.DataFrame({"spectrum": labels, **{
             sg["name"]: [None if _sig_value(sg, l, "pos") is None else round(_sig_value(sg, l, "pos"), 4)
                          for l in labels] for sg in signals}}), hide_index=True, width="stretch")
@@ -1276,7 +1276,7 @@ with tab_sig:
             for sg in signals[1:]:
                 idf[f"{sg['name']}/{first}"] = idf[sg["name"]] / idf[first].replace(0, np.nan)
         st.dataframe(idf, hide_index=True, width="stretch")
-        st.markdown("**Integration window (ppm)** and how each value was obtained: fit (linewidth, residual "
+        st.markdown("**Integration window [ppm]** and how each value was obtained: fit (linewidth, residual "
                     "as % of the maximum), area, or manual (limits dragged on the plot). ⚠ marks a cell where "
                     "the fit and the numerical area disagree by more than 15 %: look at it.")
         if st.button("Clear manual limits", key="_sig_clear_manual",
@@ -1381,8 +1381,8 @@ with tab_exp:
 with tab_proc:
     rep = pd.DataFrame([{
         "label": sp.exp.label, "source": sp.source, "PHC0": round(sp.phc0, 2), "PHC1": round(sp.phc1, 2),
-        "TopSpin PHC0": sp.exp.phc0, "TopSpin PHC1": sp.exp.phc1, "offset (ppm)": round(offsets.get(sp.exp.label, 0.0), 4),
-        "NS": sp.exp.ns, "RG": sp.exp.rg, "pulse program": sp.exp.pulprog, "SFO1 (MHz)": sp.exp.sfo1,
+        "TopSpin PHC0": sp.exp.phc0, "TopSpin PHC1": sp.exp.phc1, "offset [ppm]": round(offsets.get(sp.exp.label, 0.0), 4),
+        "NS": sp.exp.ns, "RG": sp.exp.rg, "pulse program": sp.exp.pulprog, "SFO1 [MHz]": sp.exp.sfo1,
         "points": sp.real.size} for _, sp in cal_specs])
     st.dataframe(rep, hide_index=True, width="stretch")
 
@@ -1421,7 +1421,7 @@ if ex1.button("Build publication figure (PDF + PNG)", key="_build_fig"):
         ax.plot(x + i * skew, y + i * step, lw=0.6, color="black" if stack else COLORS[i % len(COLORS)])
         if stack:
             ax.text(hi + 0.02 * (hi - lo), i * step, name, fontsize=6.5, va="bottom", ha="right")
-    ax.set_xlim(hi, lo); ax.set_xlabel("δ (ppm)"); ax.set_yticks([])
+    ax.set_xlim(hi, lo); ax.set_xlabel("δ [ppm]"); ax.set_yticks([])
     for s_ in ("top", "right", "left"):
         ax.spines[s_].set_visible(False)
     mfig.tight_layout()

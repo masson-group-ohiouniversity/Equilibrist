@@ -97,7 +97,7 @@ def export_to_excel(curve, x_vals, parsed, params, network, script_text, logK_va
             n_tit   = eq * n_primary
             V_add_L = n_tit / max(tit_mM, 1e-12)
             V_add_mL.append(V_add_L * 1000)
-        data = {'V_add(mL)': V_add_mL, x_col_name: x_vals}
+        data = {'V_add [mL]': V_add_mL, x_col_name: x_vals}
 
     for species in network["all_species"]:
         if species in curve:
@@ -679,7 +679,7 @@ def load_experimental_data(file_bytes) -> dict:
     Read experimental data from an Excel file using pandas.
 
     Liquid mode:
-      - First column: volume of titrant added (mL)
+      - First column: volume of titrant added [mL]
       - Subsequent columns: species/variable names
 
     Solid mode:
@@ -782,11 +782,11 @@ def load_spectra_data(file_bytes) -> dict:
 
     Sheet 1 (required) — experimental absorbance data:
       Row 0: col A = label (e.g. "V"), cols B+ = wavelength values (nm, floats)
-      Rows 1+: col A = volume of titrant added (mL), cols B+ = absorbance
+      Rows 1+: col A = volume of titrant added [mL], cols B+ = absorbance
 
     Sheet 2 (optional) — known pure-species spectra (same layout as the
       exported "spectra" tab):
-      Row 0: col A = "λ [nm]" (or any label), cols B+ = wavelength values (nm)
+      Row 0: col A = "λ [nm]" (or any label), cols B+ = wavelength values [nm]
       Rows 1+: col A = species name, cols B+ = ε [mM⁻¹ cm⁻¹]
       Stored under key "known_spectra_raw" as {species: (wl_arr, eps_arr)}.
 
@@ -1435,7 +1435,7 @@ def _itc_pub_figure_bytes(raw, q_exp, pre_baselines, post_baselines,
     ax_top.set_xlim(0.0, t_end)
     ax_top.xaxis.set_label_position("top")
     ax_top.xaxis.tick_top()
-    ax_top.set_xlabel("Time (s)", labelpad=3)
+    ax_top.set_xlabel("Time [s]", labelpad=3)
     ax_top.tick_params(axis="x", which="both", top=True, labeltop=True,
                        bottom=False, labelbottom=False)  # no inner ticks
     ax_top.tick_params(axis="y", which="both", right=True)
@@ -1458,7 +1458,7 @@ def _itc_pub_figure_bytes(raw, q_exp, pre_baselines, post_baselines,
             pass
 
     ax_bot.set_xlim(0.0, t_end)   # same range as top panel → perfect alignment
-    ax_bot.set_ylabel(r"$\Delta H$ (kcal/mol)")
+    ax_bot.set_ylabel(r"$\Delta H$ [kcal/mol]")
     ax_bot.set_xlabel(x_label, labelpad=3)
     ax_bot.tick_params(axis="x", which="both", top=False, labeltop=False,
                        bottom=True, labelbottom=True)  # no inner ticks

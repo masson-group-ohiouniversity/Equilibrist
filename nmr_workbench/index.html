@@ -1,0 +1,809 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; color: #222; background: transparent; }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; flex-wrap: wrap; }
+  .bar label.mode, .bar label.act { padding: 0 9px; border: 1px solid #bbb; border-radius: 12px; cursor: pointer; user-select: none; background: #f6f6f6;
+                                    display: inline-flex; align-items: center; height: 25px; box-sizing: border-box; vertical-align: middle; }
+  .bar label.act:active { background: #ddd; }
+  .bar label.act.off { opacity: 0.4; cursor: default; }
+  .bar label.mode.on { background: #2a78d6; color: #fff; border-color: #2a78d6; }
+  .bar label.shape { padding: 2px 8px; border: 1px solid #bbb; border-radius: 10px; cursor: pointer; user-select: none; background: #f6f6f6; }
+  .bar label.shape input { display: none; }
+  .bar label.shape.on { background: #d62728; color: #fff; border-color: #d62728; }
+  .bar label.tool { padding: 2px 8px; border: 1px solid #bbb; border-radius: 10px; cursor: pointer; user-select: none; background: #f6f6f6; }
+  .bar label.tool.on { background: #444; color: #fff; border-color: #444; }
+  .bar label.tool.erase.on { background: #d62728; border-color: #d62728; }
+  .bar label.tool svg { vertical-align: -3px; }
+  .bar input[type=radio] { display: none; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 4px 0; flex-wrap: wrap; }
+  .row label { min-width: 62px; }
+  input[type=range] { flex: 1; min-width: 160px; }
+  input[type=number] { width: 72px; }
+  button { padding: 3px 10px; }
+  canvas { width: 100%; display: block; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+  .hint { color: #666; font-size: 12px; min-height: 16px; }
+  #phase { display: none; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <label class="mode on" data-mode="zoom"><input type="radio" name="mode" value="zoom" checked>🔍 zoom</label>
+  <label class="mode" data-mode="calib"><input type="radio" name="mode" value="calib">🎯 calibrate</label>
+  <label class="mode" data-mode="drag"><input type="radio" name="mode" value="drag">↔ drag a spectrum</label>
+  <label class="mode" data-mode="sig"><input type="radio" name="mode" value="sig">〰 signals</label>
+  <label class="mode" data-mode="phase"><input type="radio" name="mode" value="phase">🎚 phase</label>
+  <label class="act off" id="bundo" title="Undo the last action (Ctrl/Cmd-Z over the plot)">↶ undo</label>
+  <label class="act off" id="bredo" title="Redo what was undone (Shift-Ctrl/Cmd-Z over the plot)">↷ redo</label>
+  <span id="sigwrap" style="display:none"><label class="tool on" id="tpick" title="Peak picking: a click, box, lasso or line records the chemical shift of the signal. Click to switch off when only integrals are wanted.">δ shift</label> <label class="tool on" id="tint" title="Integration: a click, box, lasso or line records the integral of the signal. Click to switch off when only shifts are wanted.">∫ integral</label> <label class="tool erase" id="terase" title="Eraser: click the vertical bar of a signal to remove its shift on that spectrum, its range bar to remove its integral. Click this button again to put the eraser away."><svg width="16" height="16" viewBox="0 0 24 24"><g transform="rotate(-40 12 12)"><rect x="3" y="8" width="18" height="9" rx="2" fill="#fff" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="8" width="7" height="9" rx="2" fill="#f28b82" stroke="currentColor" stroke-width="1.6"/></g></svg> erase</label> &nbsp;<label class="shape on" title="Drag a rectangle: one ppm range for every spectrum it covers"><input type="radio" name="sshape" value="box" checked>▭ box</label> <label class="shape" title="Draw a free shape around a drifting signal: each spectrum gets the range the shape covers on it"><input type="radio" name="sshape" value="lasso">⌒ lasso</label> <label class="shape" title="Drag a straight line from a signal on one spectrum to the same signal on another: every spectrum in between is clicked where the line predicts it"><input type="radio" name="sshape" value="line">╱ line</label> <label class="shape" title="Deconvolute: drag a box around overlapping signals (already measured), on one spectrum or several. Everything in the box is fitted together as a set of lines; each signal takes its own lines, and what belongs to no signal (a shoulder, a neighbour) is fitted too and left out. Look at the result in the single-spectrum view (press s)."><input type="radio" name="sshape" value="deconv">⋏ deconvolute</label> &nbsp;<label>signal → </label><select id="sigsel"></select> <input id="signame" autocomplete="off" type="text" size="9" placeholder="name" title="Rename the selected signal (Enter)"> <button id="signew">new signal</button> &nbsp;<label title="Cap of the integration window: from the signal's outer lines outwards, the window ends where the trace is back at the baseline and never later than this many linewidths; a side also stops in the valley before a neighbour. On the stack the value applies to every spectrum; in the single-spectrum view (press s) to that spectrum alone. Limits dragged by hand on the spectra concerned return to automatic.">window ±</label> <input id="fitk" type="number" min="1" max="20" step="0.5" style="width:54px" title="Type a value and press Enter"> <span id="fitkunit" style="color:#666">linewidths, all spectra</span></span>
+  <span style="flex:1"></span>
+  <label>scale ×</label><input id="amp" type="range" min="0" max="1000" step="1" value="321" title="Vertical scale, logarithmic: 0.2 to 30" style="min-width:140px;max-width:200px"><span id="ampv">1</span>
+  <button id="reset">reset view</button>
+</div>
+<div id="plot" style="position:relative"><canvas id="c" height="520" tabindex="0" style="outline:none"></canvas><div id="xcol" style="position:absolute;left:0;top:0;width:0;height:0"></div></div>
+<div id="phase">
+  <div class="row"><label>PHC0 (°)</label><input id="p0" autocomplete="off" type="range" min="-180" max="180" step="0.1" value="0"><input id="p0n" autocomplete="off" type="number" step="0.1" value="0"></div>
+  <div class="row"><label>PHC1 (°)</label><input id="p1" autocomplete="off" type="range" min="-360" max="360" step="0.5" value="0"><input id="p1n" autocomplete="off" type="number" step="0.5" value="0">
+    <span>apply to</span><select id="ptarget"><option value="__all__">all spectra</option></select>
+    <button id="papply">Apply</button><button id="preset">Reset</button><span id="pinfo" class="hint"></span></div>
+</div>
+<div id="hint" class="hint"></div>
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const canvas = $("c"), ctx = canvas.getContext("2d");
+  const hint = $("hint"), amp = $("amp"), ampv = $("ampv");
+  const p0 = $("p0"), p1 = $("p1"), p0n = $("p0n"), p1n = $("p1n"), ptarget = $("ptarget"), pinfo = $("pinfo");
+  let S = { spectra: [], lo: 0, hi: 10, offset: 0.6, skew: 0, signals: [], colors: [], calibPpm: null };
+  let mode = "zoom", seq = 0, pivotFrac = null, pivotPpm = null;
+  let drag = null;                     // current mouse interaction
+  let pending = {};                    // label -> ppm shift shown until Streamlit sends the calibrated data
+  let pendingLim = {};                 // "signal|label" -> {lo, hi} shown until Streamlit sends the moved limits
+  function limOf(mm, j, label) { return (drag && drag.kind === "lim" && drag.j === j && drag.spec === label) ? drag.cur : (pendingLim[j + "|" + label] || mm); }
+  let pan = null, wheelTimer = null, full = [-1e9, 1e9];
+  let committed = null;                // the window last sent to Streamlit (its answer must not move the view)
+  let solo = null;                     // label of the spectrum shown alone (the "s" key), or null
+  let hoverIdx = null, stackAmp = 1, soloAmp = 1;       // one scale factor for the stack, another for the single view
+  // the scale slider is logarithmic (0.2 .. 30): every step is the same relative change
+  const AMP_MIN = 0.2, AMP_MAX = 30;
+  function ampVal() { return AMP_MIN * Math.pow(AMP_MAX / AMP_MIN, parseFloat(amp.value) / 1000); }
+  function fmtAmp(v) { return v >= 10 ? v.toFixed(0) : v >= 3 ? v.toFixed(1) : v.toFixed(2); }
+  function setAmpVal(v) { v = Math.min(AMP_MAX, Math.max(AMP_MIN, v)); amp.value = Math.round(1000 * Math.log(v / AMP_MIN) / Math.log(AMP_MAX / AMP_MIN)); ampv.textContent = fmtAmp(ampVal()); }
+  let rafDraw = false;
+  function requestDraw() { if (rafDraw) return; rafDraw = true; requestAnimationFrame(() => { rafDraw = false; draw(); }); }
+  function stackHeight() { return Math.max(380, Math.min(900, 140 + 34 * S.spectra.length)); }
+  // The single view is much shorter than the stack, so the page must be scrolled to
+  // it when it opens and put back where it was when it closes.  The scroll
+  // containers are in the parent (Streamlit) page: every scrollable ancestor of
+  // this component's iframe.
+  let savedScroll = null;
+  function parentScrollers() {
+    try {
+      const fe = window.frameElement; if (!fe) return [];
+      const doc = fe.ownerDocument, out = [];
+      for (let el = fe.parentElement; el; el = el.parentElement) {
+        const ov = doc.defaultView.getComputedStyle(el).overflowY;
+        if (ov === "auto" || ov === "scroll") out.push(el);
+      }
+      if (doc.scrollingElement) out.push(doc.scrollingElement);
+      return out;
+    } catch (e) { return []; }
+  }
+  function enterSolo(label) {
+    savedScroll = parentScrollers().map(el => [el, el.scrollTop]);
+    solo = label; stackAmp = ampVal(); setAmpVal(soloAmp); canvas.height = 440; draw(); setHeight(true); showFitK();
+    // bring the whole component (toolbar + plot) into view, below Streamlit's sticky header
+    const toTop = () => { try {
+      const fe = window.frameElement, doc = fe.ownerDocument;
+      const hdr = doc.querySelector('header[data-testid="stHeader"]');
+      const pad = (hdr ? hdr.getBoundingClientRect().height : 60) + 12;
+      const scs = parentScrollers(); const sc = scs.length ? scs[0] : null;
+      if (sc) sc.scrollTop += fe.getBoundingClientRect().top - sc.getBoundingClientRect().top - pad;
+      else fe.scrollIntoView({ block: "start", behavior: "instant" });
+    } catch (e) {} };
+    setTimeout(toTop, 60); setTimeout(toTop, 250);
+  }
+  function leaveSolo() {
+    soloAmp = ampVal(); solo = null; setAmpVal(stackAmp); canvas.height = stackHeight(); draw(); setHeight(true); showFitK();
+    const back = () => { if (savedScroll) savedScroll.forEach(([el, t]) => { try { el.scrollTop = t; } catch (e) {} }); };
+    setTimeout(back, 60); setTimeout(() => { back(); savedScroll = null; }, 300);
+  }
+  const PAD_L = 84, PAD_R = 8, PAD_B = 22, PAD_T = 8;   // left margin holds the x boxes (t or V of each spectrum)
+  let xlabel = "x";
+
+  function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
+  let lastH = -1;
+  function setHeight(force) { const h = document.body.scrollHeight + 4; if (force || h !== lastH) { lastH = h; send("streamlit:setFrameHeight", { height: h }); } }
+  function emit(v) { seq += 1; v.seq = Date.now() + "-" + seq; send("streamlit:setComponentValue", { value: v, dataType: "json" }); }
+
+  // ── geometry ──────────────────────────────────────────────────────────
+  function W() { return canvas.width; }
+  function H() { return canvas.height; }
+  function xOf(ppm) { return PAD_L + (S.hi - ppm) / (S.hi - S.lo) * (W() - PAD_L - PAD_R); }
+  function ppmOf(px) { return S.hi - (px - PAD_L) / (W() - PAD_L - PAD_R) * (S.hi - S.lo); }
+  // vertical layout: the tallest trace (unit height = A px) at the top still fits,
+  // whatever the offset:  (n-1)*offset*A + A = 0.88 * usable height
+  function soloIdx() { return solo === null ? -1 : S.spectra.findIndex(s => s.label === solo); }
+  function unitPx() { if (soloIdx() >= 0) return 0.80 * (H() - PAD_T - PAD_B - 30); const n = S.spectra.length, usable = H() - PAD_T - PAD_B; return 0.88 * usable / (Math.max(n - 1, 0) * Math.max(S.offset, 0) + 1); }
+  function baseOf(i) { if (soloIdx() >= 0) return H() - PAD_B - 30; const j = S.flip ? (S.spectra.length - 1 - i) : i; return H() - PAD_B - 4 - j * S.offset * unitPx(); }
+  function visible(i) { const k = soloIdx(); return k < 0 || k === i; }
+  function ampPx() { return unitPx(); }
+  function traceAt(px, py) {                  // spectrum whose baseline is nearest below the cursor
+    const k = soloIdx(); if (k >= 0) return k;
+    let best = null, bd = Infinity;
+    S.spectra.forEach((s, i) => { const b = baseOf(i) + 0.15 * ampPx(); const d = b - py; if (d >= 0 && d < bd) { bd = d; best = i; } });
+    if (best === null) { S.spectra.forEach((s, i) => { const d = Math.abs(baseOf(i) - py); if (d < bd) { bd = d; best = i; } }); }
+    return best;
+  }
+  function boxSpan(b) {                     // [yTop, yBottom] in px of the spectra a box covers
+    const idx = S.spectra.map((s, i) => i).filter(i => (b.specs || []).indexOf(S.spectra[i].label) >= 0);
+    if (!idx.length) return null;
+    return [Math.min(...idx.map(i => baseOf(i))) - 0.6 * ampPx(), Math.max(...idx.map(i => baseOf(i))) + 3];
+  }
+  function specsInBox(y1, y2) {
+    // The spectra a box covers: those whose lower band, from the baseline up to
+    // half the spacing between spectra, meets the box.  A box drawn around a
+    // signal on one spectrum ends near that spectrum's baseline, which lies in
+    // the UPPER half of the band of the spectrum below, so that one is not taken.
+    const k = soloIdx(); if (k >= 0) return [S.spectra[k].label];
+    const lo = Math.min(y1, y2), hi = Math.max(y1, y2), a = ampPx();
+    const zone = Math.min(0.6 * a, 0.5 * Math.max(S.offset, 0.05) * a);
+    return S.spectra.filter((s, i) => { const b = baseOf(i); return b >= lo && (b - zone) <= hi; }).map(s => s.label);
+  }
+  function rowCrossings(pts, y) {          // x where the closed polygon crosses the row y, sorted
+    const xs = [];
+    for (let k = 0; k < pts.length; k++) {
+      const a = pts[k], b = pts[(k + 1) % pts.length];
+      if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+    }
+    return xs.sort((p, q) => p - q);
+  }
+  function specsInLasso(pts) {
+    // For every spectrum, the ppm range the lasso covers on its lower band
+    // (baseline up to half the spacing, sampled on five rows): the outermost
+    // crossings, so a slanted lasso follows a drifting signal down the stack.
+    const k = soloIdx(), a = ampPx();
+    const zone = Math.min(0.6 * a, 0.5 * Math.max(S.offset, 0.05) * a);
+    const out = [];
+    S.spectra.forEach((s, i) => {
+      if (k >= 0 && i !== k) return;
+      const b = baseOf(i); let x1 = Infinity, x2 = -Infinity;
+      for (let r = 0; r <= 4; r++) {
+        const xs = rowCrossings(pts, b - zone * r / 4);
+        for (let q = 0; q + 1 < xs.length; q += 2) { x1 = Math.min(x1, xs[q]); x2 = Math.max(x2, xs[q + 1]); }
+      }
+      if (x2 - x1 > 3) out.push({ spec: s.label, lo: ppmOf(x2) - i * S.skew, hi: ppmOf(x1) - i * S.skew });
+    });
+    return out;
+  }
+  function specsOnLine(x0, y0, x1, y1) {
+    // A straight line from a signal on one spectrum to the same signal on
+    // another: the spectra between them (by index) each get the ppm the line
+    // predicts, interpolated in index so it does not matter where on the
+    // peak the ends were placed.
+    const i0 = traceAt(x0, y0), i1 = traceAt(x1, y1);
+    if (i0 === null || i1 === null) return [];
+    const p0 = ppmOf(x0) - i0 * S.skew, p1 = ppmOf(x1) - i1 * S.skew;
+    const a = Math.min(i0, i1), b = Math.max(i0, i1), out = [];
+    for (let i = a; i <= b; i++) {
+      const t = i1 === i0 ? 0 : (i - i0) / (i1 - i0);
+      out.push({ spec: S.spectra[i].label, ppm: p0 + t * (p1 - p0) });
+    }
+    return out;
+  }
+  function limitAt(m) {
+    // The end of an integration bar under the cursor, on a spectrum that is
+    // actually DRAWN.  In the single view every spectrum shares one baseline row,
+    // so the hidden ones must be left out or a hidden spectrum's limit is grabbed.
+    // The nearest end wins; the single view has room for a wider grip.
+    const tolX = soloIdx() >= 0 ? 9 : 6, tolY = soloIdx() >= 0 ? 12 : 9;
+    let hit = null, best = Infinity;
+    S.spectra.forEach((s, i) => {
+      if (!visible(i)) return;
+      const base = baseOf(i); if (Math.abs(m.y - (base + 5)) > tolY) return;
+      S.signals.forEach((sg, j) => { const mm = sg.meas ? sg.meas[s.label] : null; if (!mm || mm.lo === null || mm.hi === null || mm.noint) return;
+        [["lo", mm.lo], ["hi", mm.hi]].forEach(([e, v]) => { const dx = Math.abs(xOf(v + i * S.skew) - m.x);
+          if (dx < tolX && dx < best) { best = dx; hit = { j, spec: s.label, i, e, cur: { lo: mm.lo, hi: mm.hi } }; } }); });
+    });
+    return hit;
+  }
+  function mouse(ev) { const r = canvas.getBoundingClientRect(); return { x: (ev.clientX - r.left) * canvas.width / r.width, y: (ev.clientY - r.top) * canvas.height / r.height }; }
+
+  // ── phasing preview ───────────────────────────────────────────────────
+  function phasedReal(s) {
+    const a0 = parseFloat(p0.value), a1 = parseFloat(p1.value);
+    const tgt = ptarget.value;
+    if (mode !== "phase" || (a0 === 0 && a1 === 0) || (tgt !== "__all__" && tgt !== s.label)) return s.re;
+    // re-phase the RAW pair, then apply the same baseline offset the drawn trace carries (re0 - re)
+    const n = s.re.length, out = new Float64Array(n), re0 = s.re0 || s.re;
+    const pf = pivotFrac === null ? 0.5 : pivotFrac;
+    for (let k = 0; k < n; k++) {
+      const frac = (s.ppmFirst - (s.x[k] - s.off)) / s.ppmSpan;
+      const phi = (a0 + a1 * (frac - pf)) * Math.PI / 180;
+      out[k] = re0[k] * Math.cos(phi) + s.im[k] * Math.sin(phi) - (re0[k] - s.re[k]);
+    }
+    return out;
+  }
+  function globalPhases() { const a0 = parseFloat(p0.value), a1 = parseFloat(p1.value); const pf = pivotFrac === null ? 0.5 : pivotFrac; return [a0 - a1 * pf, a1]; }
+
+  // ── drawing ───────────────────────────────────────────────────────────
+  function draw() {
+    const cw = canvas.clientWidth || 900; if (canvas.width !== cw) canvas.width = cw;
+    const w = W(), h = H();
+    ctx.clearRect(0, 0, w, h);
+    const z = ampVal(); nameDbg = [];
+    if (drag && drag.kind === "sbox") { const x1 = Math.min(drag.x0, drag.x1), x2 = Math.max(drag.x0, drag.x1), y1 = Math.min(drag.y0, drag.y1), y2 = Math.max(drag.y0, drag.y1);
+      ctx.fillStyle = drag.deconv ? "rgba(106,61,154,0.12)" : "rgba(214,39,40,0.10)"; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); ctx.strokeStyle = drag.deconv ? "#6a3d9a" : "#d62728"; ctx.setLineDash([3, 3]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]); }
+    if (drag && drag.kind === "lasso" && drag.pts.length > 1) {
+      ctx.beginPath(); drag.pts.forEach((p, k) => k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath();
+      ctx.fillStyle = "rgba(214,39,40,0.10)"; ctx.fill(); ctx.strokeStyle = "#d62728"; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]); }
+    if (drag && drag.kind === "sline") {
+      ctx.strokeStyle = "#d62728"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(drag.x0, drag.y0); ctx.lineTo(drag.x1, drag.y1); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1; }
+    if (drag && drag.kind === "zoom") { const x1 = Math.min(drag.x0, drag.x1), x2 = Math.max(drag.x0, drag.x1);
+      ctx.fillStyle = "rgba(42,120,214,0.12)"; ctx.fillRect(x1, PAD_T, x2 - x1, h - PAD_T - PAD_B); }
+    // axis
+    ctx.strokeStyle = "#999"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(PAD_L, h - PAD_B); ctx.lineTo(w - PAD_R, h - PAD_B); ctx.stroke();
+    ctx.fillStyle = "#444"; ctx.font = "11px sans-serif";
+    const span = S.hi - S.lo, stepT = niceStep(span / 8);
+    for (let p = Math.ceil(S.lo / stepT) * stepT; p <= S.hi + 1e-9; p += stepT) {
+      const x = xOf(p); ctx.beginPath(); ctx.moveTo(x, h - PAD_B); ctx.lineTo(x, h - PAD_B + 4); ctx.stroke();
+      const t = p.toFixed(stepT < 0.01 ? 3 : stepT < 0.1 ? 2 : 1); ctx.fillText(t, x - ctx.measureText(t).width / 2, h - 6);
+    }
+    // traces
+    const a = ampPx();
+    S.spectra.forEach((s, i) => {
+      const xb0 = document.getElementById("xb" + i); if (xb0) xb0.style.display = visible(i) ? "" : "none";
+      if (!visible(i)) return;
+      const y = phasedReal(s), base = baseOf(i), dx = ((drag && drag.kind === "drag" && drag.i === i) ? drag.dppm : 0) + (pending[s.label] || 0);
+      const skew = i * S.skew;
+      // solo view: the tallest point in view sets the scale, so nothing is cut
+      let sc = s.scale;
+      if (soloIdx() >= 0) { let vm = 1e-30; for (let k = 0; k < y.length; k++) { if (s.x[k] >= S.lo && s.x[k] <= S.hi && y[k] > vm) vm = y[k]; } sc = vm; }
+      ctx.strokeStyle = S.colors[i % S.colors.length] || "#2a78d6"; ctx.lineWidth = 1;
+      ctx.beginPath();
+      let started = false;
+      for (let k = 0; k < y.length; k++) {
+        const px = xOf(s.x[k] + dx + skew); if (px < PAD_L - 2 || px > w - PAD_R + 2) { started = false; continue; }
+        const py = base - Math.min(y[k] / sc * z, 6) * a;
+        if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      if (S.names !== false) { ctx.fillStyle = "#333"; ctx.font = "10px sans-serif"; ctx.fillText(s.label, PAD_L + 4, base - 3); }
+      const xb = document.getElementById("xb" + i); if (xb) { xb.style.top = (base - 21) + "px"; xb.style.display = visible(i) ? "" : "none"; }
+      // solo view: the integral curves share ONE scale, so their heights compare
+      // like their values (the largest one in view gets the full height)
+      let soloMax = 0, soloOwn = false; const placed = [];
+      // ... and their labels read relative to the most downfield signal of the whole
+      // spectrum (not only of the window in view), which is 1.00
+      let soloRef = null, soloRefPos = -Infinity;
+      if (soloIdx() >= 0) {
+        S.signals.forEach((sg, j) => {
+          const mm = sg.meas ? sg.meas[s.label] : null;
+          if (!mm || mm.lo === null || mm.hi === null || mm.noint) return;
+          const where = (mm.pos !== null && mm.pos !== undefined) ? mm.pos : 0.5 * (mm.lo + mm.hi);
+          if (mm.value !== null && mm.value !== undefined && isFinite(mm.value) && mm.value !== 0
+              && where > soloRefPos) { soloRefPos = where; soloRef = Math.abs(mm.value); }
+          const lim = limOf(mm, j, s.label);
+          if (Math.max(lim.lo, lim.hi) < S.lo || Math.min(lim.lo, lim.hi) > S.hi) return;      // out of view
+          if (mm.value === null || mm.value === undefined || !isFinite(mm.value)) soloOwn = true;
+          else soloMax = Math.max(soloMax, Math.abs(mm.value));
+        });
+        if (soloMax <= 0) soloOwn = true;
+        soloDbg = [];
+      }
+      // signal markers on this spectrum: centre tick, line dots, integration bar
+      S.signals.forEach((sg, j) => {
+        const mm = sg.meas ? sg.meas[s.label] : null; if (!mm) return;
+        const col = sg.color || "#d62728";
+        if (mm.lo !== null && mm.hi !== null && !mm.noint) {
+          const lim = limOf(mm, j, s.label);
+          const bx1 = xOf(Math.max(lim.lo, lim.hi) + skew), bx2 = xOf(Math.min(lim.lo, lim.hi) + skew);
+          ctx.strokeStyle = col; ctx.lineWidth = mm.manual ? 3.5 : 2.5; ctx.globalAlpha = 0.55; ctx.beginPath(); ctx.moveTo(bx1, base + 5); ctx.lineTo(bx2, base + 5); ctx.stroke();
+          // end caps: the handles to drag.  In the single view they are real grips:
+          // a filled square on each end, large enough to see and to catch.
+          ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(bx1, base + 1); ctx.lineTo(bx1, base + 9); ctx.moveTo(bx2, base + 1); ctx.lineTo(bx2, base + 9); ctx.stroke(); ctx.globalAlpha = 1;
+          if (soloIdx() >= 0) { ctx.fillStyle = col; [bx1, bx2].forEach(bx => { ctx.fillRect(bx - 4, base + 1, 8, 9); });
+            ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; [bx1, bx2].forEach(bx => { ctx.beginPath(); ctx.moveTo(bx, base + 3); ctx.lineTo(bx, base + 8); ctx.stroke(); }); } }
+        // the shift: the dots of the detected lines and the vertical bar.  A signal can be
+        // without one on a spectrum (erased, or only integrated): its integral is still drawn.
+        const hasPos = mm.pos !== null && mm.pos !== undefined;
+        if (hasPos) (mm.lines || []).forEach(v => { const lx = xOf(v + skew); if (lx >= PAD_L && lx <= w - PAD_R) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(lx, base + 2, 2, 0, 2 * Math.PI); ctx.fill(); } });
+        const px = hasPos ? xOf(mm.pos + skew) : null, tickIn = hasPos && px >= PAD_L && px <= w - PAD_R;
+        if (tickIn) { ctx.strokeStyle = col; ctx.lineWidth = 1.3; ctx.beginPath(); ctx.moveTo(px, base + 2); ctx.lineTo(px, base - 0.3 * a); ctx.stroke(); }
+        // the signal's name: beside its tick on the stack; in the single view it is written
+        // with the integral instead (below), or here only when the signal has no integral
+        const noInt = mm.lo === null || mm.hi === null || mm.noint;
+        if (tickIn && soloIdx() >= 0 && noInt) { ctx.fillStyle = col; ctx.font = "10px sans-serif"; ctx.fillText(sg.name || ("S" + (j + 1)), px + 2, base - 0.3 * a - 2); }
+        // solo view: the running integral over the window, TopSpin style, with its value
+        if (soloIdx() >= 0 && mm.lo !== null && mm.hi !== null && !mm.noint) {
+          const lim = limOf(mm, j, s.label);
+          const lo = Math.min(lim.lo, lim.hi), hi = Math.max(lim.lo, lim.hi);
+          const idx = []; for (let k = 0; k < s.x.length; k++) if (s.x[k] >= lo && s.x[k] <= hi) idx.push(k);
+          if (idx.length > 3) {
+            const e = Math.max(1, Math.min(5, idx.length >> 2));
+            const med = arr => { const b = arr.slice().sort((p, q) => p - q); return b[b.length >> 1]; };
+            // baseline at the two limits: Python's values (full-resolution data) unless a
+            // limit is being dragged right now; the thinned copy drawn here would put it
+            // too high when zoomed out (its first points already sit on the flanks)
+            const own = lim === mm && mm.bhi !== null && mm.bhi !== undefined && mm.blo !== null && mm.blo !== undefined;
+            const hiFirst = s.x[idx[0]] >= s.x[idx[idx.length - 1]];
+            const y0 = own ? (hiFirst ? mm.bhi : mm.blo) : med(idx.slice(0, e).map(k => y[k]));
+            const y1 = own ? (hiFirst ? mm.blo : mm.bhi) : med(idx.slice(-e).map(k => y[k]));
+            // what was integrated, in a light shade of the signal's colour.  A fitted
+            // signal shows the fit itself: its lines filled, standing on the fitted
+            // baseline (straight line, solvent tail, neighbouring lines).  Otherwise the
+            // area between the data and the straight baseline through the limits.
+            const yPix = v => base - Math.min(v / sc * z, 6) * a;
+            ctx.save(); ctx.fillStyle = col; ctx.strokeStyle = col;
+            if ((mm.method === "fit" || mm.method === "deconv") && mm.model && mm.model.lines && mm.model.lines.length) {
+              // A fit is a SUM of lines.  It is drawn that way: every line as its own function
+              // rising from the baseline, this signal's lines filled in its colour, the lines
+              // that belong to no signal (a shoulder, a neighbour) as dashed outlines, and the
+              // sum of everything as a thin dark curve to hold against the data.  Where two
+              // signals overlap, their fills overlap.
+              const M = mm.model, N = 240, xs_ = [], bs = [], own_ = [], tot = [];
+              const pv = (L, x) => { const d_ = (x - L[1]) / L[2]; return L[0] * (L[3] / (1 + d_ * d_) + (1 - L[3]) * Math.exp(-0.6931471805599453 * d_ * d_)); };
+              const free = M.free !== undefined && M.free !== null ? M.free : (M.nuis || []);     // lines of no signal
+              const others = M.free !== undefined && M.free !== null ? (M.nuis || []) : [];        // lines of other signals
+              const freeY = free.map(() => []);
+              for (let q = 0; q <= N; q++) {
+                const x = M.hi - (M.hi - M.lo) * q / N;
+                let b = M.c[0] + (M.c.length > 1 ? M.c[1] * (x - M.x0) : 0);
+                if (M.xs !== null && M.xs !== undefined && M.c.length > 2) b += M.c[2] / ((x - M.xs) * (x - M.xs));
+                let g = 0; M.lines.forEach(L => { g += pv(L, x); });
+                let rest = 0; others.forEach(L => { rest += pv(L, x); });
+                free.forEach((L, f) => { const v = pv(L, x); rest += v; freeY[f].push(yPix(b + v)); });
+                xs_.push(xOf(x + skew)); bs.push(yPix(b)); own_.push(yPix(b + g)); tot.push(yPix(b + g + rest));
+              }
+              const path = arr => { ctx.beginPath(); arr.forEach((v, q) => q ? ctx.lineTo(xs_[q], v) : ctx.moveTo(xs_[q], v)); };
+              // this signal's own lines, from the baseline
+              ctx.globalAlpha = 0.28; path(own_); for (let q = N; q >= 0; q--) ctx.lineTo(xs_[q], bs[q]); ctx.closePath(); ctx.fill();
+              ctx.globalAlpha = 0.9; ctx.lineWidth = 1.2; path(own_); ctx.stroke();
+              // lines that belong to no signal
+              ctx.strokeStyle = "#777"; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.globalAlpha = 0.9;
+              freeY.forEach(arr => { path(arr); ctx.stroke(); });
+              ctx.setLineDash([]);
+              // the sum of all the lines: what the fit says the spectrum is
+              ctx.strokeStyle = "#222"; ctx.lineWidth = 0.9; ctx.globalAlpha = 0.75; path(tot); ctx.stroke();
+            } else {
+              ctx.globalAlpha = 0.25; ctx.beginPath();
+              idx.forEach((k, t) => { const px_ = xOf(s.x[k] + skew), py_ = yPix(y[k]); if (t === 0) ctx.moveTo(px_, py_); else ctx.lineTo(px_, py_); });
+              ctx.lineTo(xOf(s.x[idx[idx.length - 1]] + skew), yPix(y1)); ctx.lineTo(xOf(s.x[idx[0]] + skew), yPix(y0));
+              ctx.closePath(); ctx.fill();
+              ctx.globalAlpha = 0.85; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.beginPath();
+              ctx.moveTo(xOf(s.x[idx[0]] + skew), yPix(y0)); ctx.lineTo(xOf(s.x[idx[idx.length - 1]] + skew), yPix(y1)); ctx.stroke(); ctx.setLineDash([]);
+            }
+            ctx.restore();
+            // the running integral: of the data above its baseline, or, for a fitted or
+            // deconvoluted signal, of its OWN fitted lines (the data there also hold the
+            // neighbours it was separated from)
+            const ownModel = (mm.method === "fit" || mm.method === "deconv") && mm.model && mm.model.lines && mm.model.lines.length ? mm.model : null;
+            const pvL = (L, x) => { const d_ = (x - L[1]) / L[2]; return L[0] * (L[3] / (1 + d_ * d_) + (1 - L[3]) * Math.exp(-0.6931471805599453 * d_ * d_)); };
+            const ownAt = x => { let g = 0; ownModel.lines.forEach(L => { g += pvL(L, x); }); return g; };
+            let acc = 0; const cum = [0];
+            for (let t = 1; t < idx.length; t++) { const k0 = idx[t - 1], k1 = idx[t];
+              const b0 = y0 + (y1 - y0) * (t - 1) / (idx.length - 1), b1 = y0 + (y1 - y0) * t / (idx.length - 1);
+              const v0 = ownModel ? ownAt(s.x[k0]) : (y[k0] - b0), v1 = ownModel ? ownAt(s.x[k1]) : (y[k1] - b1);
+              acc += 0.5 * (v0 + v1) * Math.abs(s.x[k0] - s.x[k1]); cum.push(acc); }
+            let pk = 0; idx.forEach(k => { pk = Math.max(pk, y[k] / sc); });
+            const hmax = 0.25 * a;
+            const hgt = soloOwn ? hmax : Math.max(3, hmax * Math.abs(mm.value) / soloMax);
+            const top = Math.max(PAD_T + 34, base - Math.min(pk * z, 6) * a - hgt - 6), tot = Math.abs(acc) || 1;
+            ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.globalAlpha = 0.9; ctx.beginPath();
+            idx.forEach((k, t) => { const px_ = xOf(s.x[k] + skew), py_ = top + hgt - hgt * cum[t] / tot; if (t === 0) ctx.moveTo(px_, py_); else ctx.lineTo(px_, py_); });
+            ctx.stroke(); ctx.globalAlpha = 1;
+            ctx.fillStyle = col; ctx.font = "11px sans-serif";
+            const shown = (mm.value === null || mm.value === undefined) ? ""
+                        : (soloRef ? (mm.value / soloRef).toFixed(2) : fmtVal(mm.value));
+            const nm = sg.name || ("S" + (j + 1));
+            const rest = shown + (mm.method ? " (" + mm.method + ")" : "");
+            const lab = nm + "  " + rest;
+            // the label above the curve, the signal's name first; moved while it would sit on another label
+            ctx.font = "bold 12px sans-serif"; const nw = ctx.measureText(nm + "  ").width;
+            ctx.font = "11px sans-serif"; const lw = nw + ctx.measureText(rest).width; let lx = xOf(hi + skew), ly = top - 4;
+            if (lx + lw > w - PAD_R) lx = w - PAD_R - lw;
+            const hits = () => placed.some(q => lx < q.x + q.w + 4 && lx + lw + 4 > q.x && Math.abs(ly - q.y) < 12);
+            for (let guard = 0; guard < 8 && hits() && ly - 12 > PAD_T + 26; guard++) ly -= 12;     // up first, clear of the curves
+            for (let guard = 0; guard < 8 && hits(); guard++) ly += 12;
+            placed.push({ x: lx, y: ly, w: lw });
+            ctx.font = "bold 12px sans-serif"; ctx.fillText(nm, lx, ly);
+            ctx.font = "11px sans-serif"; ctx.fillText(rest, lx + nw, ly);
+            soloDbg.push({ name: sg.name, value: mm.value, label: lab, pos: mm.pos, hgt: hgt, top: top, labelY: ly, b0: y0, b1: y1, fromPython: own,
+                           localB0: med(idx.slice(0, e).map(k => y[k])), localB1: med(idx.slice(-e).map(k => y[k])), npts: idx.length });
+          }
+        }
+      });
+    });
+    // The names of the signals on the stack: each one once, in bold, above its peak on
+    // the TOPMOST drawn spectrum where it is measured and in view (a signal that only
+    // appears part-way down the series gets its name where it starts).
+    if (soloIdx() < 0) {
+      const zz = ampVal(), placedN = [];
+      S.signals.forEach((sg, j) => {
+        let pick = null;
+        S.spectra.forEach((s, i) => {
+          if (!visible(i)) return;
+          const mm = sg.meas ? sg.meas[s.label] : null; if (!mm) return;
+          const hasPos = mm.pos !== null && mm.pos !== undefined, hasInt = mm.lo !== null && mm.hi !== null && !mm.noint;
+          if (!hasPos && !hasInt) return;
+          const xc = hasPos ? mm.pos : 0.5 * (mm.lo + mm.hi), px = xOf(xc + i * S.skew);
+          if (px < PAD_L + 6 || px > w - PAD_R - 6) return;
+          const b = baseOf(i);
+          if (pick === null || b < pick.base) pick = { s, i, mm, px, base: b, xc, hasInt };
+        });
+        if (!pick) return;
+        // the top of the peak there, to sit just above it
+        const y = phasedReal(pick.s), sc = pick.s.scale, half = pick.hasInt ? null : 0.02;
+        const lo = pick.hasInt ? Math.min(pick.mm.lo, pick.mm.hi) : pick.xc - half, hi = pick.hasInt ? Math.max(pick.mm.lo, pick.mm.hi) : pick.xc + half;
+        let top = 0; for (let k = 0; k < y.length; k++) { if (pick.s.x[k] >= lo && pick.s.x[k] <= hi && y[k] > top) top = y[k]; }
+        const nm = sg.name || ("S" + (j + 1));
+        ctx.font = "bold 14px sans-serif";
+        const tw = ctx.measureText(nm).width;
+        let ty = Math.max(PAD_T + 13, pick.base - Math.min(top / sc * zz, 6) * a - 5);
+        let tx = Math.min(Math.max(pick.px - tw / 2, PAD_L + 2), w - PAD_R - tw - 2);
+        // two signals measured on the same peak would print their names on top of each
+        // other: the later one is moved up a line (or beside the other at the very top)
+        const clash = () => placedN.find(q => tx < q.x + q.w + 4 && tx + tw + 4 > q.x && Math.abs(ty - q.y) < 15);
+        for (let g = 0, q = clash(); q && g < 12; g++, q = clash()) {
+          if (ty - 15 >= PAD_T + 13) ty -= 15; else tx = q.x + q.w + 8;
+        }
+        placedN.push({ x: tx, y: ty, w: tw });
+        ctx.lineWidth = 3.5; ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineJoin = "round"; ctx.strokeText(nm, tx, ty);
+        ctx.fillStyle = sg.color || "#d62728"; ctx.fillText(nm, tx, ty); ctx.lineWidth = 1;
+        nameDbg.push({ name: nm, spec: pick.s.label, x: Math.round(tx), y: Math.round(ty), w: Math.round(tw) });
+      });
+    }
+    // calibration line and pivot
+    if (S.calibPpm !== null && S.calibPpm !== undefined) { const x = xOf(S.calibPpm); ctx.strokeStyle = "#1baf7a"; ctx.setLineDash([5, 3]); ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, h - PAD_B); ctx.stroke(); ctx.setLineDash([]); }
+    if (mode === "phase" && pivotPpm !== null) { const x = xOf(pivotPpm); ctx.strokeStyle = "#d62728"; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, h - PAD_B); ctx.stroke(); ctx.setLineDash([]); }
+    if (soloIdx() >= 0) { ctx.fillStyle = "#444"; ctx.font = "12px sans-serif"; ctx.fillText("single spectrum: " + solo + "   (press s to return to the stack)", PAD_L + 6, PAD_T + 14); }
+    if (mode === "phase") { const g = globalPhases(); pinfo.textContent = "pivot " + (pivotPpm === null ? "centre" : pivotPpm.toFixed(3) + " ppm") + " → Δ PHC0 " + g[0].toFixed(2) + "°, Δ PHC1 " + g[1].toFixed(2) + "°"; }
+  }
+  function buildXBoxes() {
+    const col = document.getElementById("xcol"); col.innerHTML = "";
+    S.spectra.forEach((s, i) => {
+      const inp = document.createElement("input"); inp.type = "number"; inp.step = "any"; inp.id = "xb" + i; inp.autocomplete = "off";
+      inp.placeholder = xlabel; inp.title = xlabel + " of " + s.label + " (column A of the Equilibrist file)";
+      inp.style.cssText = "position:absolute;left:4px;width:70px;font-size:11px;padding:1px 3px;border:1px solid #ccc;border-radius:3px;background:#fff";
+      if (s.xval !== null && s.xval !== undefined) inp.value = s.xval;
+      inp.addEventListener("change", () => { const v = inp.value.trim(); emit({ type: "set_x", spec: s.label, value: v === "" ? null : parseFloat(v) }); });
+      inp.addEventListener("keydown", ev => { if (ev.key === "Enter") { ev.preventDefault(); inp.blur(); }
+        if (ev.key === "Tab") { const nx = document.getElementById("xb" + (ev.shiftKey ? i - 1 : i + 1)); if (nx) { ev.preventDefault(); inp.blur(); nx.focus(); nx.select(); } } });
+      col.appendChild(inp);
+    });
+  }
+  function fmtVal(v) { const a = Math.abs(v); if (a >= 1000 || a === 0) return v.toExponential(2); if (a >= 10) return v.toFixed(1); return v.toFixed(3); }
+  function niceStep(raw) { const p = Math.pow(10, Math.floor(Math.log10(raw))); const f = raw / p; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p; }
+
+  // ── modes ─────────────────────────────────────────────────────────────
+  const HINTS = {
+    zoom: "Drag across the axis to zoom (the ppm window follows); double-click to see everything. Press s over a spectrum to see it alone, s again to return.",
+    calib: "Click the reference peak on any spectrum: every spectrum is aligned on that peak. Set its true shift in the Calibration table.",
+    drag: "Press on a spectrum and drag it sideways to correct its calibration by hand.",
+    sig: "Click a signal on a spectrum to measure it there (shift, pattern, J and integral); the next clicks add spectra to it. Drag a box to click every spectrum it covers, or choose lasso and draw a shape around a drifting signal: each spectrum gets the range the shape covers on it; or choose line and drag from a signal on one spectrum to the same signal on another: every spectrum between is clicked where the line predicts it; or choose deconvolute and box overlapping signals that are already measured, to separate them by fitting. δ shift and ∫ integral choose what a selection records. With the eraser, click a vertical bar to remove that shift, a range bar to remove that integral. Drag an end of the bar under a signal to set its integration limits by hand (in the single view the ends are square grips; the cursor turns to a double arrow over them). Alt/Option-click (Ctrl or Cmd also work) to put the shift exactly at the cursor; the same on the bar drops the integral (shift only). Shift-click a marker to remove that spectrum.",
+    phase: "Drag the sliders: every trace is re-phased live. Click on the plot to set the pivot. Release or Apply to keep the change."
+  };
+  function setMode(m) {
+    mode = m;
+    if (m !== "sig" && eraser) { eraser = false; syncTools(); }
+    document.querySelectorAll("label.mode").forEach(l => l.classList.toggle("on", l.dataset.mode === m));
+    $("phase").style.display = m === "phase" ? "block" : "none";
+    $("sigwrap").style.display = m === "sig" ? "inline" : "none";
+    hint.textContent = HINTS[m] || "";
+    canvas.style.cursor = m === "zoom" ? "col-resize" : m === "drag" ? "ew-resize" : m === "sig" ? sigCursor(null) : "crosshair";
+    draw(); setHeight(true);
+  }
+  document.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener("change", () => setMode(r.value)));
+  document.querySelectorAll('input[name=sshape]').forEach(r => r.addEventListener("change", () =>
+    document.querySelectorAll("label.shape").forEach(l => l.classList.toggle("on", l.querySelector("input").checked))));
+
+  // ── mouse ─────────────────────────────────────────────────────────────
+  canvas.addEventListener("contextmenu", ev => ev.preventDefault());
+  function setWindow(lo, hi) {
+    const span = hi - lo;
+    if (lo < full[0]) { lo = full[0]; hi = lo + span; }
+    if (hi > full[1]) { hi = full[1]; lo = hi - span; }
+    S.lo = lo; S.hi = hi; draw();
+  }
+  function commitWindow() {
+    clearTimeout(wheelTimer);
+    wheelTimer = setTimeout(() => {
+      const lo = Math.round(S.lo * 1000) / 1000, hi = Math.round(S.hi * 1000) / 1000;
+      committed = [lo, hi];
+      emit({ type: "zoom", lo: lo, hi: hi });
+    }, 350);
+  }
+  function ctrlAction(ev) {
+    // Ctrl/Cmd-click in signals mode: on an integration bar -> drop that integral (shift only);
+    // elsewhere -> put the shift of the current signal exactly at the cursor
+    const m = mouse(ev), i = traceAt(m.x, m.y);
+    if (i === null) return;
+    const s = S.spectra[i], base = baseOf(i), ppm = ppmOf(m.x) - i * S.skew;
+    if (Math.abs(m.y - (base + 5)) <= 9) {
+      for (let j = 0; j < S.signals.length; j++) {
+        const mm = S.signals[j].meas ? S.signals[j].meas[s.label] : null;
+        if (mm && mm.lo !== null && mm.hi !== null && ppm >= Math.min(mm.lo, mm.hi) - 0.002 && ppm <= Math.max(mm.lo, mm.hi) + 0.002) {
+          emit({ type: "sig_noint", signal: j, spec: s.label }); return;
+        }
+      }
+    }
+    emit({ type: "sig_click", spec: s.label, ppm: ppm, signal: parseInt($("sigsel").value), exact: true });
+  }
+  canvas.addEventListener("mousedown", ev => {
+    if (mode === "sig" && (ev.altKey || ev.ctrlKey || ev.metaKey) && (ev.button === 0 || ev.button === 2)) { ctrlAction(ev); ev.preventDefault(); lastBox = { moved: true }; return; }
+    if (ev.button === 2) { const m = mouse(ev); pan = { x0: m.x, lo0: S.lo, hi0: S.hi }; ev.preventDefault(); return; }
+    if (ev.button !== 0) return;
+    const m = mouse(ev);
+    if (mode === "sig" && eraser) { ev.preventDefault(); return; }       // the click that follows erases
+    if (mode === "zoom") drag = { kind: "zoom", x0: m.x, x1: m.x };
+    else if (mode === "drag") { const i = traceAt(m.x, m.y); if (i === null) return; drag = { kind: "drag", i, x0: ppmOf(m.x), dppm: 0 }; }
+    else if (mode === "sig") {
+      // near the end of an integration bar? -> drag that limit
+      const hit = limitAt(m);
+      const shape = (document.querySelector('input[name=sshape]:checked') || {}).value;
+      drag = hit ? Object.assign({ kind: "lim" }, hit)
+           : shape === "lasso" ? { kind: "lasso", pts: [{ x: m.x, y: m.y }] }
+           : shape === "line" ? { kind: "sline", x0: m.x, x1: m.x, y0: m.y, y1: m.y }
+           : shape === "deconv" ? { kind: "sbox", deconv: true, x0: m.x, x1: m.x, y0: m.y, y1: m.y }
+           : { kind: "sbox", x0: m.x, x1: m.x, y0: m.y, y1: m.y };
+    }
+    ev.preventDefault();
+  });
+  window.addEventListener("mousemove", ev => {
+    if (pan) { const m = mouse(ev); const dp = -(m.x - pan.x0) * (pan.hi0 - pan.lo0) / (W() - PAD_L - PAD_R);
+      setWindow(pan.lo0 + dp, pan.hi0 + dp); return; }
+    if (!drag) return;
+    const m = mouse(ev);
+    if (drag.kind === "zoom") drag.x1 = m.x;
+    else if (drag.kind === "sbox" || drag.kind === "sline") { drag.x1 = m.x; drag.y1 = m.y; }
+    else if (drag.kind === "lasso") { const l = drag.pts[drag.pts.length - 1]; if (Math.hypot(m.x - l.x, m.y - l.y) > 2) drag.pts.push({ x: m.x, y: m.y }); }
+    else if (drag.kind === "lim") { drag.cur[drag.e] = ppmOf(m.x) - drag.i * S.skew; }
+    else if (drag.kind === "drag") drag.dppm = ppmOf(m.x) - drag.x0;
+    draw();
+  });
+  window.addEventListener("mouseup", ev => {
+    if (pan) { pan = null; commitWindow(); return; }
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (d.kind === "zoom") { if (Math.abs(d.x1 - d.x0) > 4) emit({ type: "zoom", lo: ppmOf(Math.max(d.x0, d.x1)), hi: ppmOf(Math.min(d.x0, d.x1)) }); }
+    else if (d.kind === "drag") { if (Math.abs(d.dppm) > 1e-6) { pending[S.spectra[d.i].label] = (pending[S.spectra[d.i].label] || 0) + d.dppm; emit({ type: "drag_align", spec: S.spectra[d.i].label, delta: d.dppm }); } }
+    else if (d.kind === "lim") { const lo = Math.min(d.cur.lo, d.cur.hi), hi = Math.max(d.cur.lo, d.cur.hi); pendingLim[d.j + "|" + d.spec] = { lo: lo, hi: hi }; emit({ type: "sig_limits", signal: d.j, spec: d.spec, lo: lo, hi: hi }); lastBox = { moved: true }; }
+    else if (d.kind === "sline") {
+      if (Math.abs(d.x1 - d.x0) > 3 || Math.abs(d.y1 - d.y0) > 3) {
+        const items = specsOnLine(d.x0, d.y0, d.x1, d.y1);
+        const wf = wants(); if (items.length && wf) emit(Object.assign({ type: "sig_line", items: items, signal: parseInt($("sigsel").value) }, wf));
+        d.moved = true;
+      }
+      lastBox = d;
+    }
+    else if (d.kind === "lasso") {
+      if (d.pts.length >= 3) {
+        const items = specsInLasso(d.pts);
+        const wf = wants(); if (items.length && wf) emit(Object.assign({ type: "sig_lasso", items: items, signal: parseInt($("sigsel").value) }, wf));
+        d.moved = true;
+      }
+      lastBox = d;
+    }
+    else if (d.kind === "sbox") {
+      if (Math.abs(d.x1 - d.x0) > 3 || Math.abs(d.y1 - d.y0) > 3) {
+        const specs = specsInBox(d.y0, d.y1);
+        if (d.deconv) { if (specs.length) emit({ type: "sig_deconv", lo: ppmOf(Math.max(d.x0, d.x1)), hi: ppmOf(Math.min(d.x0, d.x1)), specs: specs }); }
+        else { const wf = wants(); if (specs.length && wf) emit(Object.assign({ type: "sig_box", lo: ppmOf(Math.max(d.x0, d.x1)), hi: ppmOf(Math.min(d.x0, d.x1)), specs: specs, signal: parseInt($("sigsel").value) }, wf)); }
+        d.moved = true;
+      }
+      lastBox = d;
+    }
+    draw();
+  });
+  let lastBox = null;
+  canvas.addEventListener("click", ev => {
+    if (ev.detail > 1) return;
+    const m = mouse(ev), ppm = ppmOf(m.x), i = traceAt(m.x, m.y);
+    if (i === null) return;
+    const s = S.spectra[i];
+    if (mode === "calib") emit({ type: "calib", spec: s.label, ppm: ppm });
+    else if (mode === "sig") {
+      if (eraser) {                             // the eraser: a vertical bar (shift) or a range bar (integral)
+        lastBox = null;
+        const h = eraseAt(m);
+        if (h) emit({ type: "sig_erase", what: h.what, signal: h.j, spec: h.spec });
+        return;
+      }
+      if (lastBox && lastBox.moved) { lastBox = null; return; }      // the click that ends a box drag or a ctrl-click
+      let sig = parseInt($("sigsel").value);
+      if (ev.shiftKey) {                       // remove: the marker nearest the click on this spectrum, whatever its signal
+        let near = null, bd = 12;
+        S.signals.forEach((sg, j) => { const mm = sg.meas ? sg.meas[s.label] : null; if (!mm || mm.pos === null || mm.pos === undefined) return;
+          const d = Math.abs(xOf(mm.pos + i * S.skew) - m.x); if (d < bd) { bd = d; near = j; } });
+        if (near !== null) sig = near;
+      }
+      if (ev.shiftKey) emit({ type: "sig_click", spec: s.label, ppm: ppm, signal: sig, remove: true });
+      else { const wf = wants(); if (wf) emit(Object.assign({ type: "sig_click", spec: s.label, ppm: ppm, signal: sig, remove: false }, wf)); }
+    }
+    else if (mode === "phase") { pivotPpm = ppm; const s0 = S.spectra[0]; pivotFrac = s0 ? (s0.ppmFirst - (ppm - s0.off)) / s0.ppmSpan : null; draw(); }
+  });
+  canvas.addEventListener("wheel", ev => {
+    const span = S.hi - S.lo;
+    if (ev.ctrlKey) {                                    // pinch / ctrl+wheel: zoom about the cursor
+      const m = mouse(ev), c = ppmOf(m.x), f = Math.exp(ev.deltaY * 0.004);
+      const lo = c - (c - S.lo) * f, hi = c + (S.hi - c) * f;
+      if (hi - lo > 0.002 && hi - lo < 3 * (full[1] - full[0])) setWindow(lo, hi);
+      ev.preventDefault(); commitWindow();
+    } else if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {   // horizontal swipe: pan
+      const dp = ev.deltaX * span / (W() - PAD_L - PAD_R);
+      setWindow(S.lo - dp, S.hi - dp);
+      ev.preventDefault(); commitWindow();
+    }
+  }, { passive: false });
+  canvas.addEventListener("dblclick", () => { if (mode === "zoom" || mode === "phase") emit({ type: "zoom_reset" }); });
+  canvas.addEventListener("mousemove", ev => { if (drag) return; const m = mouse(ev); const i = traceAt(m.x, m.y); hoverIdx = i;
+    if (mode === "sig") canvas.style.cursor = sigCursor(m);
+    hint.textContent = (HINTS[mode] || "") + "   |   " + ppmOf(m.x).toFixed(3) + " ppm" + (i !== null && S.spectra[i] ? " · " + S.spectra[i].label : ""); });
+  canvas.addEventListener("mouseleave", () => { hint.textContent = HINTS[mode] || ""; });
+  canvas.addEventListener("mouseenter", () => { try { canvas.focus({ preventScroll: true }); } catch (e) {} });
+  canvas.addEventListener("keydown", ev => {
+    if (ev.key === "s" || ev.key === "S") {
+      if (solo !== null) leaveSolo();
+      else if (hoverIdx !== null && S.spectra[hoverIdx]) enterSolo(S.spectra[hoverIdx].label);
+      ev.preventDefault();
+    }
+    if (ev.key === "Escape" && solo !== null) leaveSolo();
+    if ((ev.metaKey || ev.ctrlKey) && (ev.key === "z" || ev.key === "Z")) { undoRedo(ev.shiftKey ? "redo" : "undo"); ev.preventDefault(); }
+  });
+  amp.addEventListener("input", () => { ampv.textContent = fmtAmp(ampVal()); requestDraw(); });
+  $("signew").addEventListener("click", () => emit({ type: "sig_new" }));
+  $("bundo").addEventListener("click", () => undoRedo("undo"));
+  $("bredo").addEventListener("click", () => undoRedo("redo"));
+  $("tpick").addEventListener("click", () => { doPick = !doPick; eraser = false; syncTools(); });
+  $("tint").addEventListener("click", () => { doInt = !doInt; eraser = false; syncTools(); });
+  $("terase").addEventListener("click", () => { eraser = !eraser; syncTools(); });
+  $("fitk").addEventListener("change", () => {
+    const v = parseFloat($("fitk").value);
+    if (!isFinite(v) || v <= 0) { $("fitk").blur(); showFitK(); return; }
+    // single view: this spectrum alone; stack: every spectrum, and the per-spectrum values are dropped
+    if (solo !== null) fitKSpec[solo] = v; else { fitK = v; fitKSpec = {}; }
+    pendingLim = {};
+    emit({ type: "fit_window", k: v, spec: solo });
+    $("fitk").blur();
+  });
+  let nameDbg = [];                    // where the signal names were last drawn on the stack (for tests)
+  let soloDbg = [];                    // what the solo view last drew for each integral (for tests)
+  // what a selection measures (both by default), and the eraser
+  let doPick = true, doInt = true, eraser = false;
+  const ERASER_CURSOR = 'url("data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24"><g transform="rotate(-40 12 12)"><rect x="3" y="8" width="18" height="9" rx="2" fill="#fff" stroke="#222" stroke-width="1.6"/><rect x="3" y="8" width="7" height="9" rx="2" fill="#f28b82" stroke="#222" stroke-width="1.6"/></g></svg>') + '") 6 21, pointer';
+  function sigCursor(m) { return eraser ? ERASER_CURSOR : (m && limitAt(m) ? "ew-resize" : "crosshair"); }
+  function syncTools() {
+    $("tpick").classList.toggle("on", doPick); $("tint").classList.toggle("on", doInt); $("terase").classList.toggle("on", eraser);
+    $("tpick").style.opacity = $("tint").style.opacity = eraser ? 0.45 : 1;
+    if (mode === "sig") canvas.style.cursor = sigCursor(null);
+  }
+  function eraseAt(m) {
+    // what the eraser touches on a DRAWN spectrum: a vertical bar (the shift) above the
+    // baseline, or the range bar (the integral) under it; the nearest one wins
+    let hit = null, best = Infinity; const a = ampPx();
+    S.spectra.forEach((s, i) => {
+      if (!visible(i)) return;
+      const base = baseOf(i);
+      S.signals.forEach((sg, j) => { const mm = sg.meas ? sg.meas[s.label] : null; if (!mm) return;
+        if (mm.pos !== null && mm.pos !== undefined) {
+          const dx = Math.abs(xOf(mm.pos + i * S.skew) - m.x);
+          if (dx <= 6 && m.y >= base - 0.3 * a - 6 && m.y < base - 1 && dx < best) { best = dx; hit = { what: "pos", j, spec: s.label }; }
+        }
+        if (mm.lo !== null && mm.hi !== null && !mm.noint) {
+          const x1 = xOf(Math.max(mm.lo, mm.hi) + i * S.skew), x2 = xOf(Math.min(mm.lo, mm.hi) + i * S.skew), dy = Math.abs(m.y - (base + 5));
+          if (m.x >= x1 - 4 && m.x <= x2 + 4 && m.y >= base - 1 && dy <= 8 && dy < best) { best = dy; hit = { what: "int", j, spec: s.label }; }
+        }
+      });
+    });
+    return hit;
+  }
+  function wants() {           // the selection flags, or null (with a word in the hint) when both are off
+    if (doPick || doInt) return { pick: doPick, integ: doInt };
+    hint.textContent = "Switch on δ shift and/or ∫ integral first: with both off a selection measures nothing.";
+    return null;
+  }
+  let fitK = 6, fitKSpec = {};          // integration window: for all spectra, and per spectrum
+  function showFitK() {
+    const el = $("fitk"); if (!el) return;
+    $("fitkunit").textContent = solo !== null ? "linewidths, this spectrum" : "linewidths, all spectra";
+    if (document.activeElement === el) return;         // being typed in
+    el.value = (solo !== null && fitKSpec[solo] !== undefined) ? fitKSpec[solo] : fitK;
+  }
+  let nUndo = 0, nRedo = 0;
+  function syncHist() {
+    $("bundo").classList.toggle("off", nUndo <= 0); $("bredo").classList.toggle("off", nRedo <= 0);
+    $("bundo").title = "Undo the last action (" + nUndo + " step" + (nUndo === 1 ? "" : "s") + " kept; Ctrl/Cmd-Z over the plot)";
+    $("bredo").title = "Redo what was undone (" + nRedo + " step" + (nRedo === 1 ? "" : "s") + "; Shift-Ctrl/Cmd-Z over the plot)";
+  }
+  function undoRedo(which) { if ((which === "undo" ? nUndo : nRedo) > 0) { pending = {}; pendingLim = {}; emit({ type: which }); } }
+  let sigSeen = null;                  // the "current" signal and signal count Python last sent
+  function syncName() { const j = parseInt($("sigsel").value); $("signame").value = (j >= 0 && S.signals[j]) ? (S.signals[j].name || "") : ""; }
+  $("sigsel").addEventListener("change", syncName);
+  $("signame").addEventListener("change", () => {
+    const j = parseInt($("sigsel").value), nm = $("signame").value.trim();
+    if (j >= 0 && S.signals[j] && nm && nm !== S.signals[j].name) emit({ type: "sig_rename", signal: j, name: nm });
+  });
+  $("signame").addEventListener("keydown", ev => { if (ev.key === "Enter") { ev.preventDefault(); $("signame").blur(); } });
+  $("reset").addEventListener("click", () => { setAmpVal(1); emit({ type: "zoom_reset" }); });
+
+  // ── phase controls ────────────────────────────────────────────────────
+  function applyPhase() {
+    const g = globalPhases(); if (Math.abs(g[0]) < 1e-9 && Math.abs(g[1]) < 1e-9) return;
+    emit({ type: "phase", p0: g[0], p1: g[1], target: ptarget.value });
+    p0.value = 0; p1.value = 0; p0n.value = 0; p1n.value = 0;
+  }
+  p0.addEventListener("input", () => { p0n.value = p0.value; draw(); });
+  p1.addEventListener("input", () => { p1n.value = p1.value; draw(); });
+  p0n.addEventListener("input", () => { p0.value = p0n.value; draw(); });
+  p1n.addEventListener("input", () => { p1.value = p1n.value; draw(); });
+  [p0, p1, p0n, p1n].forEach(el => el.addEventListener("change", applyPhase));
+  $("papply").addEventListener("click", applyPhase);
+  $("preset").addEventListener("click", () => { p0.value = 0; p1.value = 0; p0n.value = 0; p1n.value = 0; draw(); });
+
+  // ── render from Streamlit ─────────────────────────────────────────────
+  window.addEventListener("message", ev => {
+    const d = ev.data; if (!d || d.type !== "streamlit:render") return;
+    try {
+      const a = d.args || {};
+      S.spectra = (a.spectra || []).map(s => {
+        const n = s.re.length; let kmax = 0; const mag = new Float64Array(n);
+        for (let k = 0; k < n; k++) { mag[k] = Math.hypot(s.re[k], s.im[k]); if (mag[k] > mag[kmax]) kmax = k; }
+        let m = 1e-30; for (let k = 0; k < n; k++) { if (Math.abs(s.x[k] - s.x[kmax]) > 0.15 && mag[k] > m) m = mag[k]; }
+        if (m <= 1e-30) m = mag[kmax];
+        return Object.assign({}, s, { scale: m });
+      });
+      pending = {}; pendingLim = {};
+      full = a.full || [-1e9, 1e9];
+      // The window: Streamlit's answer to our own pan/zoom request must not move
+      // the view (the user may have gone on scrolling meanwhile); a window that
+      // was changed elsewhere (the ppm boxes, reset view) is applied.
+      const ours = committed && Math.abs(a.lo - committed[0]) < 0.002 && Math.abs(a.hi - committed[1]) < 0.002;
+      if (ours) {
+        committed = null;
+        if (Math.abs(S.lo - a.lo) > 0.002 || Math.abs(S.hi - a.hi) > 0.002) commitWindow();   // moved on: ask again
+      } else { S.lo = a.lo; S.hi = a.hi; }
+      S.offset = a.offset; S.skew = a.skew || 0; S.flip = !!a.flip; S.names = (a.names !== false); S.signals = a.signals || [];
+      S.colors = a.colors || []; S.calibPpm = a.calib_ppm; xlabel = a.xlabel || "x";
+      fitK = (a.fit_k !== undefined && a.fit_k !== null) ? a.fit_k : 6; fitKSpec = a.fit_k_spec || {}; showFitK();
+      nUndo = a.n_undo || 0; nRedo = a.n_redo || 0; syncHist();
+      buildXBoxes();
+      const ssel = $("sigsel");
+      // The signal chosen in the menu is the user's: a render that brings no new
+      // "current" from Python (and no change in the number of signals) must not
+      // put the menu back.  Python's value is applied only when it changes: a
+      // new signal, the signal a click or a box just went to, an undo.
+      const chosen = ssel.value;
+      const pyCur = (a.current === undefined || a.current === null || a.current < 0) ? (S.signals.length ? S.signals.length - 1 : -1) : a.current;
+      ssel.innerHTML = S.signals.length ? S.signals.map((sg, j) => '<option value="' + j + '">' + (sg.name || ("S" + (j + 1))) + '</option>').join("")
+                                        : '<option value="-1">S1 (first click)</option>';
+      const keep = sigSeen !== null && pyCur === sigSeen.cur && S.signals.length === sigSeen.n
+                   && chosen !== "" && parseInt(chosen) >= 0 && parseInt(chosen) < S.signals.length;
+      ssel.value = keep ? chosen : String(pyCur);
+      sigSeen = { cur: pyCur, n: S.signals.length };
+      if (ssel.value === "") ssel.value = S.signals.length ? String(S.signals.length - 1) : "-1";
+      syncName();
+      if (solo !== null && !S.spectra.some(s => s.label === solo)) solo = null;
+      canvas.height = solo !== null ? 440 : stackHeight();
+      // phase target list
+      const cur = ptarget.value; ptarget.innerHTML = '<option value="__all__">all spectra</option>' + S.spectra.map(s => '<option value="' + s.label.replace(/"/g, "&quot;") + '">' + s.label + '</option>').join("");
+      if ([...ptarget.options].some(o => o.value === cur)) ptarget.value = cur;
+      p0.value = 0; p1.value = 0; p0n.value = 0; p1n.value = 0;
+      if (a.mode && a.mode !== mode) { const r = document.querySelector('input[name=mode][value=' + a.mode + ']'); if (r) { r.checked = true; setMode(a.mode); } }
+      draw();
+    } catch (e) { hint.textContent = "error: " + e; }
+    setHeight(true);
+  });
+  window.__wb = { get hover() { return hoverIdx; }, get solo() { return solo; }, get S() { return S; },   // for tests
+                  setWindow: (lo, hi) => { setWindow(lo, hi); commitWindow(); },
+                  setAmp: (v) => { setAmpVal(v); draw(); }, get amp() { return ampVal(); }, get soloInt() { return soloDbg; }, get names() { return nameDbg; }, get hist() { return { undo: nUndo, redo: nRedo }; }, get tools() { return { pick: doPick, integ: doInt, eraser: eraser, cursor: canvas.style.cursor.slice(0, 24) }; }, get fitK() { return { all: fitK, spec: fitKSpec, shown: $("fitk").value, unit: $("fitkunit").textContent }; } };
+  send("streamlit:componentReady", { apiVersion: 1 });
+  setHeight(true);
+  [100, 400, 1000, 2500].forEach(t => setTimeout(() => setHeight(true), t));
+  if (window.ResizeObserver) new ResizeObserver(() => { draw(); setHeight(false); }).observe(document.body);
+  setMode("zoom");
+})();
+</script>
+</body>
+</html>
