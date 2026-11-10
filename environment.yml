@@ -12,8 +12,8 @@ dependencies:
   - openpyxl>=3.1
   - matplotlib>=3.7
   - paramiko>=3.0          # supercomputer (SLURM) submission over SSH
-  - nmrglue>=0.10          # NMR stack tool (nmr_stack.py)
   - pip
   - pip:
     - streamlit>=1.32
     - plotly>=5.18
+    - nmrglue>=0.10        # NMR stack tool (nmr_stack.py); not on conda-forge/defaults, so installed by pip

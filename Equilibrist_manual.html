@@ -296,6 +296,10 @@
   <span class="callout-title">Why conda?</span>
   <p>The <code>environment.yml</code> pins Python to 3.11 and installs all dependencies in an isolated environment — it won't conflict with any existing Python on your machine. Binary packages (scipy, numpy, matplotlib) install more reliably via conda on Windows.</p>
 </div>
+<div class="callout warn">
+<div class="callout-title">PackagesNotFoundError: nmrglue</div>
+<p>The <code>environment.yml</code> of the first 3.0 beta download (8 November 2026) listed <code>nmrglue</code> as a conda package; it is not on the conda-forge or default channels, so <code>conda env create</code> stopped and no environment was made. Replace the file with the current one from the repository, or move the line <code>nmrglue&gt;=0.10</code> under <code>- pip:</code>, then create the environment again.</p>
+</div>
 
 <h3>Method B — pip</h3>
 <p>Best if you already have Python 3.10+ installed.</p>
@@ -339,6 +343,9 @@
     <tr><td>matplotlib</td><td>Publication-quality PDF figure export</td></tr>
     <tr><td>pillow</td><td>Image generation for snapshots</td></tr>
     <tr><td>openpyxl</td><td>Excel engine required by pandas</td></tr>
+    <tr><td>joblib</td><td>Parallel execution of the statistical tools</td></tr>
+    <tr><td>paramiko</td><td>SSH connection for the supercomputer (SLURM) submission</td></tr>
+    <tr><td>nmrglue</td><td>Reading Bruker data in the NMR stack companion tool (installed by pip, also in the conda environment)</td></tr>
   </tbody>
 </table>
 

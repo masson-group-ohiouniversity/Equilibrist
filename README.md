@@ -143,6 +143,9 @@ A `__pycache__` folder may appear after the first run — this is normal.
 
 ## Troubleshooting
 
+**`PackagesNotFoundError: nmrglue` during `conda env create`**  
+The `environment.yml` of the first 3.0 beta download (8 November 2026) listed `nmrglue` as a conda package; it is not on the conda-forge or default channels, so the environment was not created. Replace `environment.yml` with the current one from this repository, or open it in a text editor and move the line `nmrglue>=0.10` under `- pip:` (same indentation as `streamlit`), then run `conda env create -f environment.yml` again.
+
 **"streamlit: command not found"**  
 Run `pip install streamlit`, or make sure the conda environment is activated first.
 
