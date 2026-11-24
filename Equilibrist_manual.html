@@ -100,7 +100,7 @@
 <body>
 
 <header>
-  <div class="badge">User Manual · v3.0.1 beta</div>
+  <div class="badge">User Manual · v3.0.2 beta</div>
   <h1>Equilibrist</h1>
   <p class="subtitle">A thermodynamic and kinetic solver — with a full statistical-validation, identifiability and uncertainty-quantification layer</p>
   <span class="version">Python · Streamlit · Open Source</span>
@@ -220,7 +220,19 @@
 <p>Equilibrist is a browser-based scientific application built with Python and Streamlit. It runs locally on your machine. You define a chemical system via a plain-text script, simulate titration or time-resolved curves, and optionally fit binding or rate constants to experimental data.</p>
 
 <div class="callout success">
-<div class="callout-title">New in 3.0 (this revision: v3.0.1 beta, November 2026)</div>
+<div class="callout-title">New in 3.0.2 beta (November 2026)</div>
+<ul>
+  <li><strong>All tabs in one session file.</strong> <em>Save all tabs</em> writes every tab and the global fit to one file; loading it reopens the tabs and restores the global fit at its saved constants, without a new search. Session files now also keep the excluded points, the fit ticks and the fitted wavelength range (<a href="#session">Save &amp; Load Session</a>).</li>
+  <li><strong>Duplicate tab</strong> opens a new tab with the script of the tab on screen, for several experiments that share one model. <strong>Reset tab</strong> and <strong>Reset all tabs</strong> replace the former single reset button (<a href="#tabs-global">Tabs and the global fit</a>).</li>
+  <li><strong>Voided columns.</strong> A <code>#</code> in the first row of a data sheet voids that column, as a <code>#</code> in the first column voids a row (<a href="#data-conc">data files</a>).</li>
+  <li><strong>Custom Python script</strong> stays loaded across tabs; a long fit message is folded to one line.</li>
+  <li><strong>Tutorial 22</strong> has a second data set of run A, for a global fit of two repeats of one experiment.</li>
+  <li><strong>Fixed:</strong> a crash when resetting or switching tabs in a kinetics job with recent Streamlit versions; a tab saved after a global fit was refitted alone when reloaded and now keeps its global constants; the data-rank analysis (EFA / scree / TFA) was never offered and now appears under <em>Show residual diagnostics</em> after a UV-Vis fit (<a href="#stats-rank">Spectral rank analysis</a>).</li>
+</ul>
+</div>
+
+<div class="callout success">
+<div class="callout-title">New in 3.0</div>
 <ul>
   <li><strong>Global fits across techniques.</strong> Tabs holding different kinds of data (NMR integrals with an internal standard, NMR shifts, UV-Vis, ITC, kinetic runs) are fitted together; the fit message and the Tabs list report each tab's share of the information on every shared constant; the residual diagnostics and the identifiability tools are available in every tab after a global fit (Tutorials 21 and 22).</li>
   <li><strong>ITC documented.</strong> The calorimetry mode has its own chapter (<a href="#itc">ITC</a>); Tutorial 23 adds a three-step network with an endothermic step.</li>
@@ -778,7 +790,7 @@ shift: Gtot          <span class="cmt"># columns D onward: fast-exchange shifts<
 <pre><code><span class="sec">$nmr</span>
 shift: <span class="sp">Gtot</span>, <span class="sp">Htot</span>
 read: <span class="sp">GH</span>, <span class="sp">GH2</span>    <span class="cmt"># intrinsic δ of GH and GH2 read from sheet 2</span></code></pre>
-<p>Sheet 2 layout mirrors the UV-Vis "known spectra" tab: row 1 contains the signal-column headers, column A lists species names, body cells carry intrinsic ppm values. Cells left empty (or with the literal string <code>NaN</code>) mark that particular species × column combination as still free to fit, so a partial pin is supported.</p>
+<p>Sheet 2 layout mirrors the UV-Vis "known spectra" tab: row 1 contains the signal-column headers, column A lists species names, body cells carry intrinsic ppm values. Cells left empty (or with the literal string <code>NaN</code>) mark that particular species × column combination as still free to fit, so a partial pin is supported. A signal column voided on sheet 1 (<code>#</code> in its row-1 cell, see <a href="#data-nmr">NMR Data Files</a>) is skipped on sheet 2 as well, whether or not the <code>#</code> is repeated there; a <code>#</code> in row 1 of sheet 2 alone keeps the signal and leaves its shifts free.</p>
 
 <h3 id="nmr-noref">noref — Release the auto-pinned reference</h3>
 <p>By default, Equilibrist treats the first species in each fast-exchange target group as the math reference and auto-pins its intrinsic shift increment to <code>dd[ref] = 0</code>. The Variable-Projection linear sub-problem is then solved over the non-reference species only, and the reported "pure-species chemical shifts" are absolute ppm: δ<sub>pure</sub> = δ<sub>obs</sub>(at first x) + dd. This is the legacy behavior, identical to v1.0, and is what most users want.</p>
@@ -975,6 +987,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <section id="data-conc">
 <h2>Concentration Data Files</h2><div class="section-line"></div>
 <p>Used in equilibrium mode when neither <code>$nmr</code> nor <code>$spectra</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as column headers. A row whose column-A cell starts with <code>#</code> is a comment row: everything on that row is ignored, so proton labels or notes can sit under the header.</p>
+<p>A column whose row-1 cell starts with <code>#</code> is voided: the sheet is read as if that column were not there. The first column that is not voided plays the part of column A, so <code>#</code> in A1 moves the volumes to column B, and <code>#</code> in A1 and B1 moves them to column C. Comment rows are then marked in that column; a <code>#</code> further down a voided column has no effect. The same holds for every data sheet described below.</p>
 <table class="kw-table">
   <thead><tr><th>Column</th><th>Content</th></tr></thead>
   <tbody>
@@ -988,6 +1001,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <section id="data-nmr">
 <h2>NMR Data Files</h2><div class="section-line"></div>
 <p>Used in equilibrium mode when <code>$nmr</code> is present. Format: Excel (<code>.xlsx</code>), row 1 as headers. For kinetics NMR data see <a href="#data-kinetics">Kinetics Data Files</a>. A row whose column-A cell starts with <code>#</code> is a comment row: everything on that row is ignored, so proton labels or notes can sit under the header.</p>
+<p>A column whose row-1 cell starts with <code>#</code> is voided, as in <a href="#data-conc">concentration data files</a>. The signal columns that remain keep their order: signals in B, C and D with <code>#</code> in D1 are read as signals in B, C and E. This is the way to leave a signal out of a fit, or to keep a notes column in the sheet, without deleting anything.</p>
 <table class="kw-table">
   <thead><tr><th>Column</th><th>Shift mode</th><th>Integration mode</th></tr></thead>
   <tbody>
@@ -1019,6 +1033,8 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
   </tbody>
 </table>
 
+<p>A column whose row-1 cell starts with <code>#</code> is voided on either sheet, as in the other data files: write <code>#</code> in front of a wavelength to leave it out, or keep a notes column in front (the next column then holds the volumes or times on sheet 1, the species names on sheet 2).</p>
+
 <h3 id="data-spectra-sheet2">Sheet 2 — known pure-species spectra (optional)</h3>
 <p>When <code>read:</code> is present in <code>$spectra</code>, Equilibrist looks for a second sheet in the uploaded Excel file. If the sheet is absent or unreadable, <code>read:</code> has no effect. The layout of sheet 2 is identical to the <strong>spectra tab exported by Equilibrist</strong> after a fit — so a previous fit result can be directly fed back as a known spectrum for a subsequent fit.</p>
 
@@ -1046,7 +1062,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <!-- ═══════════════════════════════════════ DATA KINETICS ═══════════════════════════════════════ -->
 <section id="data-kinetics">
 <h2>Kinetics Data Files</h2><div class="section-line"></div>
-<p>All kinetics data files use <strong>time in seconds</strong> as the x-axis (column A). Three formats are available depending on the active mode:</p>
+<p>All kinetics data files use <strong>time in seconds</strong> as the x-axis (column A). Three formats are available depending on the active mode. The two <code>#</code> rules of the equilibrium data files apply: a row whose time cell starts with <code>#</code> is a comment row, and a column whose row-1 cell starts with <code>#</code> is voided.</p>
 
 <h3>Concentration data (no $nmr, no $spectra)</h3>
 <table class="kw-table">
@@ -1117,7 +1133,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <h2>Left Margin Controls</h2><div class="section-line"></div>
 
 <h3>Equilibrist Script</h3>
-<p>Drag-and-drop a <code>.txt</code> script file or click to browse. When a file is successfully loaded, its filename is displayed as a <strong>blue pill badge</strong> below the uploader. Click <strong>↺ Reset / load new script</strong> to clear the entire session and start fresh. Uploading a new script also performs a full session reset automatically.</p>
+<p>Drag-and-drop a <code>.txt</code> script file or click to browse. When a file is successfully loaded, its filename is displayed as a <strong>blue pill badge</strong> below the uploader. Click <strong>↺ Reset tab</strong> (top of the sidebar) to empty the tab on screen and load another script; the other tabs are untouched. <strong>↺ Reset all tabs</strong>, next to it, is a full reset: the app returns to the state it has when launched, with one empty tab and the fit settings at their defaults. Uploading a new script also resets the tab on screen.</p>
 
 <h3>Initial concentrations [mM]</h3>
 <p>One numeric input per entry in <code>$concentrations</code>. A small <strong>fit</strong> checkbox to the right selects that concentration for fitting. The checkbox is disabled when only spectra data is loaded (concentration is not identifiable from Beer-Lambert alone).</p>
@@ -1187,7 +1203,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <h2>Right Panel</h2><div class="section-line"></div>
 <p>The right column (both equilibrium and kinetics modes) presents controls and results in this order:</p>
 <ol>
-  <li><strong>Fit message</strong> — green success or yellow warning banner from the previous fit run.</li>
+  <li><strong>Fit message</strong> — green success or yellow warning banner from the previous fit run. A long message is folded: only its first clause shows (for example "✅ Converged after 55 evaluations in 6 s"); click it to unfold the full banner. A ⚠️ on the folded line means that the banner holds a warning.</li>
   <li><strong>Solver options</strong> — Tol, Timeout, the Fit Parameters button and, with several tabs, the Global fit button next to it (concentration mode runs L-BFGS-B then Nelder-Mead; the other modes Nelder-Mead).</li>
   <li><strong>Data Export</strong> — 💾 Export data and 📸 Snapshot buttons.</li>
   <li><strong>Experimental data</strong> — file uploader, reset button, loaded file badge, data summary.</li>
@@ -1328,7 +1344,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <!-- ═══════════════════════════════════════ FIT STATISTICS ═══════════════════════════════════════ -->
 <section id="fit-stats">
 <h2>Fit Statistics</h2><div class="section-line"></div>
-<p>Displayed in the right panel after each fit. A green banner confirms success; a yellow banner appears if fitting timed out or did not fully converge.</p>
+<p>Displayed in the right panel after each fit. A green banner confirms success; a yellow banner appears if fitting timed out or did not fully converge. A long banner is folded under its first clause; click that line to read all of it.</p>
 
 <table class="kw-table">
   <thead><tr><th>Statistic</th><th>Description</th></tr></thead>
@@ -1530,7 +1546,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <h2>Tabs and the global fit</h2><div class="section-line"></div>
 <p>One titration rarely pins every constant of a large scheme. Equilibrist can hold several experiments at once, each in its own <strong>tab</strong>, and fit them together.</p>
 <h3>Tabs</h3>
-<p><strong>➕ New tab</strong> (sidebar, under <em>Reset / load new script</em>) opens an empty workspace: load a script and a data file as usual. The tabs are listed under the script name; click one to switch. Every tab keeps its own script, data, constants, fit ticks, fit result and diagnostics, so two tabs may run the same script on different data, or entirely different scripts. <strong>✖ Close this tab</strong> removes the active tab. The Tol and Timeout settings are shared.</p>
+<p><strong>➕ New tab</strong> (sidebar, under <em>Reset tab</em>) opens an empty workspace: load a script and a data file as usual. <strong>➕ Duplicate tab</strong>, next to it, opens a new tab that already holds the script of the tab on screen, as it stands (edits made with <em>Edit script</em> included). Only the script is copied, as if it had just been uploaded: the constants and concentrations take the values written in the script, and no data, fit ticks or results come along. Use it for several experiments that share one model: duplicate, adjust the concentrations, load the next data file. Two tabs with the same script name are told apart by a number (<code>#2</code>). The tabs are listed under the script name; click one to switch. Every tab keeps its own script, data, constants, fit ticks, fit result and diagnostics, so two tabs may run the same script on different data, or entirely different scripts. <strong>✖ Close this tab</strong> removes the active tab; <strong>↺ Reset tab</strong> empties it but keeps it in the list; <strong>↺ Reset all tabs</strong> closes every tab and returns the app to its launch state. The Tol and Timeout settings are shared.</p>
 <h3>Global fit</h3>
 <p><strong>🌐 Global fit (all tabs)</strong> sits under <em>Fit Parameters</em> once a second tab exists. It runs one optimisation over every tab that has data loaded and at least one "fit" box ticked, with these rules:</p>
 <ul>
@@ -1542,7 +1558,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 </ul>
 <p>A tab with no tick at all is left out, and the caption under the button says so ("Left out — …: no 'fit' box ticked"): tick at least one constant in every tab that should contribute. Which constants are fitted is then decided by the union of all ticks, so three constants ticked in one tab and one in another give the same fit as all three ticked everywhere.</p>
 <p>The optimiser is Nelder–Mead with the usual Tol and Timeout. Errors come from the Hessian of the summed data term, with the same null-space handling of equality constraints and the same flatness probe as single fits. When the fit ends, every tab receives the shared values, its own RMSE, residual plots, back-calculated points and residual record (so the residual diagnostics and their children are available in every tab), and the green message reports the global RMSE together with the RMSE of each tab, the relative weights and, for every shared constant, each tab's share of the information (next section). Equilibrium constants are printed as log K, rate constants linear with their units. The starting values of the shared constants are those in the sidebar of the tab from which the button was pressed; a shared constant absent from that tab starts from the first tab, in list order, that has it.</p>
-<p>A tab takes part only after it has been opened once with its data loaded, because its settings are registered while it is on screen; the caption under the button lists the tabs that will be included. Session files save one tab at a time.</p>
+<p>A tab takes part only after it has been opened once with its data loaded, because its settings are registered while it is on screen; the caption under the button lists the tabs that will be included. <strong>Save all tabs</strong> in the session box stores every tab and the global fit in one file (<a href="#session">Save &amp; Load Session</a>).</p>
 <h3>Information shares</h3>
 <p>The curvature of the weighted objective at the solution is what sets the errors of the shared constants, and it is a sum over tabs. For every shared constant the fit message gives each tab's part of that curvature (the second derivative of its weighted objective along the constant) as a percentage of the total, and the Tabs list in the sidebar shows next to each name the mean of that tab's shares over the shared constants. A share says how much of what pins a constant comes from that tab's data: in Tutorial 21 the integration tab carries 93 % of the information on K<sub>2</sub> but 4 % on K<sub>1</sub>, although its relative weight is only 0.013. The shares are read-outs, not settings: they follow from the data and from the weighting, they are diagonal (a tab that determines only the product of two constants contributes to both), and the percentage leaves the Tabs list when a tab is refitted alone.</p>
 <h3>Diagnostics on all tabs or on this tab only</h3>
@@ -1948,7 +1964,7 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 <!-- ─────────────────────────── Rank analysis ─────────────────────────── -->
 <section id="stats-rank">
 <h2>Spectral rank analysis — EFA, scree, TFA</h2><div class="section-line"></div>
-<p>Toggle <strong>📊 Show data-rank analysis (EFA / scree / TFA)</strong> after a UV-Vis spectra fit. This panel is unique to spectra fits and operates directly on the absorbance matrix <strong>D</strong> (rows = titration / time steps, columns = wavelengths), independently of the chemical model. It answers the question: <em>how many distinct absorbing species does the data support, and do my fitted pure spectra ε agree with the data's intrinsic factor space?</em></p>
+<p>After a UV-Vis fit (titration or kinetics), tick <strong>📊 Show residual diagnostics</strong>, then <strong>📊 Show data-rank analysis (EFA / scree / TFA)</strong> underneath it. The box is offered only for UV-Vis fits, once a fit has run. The panel works on the absorbance matrix <strong>D</strong> of the fitted wavelength range (rows = titration / time steps, columns = wavelengths), independently of the chemical model. It answers the question: <em>how many distinct absorbing species does the data support, and do my fitted pure spectra ε agree with the data's intrinsic factor space?</em></p>
 
 <p>Three sub-tools are reported on a single three-panel figure.</p>
 
@@ -1973,9 +1989,11 @@ read: A, B, C             <span class="cmt"># multiple known spectra</span></cod
 
 <p>Equilibrist auto-feeds the fitted ε spectra (from the most recent UV-Vis fit) as TFA targets, so the rank-analysis figure simultaneously shows (i) the data's intrinsic rank, (ii) the noise floor, and (iii) which fitted pure species are consistent with that rank.</p>
 
+<p>After a global fit across tabs, the panel still analyses the spectra of the tab on screen only: EFA, the scree and the IND rank are the same as for that tab fitted alone, while the TFA test is run on the pure spectra solved at the global constants. A species flagged 🔴 <em>not supported</em> then means that this tab's spectra do not determine it, which is expected when another tab supplies the constant that governs it (Tutorial 21C: the TFA residual of the dimer E, at most 3 % of the host, goes from 14.8 % when the tab is fitted alone to 57 % after the global fit with 21A and 21B).</p>
+
 <div class="callout">
   <span class="callout-title">Cross-checks</span>
-  <p>The IND-argmin rank should match (or be at most one above) the number of independently absorbing species declared in <code>$reactions</code> (with <code>transparent:</code> species removed). When IND-argmin &lt; model rank, the data does not support the declared model — typically because two species' spectra are too similar and the κ(C) warning will already be firing. When IND-argmin &gt; model rank, the data carries an extra component the chemical model is missing (an impurity, a hidden equilibrium, or baseline drift).</p>
+  <p>With clean data the IND-argmin rank equals the number of absorbing species declared in <code>$reactions</code> (with <code>transparent:</code> species removed): Tutorial 16 gives 3. When IND-argmin &lt; model rank, the data does not support the declared model — typically because two species' spectra are too similar and the κ(C) warning will already be firing. When IND-argmin &gt; model rank, the data carries components the chemical model does not describe: an impurity or a hidden equilibrium, but also baseline drift or any deviation that is not random noise. Tutorial 10 gives 9 for three absorbing species. In that case read the scree for the last sharp drop of σ<sub>k</sub> rather than the IND minimum; the TFA test, run at the IND rank, then passes for any spectrum.</p>
 </div>
 </section>
 
@@ -2075,7 +2093,7 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
   <span class="callout-title">Trust</span>
   <p>The script runs with the same permissions as Equilibrist itself, on your computer. Only run scripts that you wrote or that come from someone you trust.</p>
 </div>
-<p>The controls are available for equilibrium jobs. The output is recomputed only when you press <strong>Run py script</strong>; change a constant in the sidebar and run again to update it.</p>
+<p>The controls are available for equilibrium jobs. The output is recomputed only when you press <strong>Run py script</strong>; change a constant in the sidebar and run again to update it. With several tabs open, the loaded script stays loaded when you switch tabs: each tab runs it against its own job and keeps its own output. <strong>↺ Reset all tabs</strong> unloads it.</p>
 </section>
 
 <!-- ═══════════════════════════════════════ EXPORT ═══════════════════════════════════════ -->
@@ -2130,9 +2148,14 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
 <h2>Save &amp; Load Session — FAIR-compliant JSON</h2><div class="section-line"></div>
 <p>The Export tab above produces an Excel file optimised for human readers. The Session bundle does something different: it produces a single JSON file that captures the <em>complete</em> state of an analysis — script, data, settings, fit result, and every uncertainty / sensitivity calculation that was run — so that an independent reader on a different machine can reload the file and see the same figures, numbers, and diagnostics. This is the FAIR archival format (Findable, Accessible, Interoperable, Reusable).</p>
 
-<p>Open the <strong>💾 Save current session</strong> expander in the sidebar (it appears once a script is loaded). Add an optional <em>Notes</em> string (e.g. "1:2 binding, run 3, repeat of Fig 4a"). Click <strong>📥 Build session</strong>; the JSON file appears as a one-click download, named <code>Equilibrist_session_YYYYMMDD_HHMMSS.json</code>.</p>
+<p>Open the <strong>💾 Save current session</strong> expander in the sidebar. Add an optional <em>Notes</em> string (e.g. "1:2 binding, run 3, repeat of Fig 4a") and click <strong>💾 Save session JSON</strong>: the file downloads at once, named after the data file, <code>Equilibrist_&lt;data file&gt;_YYYYMMDD_HHMMSS.json</code>.</p>
+<p>When several tabs are open the expander offers two buttons:</p>
+<ul>
+  <li><strong>💾 Save this tab</strong> writes the tab on screen, in the same one-tab format as above.</li>
+  <li><strong>💾 Save all tabs</strong> writes every tab, the settings common to all tabs and the global fit into one file, <code>Equilibrist_&lt;N&gt;tabs_YYYYMMDD_HHMMSS.json</code>.</li>
+</ul>
 
-<h3>What the JSON file contains</h3>
+<h3>What a one-tab file contains</h3>
 <table class="kw-table">
   <thead><tr><th>Field</th><th>Content</th></tr></thead>
   <tbody>
@@ -2146,8 +2169,8 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
     <tr><td><code>script_filename</code></td><td>Original .txt filename for the sidebar badge after restore.</td></tr>
     <tr><td><code>data</code></td><td>The raw bytes of the experimental data file (the xlsx file, or the MicroCal <code>.itc</code> thermogram in ITC mode), base64-encoded, with a SHA-256 checksum so the integrity can be verified on load.</td></tr>
     <tr><td><code>data_filename</code> / <code>data_kind</code></td><td>Original filename and free-text type label (<code>experimental</code>, <code>nmr</code>, <code>spectra</code>, ...).</td></tr>
-    <tr><td><code>fit_state</code></td><td>Selected fit parameters, tolerance, maxiter, timeout, wavelength range, NMR mode, allow-negative-ε flag, constraint set, starting log K values, xmax — exactly the configuration that produced <em>fit_result_summary</em>. In ITC mode also the excluded injections, the edited baselines and the heat offset with its fit tick; on load the thermogram is integrated again with them.</td></tr>
-    <tr><td><code>fit_result_summary</code></td><td>Fitted parameters, R², RMSE, AIC, AICc, BIC, Durbin–Watson, Shapiro <em>p</em> from the last successful fit. Excludes bulky arrays (raw residuals, spectra matrices) to keep the file small.</td></tr>
+    <tr><td><code>fit_state</code></td><td>Selected fit parameters, tolerance, maxiter, timeout, wavelength range, NMR mode, allow-negative-ε flag, constraint set, starting log K values, xmax — exactly the configuration that produced <em>fit_result_summary</em>. In ITC mode also the excluded injections, the edited baselines and the heat offset with its fit tick; on load the thermogram is integrated again with them. <code>inputs</code> holds the sidebar as it stood: the value in every constant, concentration and titrant box, the 'fit' ticks, the plot and wavelength ranges, the constraint and spectra options, and the data points excluded by clicking. For a tab whose constants come from a global fit, <code>global</code> records the tabs that fit covered, their weights and the constants it floated in this tab.</td></tr>
+    <tr><td><code>fit_result_summary</code></td><td>Fitted parameters, R², RMSE, AIC, AICc, BIC, Durbin–Watson, Shapiro <em>p</em> from the last successful fit, with the errors and the covariance matrix. Excludes bulky arrays (spectra matrices, pure-species shifts) to keep the file small. After a global fit it also holds the global record: the tabs covered, the shared constants with their errors, and this tab's share of the information.</td></tr>
     <tr><td><code>uq.bootstrap</code></td><td>Summary of the last bootstrap run — method, n_success / n_bootstrap, wall time, per-parameter CI tuples (lo, median, hi). Bulky per-iteration samples are dropped.</td></tr>
     <tr><td><code>uq.jackknife</code></td><td>Summary of the last jackknife — per-parameter jack_se, n_jack, wall time.</td></tr>
     <tr><td><code>uq.monte_carlo</code></td><td>Summary of the last MC — per-parameter MC σ, MC median, 95 % CI lo/hi, n_iter, wall time.</td></tr>
@@ -2157,8 +2180,23 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
   </tbody>
 </table>
 
+<h3>What an all-tabs file contains</h3>
+<table class="kw-table">
+  <thead><tr><th>Field</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td><code>format</code></td><td><code>equilibrist.tabs.v1</code>.</td></tr>
+    <tr><td><code>saved_at_utc</code>, <code>app_version</code>, <code>env</code>, <code>notes</code></td><td>As in a one-tab file.</td></tr>
+    <tr><td><code>tabs</code></td><td>One entry per tab, in the order of the Tabs list. Each entry is a complete one-tab file (the table above), so a tab can be copied out of the list and loaded on its own.</td></tr>
+    <tr><td><code>active_tab</code></td><td>The tab that was on screen when saving.</td></tr>
+    <tr><td><code>prefs</code></td><td>Tol, Timeout, Refresh and the two global-fit options (weighting, shared pure-species shifts).</td></tr>
+    <tr><td><code>global_fit</code></td><td>Summary of the global fit: tabs covered, shared constants with their errors, RMSE of every tab, information shares. Empty when no global fit was run.</td></tr>
+  </tbody>
+</table>
+
 <h3>Restoring a session</h3>
-<p>Drop the <code>.json</code> file onto the same uploader that accepts <code>.txt</code> scripts (the script-upload control automatically detects JSON). Equilibrist verifies the SHA-256 checksum of the embedded data, restores the script and data into the editor and uploader badges, reinstates every <code>fit_state</code> control to its saved value, and rehydrates each <code>uq.*</code> block into its diagnostic panel. The bootstrap CI table, the jackknife influence plot, and the Monte Carlo histograms re-render without needing to be re-run.</p>
+<p>Drop the <code>.json</code> file onto the same uploader that accepts <code>.txt</code> scripts; Equilibrist recognises which kind of file it is and verifies the SHA-256 checksum of the embedded data.</p>
+<p><strong>A one-tab file</strong> fills the tab on screen: script, data, sidebar values and ticks, excluded points, and each <code>uq.*</code> block in its diagnostic panel (the bootstrap CI table, the jackknife influence plot and the Monte Carlo histograms come back without being re-run). The fit is then run again from the saved values to rebuild the curves and the diagnostics; expect the constants to agree with the saved ones within the tolerance of the fit. A tab that was saved after a global fit is the exception: its constants are those of the global fit, which this tab alone cannot reproduce, so they are shown as saved and not refitted (a message says so). <strong>Fit Parameters</strong> then fits that tab on its own.</p>
+<p><strong>An all-tabs file</strong> closes the open tabs and reopens the saved ones: each tab is shown in turn (a few seconds), then the tab that was on screen when saving comes back. A tab that had been fitted on its own is fitted again, as above. A global fit is restored, not repeated: it is evaluated at its saved constants with its saved weights, without a new search, so the constants, their errors, the RMSE of every tab and the information shares are those of the file, and the diagnostics work on the global fit as they did before saving. If one of the tabs of the global fit was refitted alone before saving, the global fit is not restored and every tab comes back as it was saved (a message says so).</p>
 
 <div class="callout success">
   <span class="callout-title">Publication archival pattern</span>
@@ -2168,6 +2206,7 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
 <div class="callout warn">
   <span class="callout-title">Backward compatibility</span>
   <p>v1 session files saved with earlier development builds are still loadable, but they lack the <code>env</code>, <code>seed</code>, and <code>uq</code> blocks. Reloading a v1 file will give you the script, data, and fit state, but the uncertainty panels will read as empty until you re-run them.</p>
+  <p>One-tab files written by 3.0.1 beta and earlier load as before; they do not carry <code>inputs</code>, so points excluded by clicking and a narrowed wavelength range are not restored from them. Version 3.0.1 beta and earlier cannot read an all-tabs file (they say so and change nothing), and they refit a one-tab file saved after a global fit on its own.</p>
 </div>
 </section>
 
@@ -2254,7 +2293,7 @@ ax.set_xlabel(eq.x_label); ax.legend(frameon=False)
     <tr><td>19</td><td>19, 19B, 19C, 19D, 19E</td><td>ITC, 1:1 binding on an iTC200; 19B leaves concentrations and volume blank; 19C adds a competitor M; 19D fixes the competitor's enthalpies (<code>dH =</code>) and adds M<sub>2</sub>H and MGH; 19E has two binding modes of the same partners.</td></tr>
     <tr><td>20</td><td>20B</td><td>ITC, sequential 1:2 binding with stepwise enthalpies of opposite sign (data file <code>tutorial_20_input.itc</code>).</td></tr>
     <tr><td>21</td><td>21A, 21B, 21C</td><td>One system (A + B = C + D, 2 A = E) followed by three techniques: slow-exchange integrals with an internal standard, fast-exchange shifts, UV-Vis. Fit each tab, then globally: K<sub>2</sub> is invisible to the UV-Vis tab alone, and the ε ≥ 0 constraint biases it there.</td></tr>
-    <tr><td>22</td><td>22A, 22B, 22C</td><td>Kinetics A + B &lt;&gt; C, 2 C &gt; D at three B<sub>0</sub>, four slow-exchange integrals each; global fit of k<sub>1</sub>, k<sub>−1</sub>, k<sub>2</sub>.</td></tr>
+    <tr><td>22</td><td>22A, 22B, 22C</td><td>Kinetics A + B &lt;&gt; C, 2 C &gt; D at three B<sub>0</sub>, four slow-exchange integrals each; global fit of k<sub>1</sub>, k<sub>−1</sub>, k<sub>2</sub>. <code>tutorial_22A_input_replicate.xlsx</code> is a second run of 22A with new noise, for combining two repeats of one experiment: load 22A with its data, press <strong>➕ Duplicate tab</strong>, load the replicate in the copy, tick the same constants in both tabs and press <strong>Global fit</strong>. The two runs are fitted as one data set, and the errors of the constants drop by about 30 %.</td></tr>
     <tr><td>23</td><td>23</td><td>ITC, three-step network G + H = GH, GH + H = GH<sub>2</sub>, GH<sub>2</sub> + G = G<sub>2</sub>H<sub>2</sub> with one endothermic step.</td></tr>
     <tr><td>24</td><td>24</td><td>An oscillating reaction (the Brusselator): simulation of a limit cycle in a closed batch, and a fit of its four rate constants that needs starting values in the oscillating regime.</td></tr>
   </tbody>
@@ -2857,7 +2896,7 @@ y    = A, B, C, D</code></pre>
 </div>
 
 <footer>
-  <p>Equilibrist — built with Python &amp; Streamlit &nbsp;·&nbsp; all computation local, no data transmitted &nbsp;·&nbsp; v3.0.1 beta (November 2026)</p>
+  <p>Equilibrist — built with Python &amp; Streamlit &nbsp;·&nbsp; all computation local, no data transmitted &nbsp;·&nbsp; v3.0.2 beta (November 2026)</p>
 </footer>
 
 </body>

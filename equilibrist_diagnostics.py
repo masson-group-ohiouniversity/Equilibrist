@@ -3142,7 +3142,7 @@ def render_identifiability_panel(stats: dict, *,
             "tag":         tag_label,
             "combination": combo,
         })
-    st.dataframe(rows, hide_index=True, use_container_width=True)
+    st.dataframe(rows, hide_index=True, width="stretch")
     st.caption(
         "σᵢ is in the units of the fitted parameter — log units for "
         "log K / log k parameters, linear units for direct rate "
@@ -3193,7 +3193,7 @@ def render_identifiability_panel(stats: dict, *,
             })
         st.markdown("**Per-parameter impact ranking**")
         st.dataframe(impact_rows, hide_index=True,
-                     use_container_width=True)
+                     width="stretch")
         st.caption(
             "**σ (alone)** = conditional uncertainty in this "
             "parameter if all others were held exactly at their "
@@ -4305,6 +4305,45 @@ def compute_tfa(D, targets, rank: int, axis: str = "column") -> dict:
                 rank_used=rank, axis=axis, n_targets=int(targets.shape[1]))
 
 
+def rank_analysis_inputs(stats: dict) -> Optional[dict]:
+    """
+    The data matrix and its companions for the rank analysis, taken from a
+    fit's statistics; ``None`` when the fit has no such matrix.
+
+    A fit may store them under the ``data_matrix*`` names listed in
+    :func:`compute_rank_analysis`.  The UV-Vis fits (equilibrium and
+    kinetics) already keep what is needed under other names: the absorbance
+    matrix of the fitted wavelength range (``A_obs``, observations x
+    wavelengths), the fitted absorptivities (``E_final``, species x
+    wavelengths) and the absorbing species (``absorbers``).  They are used
+    as they are: nothing is copied and nothing is added to the statistics.
+    """
+    import numpy as _np
+    if not isinstance(stats, dict):
+        return None
+    if stats.get("data_matrix") is not None:
+        return stats
+    if stats.get("fit_mode") not in ("spectra", "kinetics_spectra"):
+        return None
+    D = stats.get("A_obs")
+    if D is None:
+        return None
+    D = _np.asarray(D, dtype=float)
+    if D.ndim != 2 or min(D.shape) < 2 or not _np.isfinite(D).all():
+        return None
+    out = dict(data_matrix=D, data_matrix_kind="absorbance",
+               data_matrix_obs_labels=stats.get("x_exp"),
+               data_matrix_ch_labels=stats.get("wavelengths_fit"))
+    names = list(stats.get("absorbers") or [])
+    E = stats.get("E_final")
+    if E is not None and names:
+        E = _np.asarray(E, dtype=float)
+        if E.shape == (len(names), D.shape[1]) and _np.isfinite(E).all():
+            out["E_final"] = E.T            # wavelengths x species, as the analysis expects
+            out["species_names"] = names
+    return out
+
+
 def compute_rank_analysis(stats: dict) -> Optional[dict]:
     """
     Run the full EFA / scree / TFA pipeline on a fit's data matrix.
@@ -4328,10 +4367,10 @@ def compute_rank_analysis(stats: dict) -> Optional[dict]:
     (a sanity-check comparison to ind_argmin_rank).
     """
     import numpy as _np
-    D = stats.get("data_matrix")
-    if D is None:
+    stats = rank_analysis_inputs(stats)
+    if stats is None:
         return None
-    D = _np.asarray(D, dtype=float)
+    D = _np.asarray(stats["data_matrix"], dtype=float)
     if D.ndim != 2 or D.shape[0] < 2 or D.shape[1] < 2:
         return None
 
@@ -4477,7 +4516,7 @@ def make_rank_analysis_figure(stats: dict, *,
 
     ax_ind = ax_scree.twinx()
     valid = ~_np.isnan(scree["ind"])
-    ax_ind.semilogy(ks[valid], scree["ind"][valid], "s-",
+    ax_ind.semilogy(_np.flatnonzero(valid), scree["ind"][valid], "s-",
                     color="crimson", lw=1.0, markersize=4, label="IND")
     ax_ind.set_ylabel("Malinowski IND(k)", color="crimson")
     ax_ind.tick_params(axis="y", labelcolor="crimson")
@@ -4601,7 +4640,7 @@ def render_rank_analysis_panel(stats: dict, *, key: str = "rank") -> None:
     df = _pd.DataFrame(rows)
     st.caption(f"Top {n_show} singular values  (noise floor "
                f"σ ≈ {scree['noise_floor']:.2e}; SNR = σ / noise)")
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width="stretch")
 
     if tfa is not None:
         tfa_rows = []
@@ -4619,7 +4658,7 @@ def render_rank_analysis_panel(stats: dict, *, key: str = "rank") -> None:
         st.caption(f"Target Factor Analysis of fitted pure spectra "
                    f"(projected onto rank-{tfa['rank_used']} factor space)")
         st.dataframe(_pd.DataFrame(tfa_rows), hide_index=True,
-                     use_container_width=True)
+                     width="stretch")
 
     # PNG download
     buf = _io.BytesIO()

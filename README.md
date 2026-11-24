@@ -3,7 +3,8 @@
 A browser-based thermodynamic and kinetic solver built with Python and Streamlit.  
 Define a chemical system in a plain-text script, simulate titration or time-resolved curves, and fit binding or rate constants to experimental data.  
 Runs entirely on your local machine — no data is sent anywhere.  
-**Version 3.0.1 beta** adds tabs with a global fit across techniques, isothermal titration calorimetry, supercomputer offload, live fits and 24 tutorials, on top of the statistical-validation, identifiability and uncertainty-quantification layer of 2.0.
+**Version 3.0** adds tabs with a global fit across techniques, isothermal titration calorimetry, supercomputer offload, live fits and 24 tutorials, on top of the statistical-validation, identifiability and uncertainty-quantification layer of 2.0.  
+**3.0.2 beta** (this version) adds one session file for all tabs, a *Duplicate tab* button and voided data columns.
 
 ---
 
@@ -29,7 +30,7 @@ Runs entirely on your local machine — no data is sent anywhere.
 - **Supercomputer submission (SLURM)** — every parallel tool (1D / 2D RMSE profiles, bootstrap, jackknife, Monte Carlo, local sensitivity) can be sent to a SLURM cluster from a panel below its *Parallel* box: connect over SSH, choose nodes × CPUs, submit, close the browser, fetch the result later. Password kept in memory only; optional one-click SSH-key setup; OSC preset included, other clusters via an editable job header
 - **Custom Python scripts** — load your own `.py` from the sidebar and run it against the current job: constants, simulated curves, variables, data and fit statistics are handed to the script as `eq`; figures, tables and printed output appear under the main plots with PDF/PNG downloads
 - **Local sensitivity (Masson ξ)** — 3<sup>N</sup> paired-difference probe over arbitrary subsets of fitted parameters and held-fixed quantities, returning conditional and marginal standard errors and a coupling ratio
-- **FAIR session save/restore** — single self-contained JSON bundle (script + experimental data with SHA-256 checksum + fit state + every uncertainty and sensitivity result + RNG seed + Python / NumPy / SciPy / joblib versions). Drop the `.json` back into the script uploader to reconstruct the analysis exactly
+- **FAIR session save/restore** — single self-contained JSON bundle (script + experimental data with SHA-256 checksum + fit state + every uncertainty and sensitivity result + RNG seed + Python / NumPy / SciPy / joblib versions). Drop the `.json` back into the script uploader to reconstruct the analysis exactly. With several tabs open, *Save all tabs* writes every tab and the global fit to one file, which reopens them all.
 - **Excel export** — timestamped workbook with data, script, and parameters tabs
 - **Publication-quality PDF export** — vector text, Arial 9 pt, inward ticks, editable in Illustrator
 - **In-app script editor** — edit and re-run without leaving the browser
@@ -174,5 +175,5 @@ Open `Equilibrist_manual.html` in any browser for the full user manual, includin
 
 ---
 
-*Equilibrist v3.0.1 beta — built with Python & Streamlit · all computation local, no data transmitted*  
+*Equilibrist v3.0.2 beta — built with Python & Streamlit · all computation local, no data transmitted*  
 *© Eric Masson, Ohio University, 2026*

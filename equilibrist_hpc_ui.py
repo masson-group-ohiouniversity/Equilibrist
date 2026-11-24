@@ -460,16 +460,24 @@ def _scroll_keeper() -> None:
     Streamlit re-creates that frame."""
     import json
     restore = bool(st.session_state.pop("_hpc_restore_scroll", False))
+    snippet = ("<script>(function(){try{var P=window.parent,D=P.document;"
+               "if(!P.__eqbScrollV2){var s=D.createElement('script');"
+               "s.textContent=" + json.dumps(_SCROLL_JS_PARENT) + ";D.head.appendChild(s);}"
+               + ("if(P.__eqbRestore)P.__eqbRestore();" if restore else "")
+               + "}catch(e){}})();</script>")
+    # st.iframe where Streamlit has it (it replaces st.components.v1.html, which
+    # recent versions announce as removed); the older call otherwise
+    if hasattr(st, "iframe"):
+        try:
+            st.iframe(snippet, height=1)             # a height of 0 is refused
+            return
+        except Exception:
+            pass
     try:
         import streamlit.components.v1 as components
     except Exception:
         return
-    components.html(
-        "<script>(function(){try{var P=window.parent,D=P.document;"
-        "if(!P.__eqbScrollV2){var s=D.createElement('script');"
-        "s.textContent=" + json.dumps(_SCROLL_JS_PARENT) + ";D.head.appendChild(s);}"
-        + ("if(P.__eqbRestore)P.__eqbRestore();" if restore else "")
-        + "}catch(e){}})();</script>", height=0)
+    components.html(snippet, height=0)
 
 
 def _age_seconds(iso: str) -> float:

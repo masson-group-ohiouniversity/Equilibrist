@@ -14,8 +14,11 @@ plain JSON so the file is human-inspectable and language-portable.
 Public API
 ----------
 
-``make_session_json(...)`` — returns a JSON string suitable for download.
-``parse_session_json(text)`` — returns a dict with decoded data bytes.
+``make_session_json(...)`` — one tab as a JSON string suitable for download.
+``make_tabs_json(...)`` — every tab of the workspace in one JSON string.
+``parse_session_json(text)`` — returns a dict with decoded data bytes
+(either kind of file).
+``capture_inputs`` / ``apply_inputs`` — the sidebar of a tab as the user left it.
 
 Both functions are stateless and have no Streamlit dependency, so the
 module can be imported in headless contexts and unit-tested directly.
@@ -43,6 +46,11 @@ _ACCEPTED_SESSION_FORMATS = frozenset({
     "equilibrist.session.v1",   # legacy, loaded but lacks env/seed/uq
     "equilibrist.session.v2",
 })
+
+# An "all tabs" file: every tab of the workspace in one JSON.  Each entry of
+# its ``tabs`` list is a complete single-tab session (the v2 payload above),
+# so one tab can be lifted out of the file and loaded on its own.
+TABS_FORMAT_VERSION = "equilibrist.tabs.v1"
 
 
 def _scrub(obj):
@@ -328,7 +336,116 @@ def _serialize_tuple_caches(session_state) -> list:
 
 
 
-def make_session_json(*,
+# ─── The sidebar as the user left it (values, fit ticks, exclusions) ───
+
+_INPUT_VALUE_PREFIXES = ("logK_", "pKa_", "conc_", "titrant_mM_", "titrant_ratio_")
+_INPUT_VALUE_KEYS     = ("V0_mL", "xmax", "spectra_wl_min", "spectra_wl_max", "itc_q_offset")
+_INPUT_TICK_PREFIXES  = ("fit_logK_", "fit_conc_", "fit_titrant_mM_")
+_INPUT_FLAG_KEYS      = ("fit_use_constraints", "spectra_auto_range", "spectra_allow_neg",
+                         "fit_itc_q_offset")
+_OUTLIER_KEYS         = {"main": "_outliers_main", "nmr": "_outliers_nmr",
+                         "spectra": "_outliers_spectra"}
+
+
+def _is_input_value_key(k) -> bool:
+    return isinstance(k, str) and (k in _INPUT_VALUE_KEYS or k.startswith(_INPUT_VALUE_PREFIXES))
+
+
+def input_keys_present(session_state) -> dict:
+    """``{key: value}`` of every sidebar input (values, fit ticks, options)
+    currently in ``session_state`` -- what must be put back when a run ends
+    before the sidebar is drawn (Streamlit then drops those widget values)."""
+    out = {}
+    try:
+        keys = [k for k in session_state.keys() if isinstance(k, str)]
+    except Exception:
+        return out
+    for k in keys:
+        if _is_input_value_key(k) or k.startswith(_INPUT_TICK_PREFIXES) or k in _INPUT_FLAG_KEYS:
+            out[k] = session_state[k]
+    return out
+
+
+def capture_inputs(session_state) -> dict:
+    """What the sidebar of one tab holds: the value in every constant /
+    concentration / titrant box, which 'fit' boxes are ticked, the plot and
+    wavelength ranges, the constraint and spectra options, and the data
+    points excluded by clicking.
+
+    ``session_state`` is ``st.session_state`` (the tab on screen) or the
+    snapshot of another tab.  A value waiting in a ``_pending_<key>`` entry
+    (written by a fit, shown the next time the tab is drawn) wins over the
+    box's current content.  Returns a JSON-ready dict.
+    """
+    values, ticks, flags = {}, {}, {}
+    try:
+        keys = [k for k in session_state.keys() if isinstance(k, str)]
+    except Exception:
+        keys = []
+    for k in keys:
+        v = session_state.get(k)
+        if _is_input_value_key(k):
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(v):
+                values.setdefault(k, float(v))
+        elif k.startswith("_pending_") and _is_input_value_key(k[len("_pending_"):]):
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(v):
+                values[k[len("_pending_"):]] = float(v)            # pending wins
+        elif k.startswith(_INPUT_TICK_PREFIXES):
+            ticks[k] = bool(v)
+        elif k in _INPUT_FLAG_KEYS:
+            flags[k] = bool(v)
+    excluded = {}
+    for name, key in _OUTLIER_KEYS.items():
+        v = session_state.get(key)
+        if isinstance(v, dict):
+            d = {str(c): sorted(int(i) for i in s) for c, s in v.items() if s}
+            if d:
+                excluded[name] = d
+        elif isinstance(v, (set, list, tuple)) and v:
+            excluded[name] = sorted(int(i) for i in v)
+    out = {"values": values, "ticks": ticks, "flags": flags}
+    if excluded:
+        out["excluded"] = excluded
+    return out
+
+
+def apply_inputs(target, inputs: Optional[dict]) -> bool:
+    """Put a saved sidebar (:func:`capture_inputs`) into ``target`` -- a
+    mapping that becomes a tab's state before any widget exists.  Values are
+    written to the box and to the app's ``_pending_<key>`` channel (the one a
+    fit uses); ticks, options and exclusions are written directly.  Returns True when the
+    file carried fit ticks (they then replace any tick set from the fit
+    record)."""
+    if not isinstance(inputs, dict):
+        return False
+    for k, v in (inputs.get("values") or {}).items():
+        if _is_input_value_key(k):
+            try:
+                # the box itself (read by code that runs before the sidebar is
+                # drawn, as in kinetics mode) and the pending channel (which
+                # survives a rerun that ends before the box is drawn)
+                target[k] = float(v)
+                target[f"_pending_{k}"] = float(v)
+            except (TypeError, ValueError):
+                pass
+    ticks = inputs.get("ticks") or {}
+    for k, v in ticks.items():
+        if isinstance(k, str) and k.startswith(_INPUT_TICK_PREFIXES):
+            target[k] = bool(v)
+    for k, v in (inputs.get("flags") or {}).items():
+        if k in _INPUT_FLAG_KEYS:
+            target[k] = bool(v)
+    excluded = inputs.get("excluded") or {}
+    for name, key in _OUTLIER_KEYS.items():
+        v = excluded.get(name)
+        if isinstance(v, dict):
+            target[key] = {str(c): set(int(i) for i in idx) for c, idx in v.items()}
+        elif isinstance(v, list):
+            target[key] = set(int(i) for i in v)
+    return bool(ticks)
+
+
+def make_session_payload(*,
                       script: str,
                       script_filename: Optional[str] = None,
                       data_bytes: Optional[bytes] = None,
@@ -345,7 +462,9 @@ def make_session_json(*,
                       seed: Optional[int] = None,
                       notes: str = "",
                       app_version: str = "") -> str:
-    """Build a self-contained JSON session string.
+    """Build a self-contained session as a JSON-ready dict (one tab).
+
+    ``make_session_json`` returns the same thing as a string.
 
     Parameters
     ----------
@@ -444,30 +563,43 @@ def make_session_json(*,
             "size_bytes":  len(data_bytes),
             "content":     base64.b64encode(data_bytes).decode("ascii"),
         }
+    return payload
+
+
+def make_session_json(**kwargs) -> str:
+    """One tab as a JSON string (see :func:`make_session_payload`)."""
+    return json.dumps(make_session_payload(**kwargs), indent=2, ensure_ascii=False)
+
+
+def make_tabs_json(*, tabs: list, active_tab: int = 0, prefs: Optional[dict] = None,
+                   global_fit: Optional[dict] = None, notes: str = "",
+                   app_version: str = "") -> str:
+    """Every tab of the workspace in one JSON string.
+
+    ``tabs`` is a list of single-tab payloads (:func:`make_session_payload`),
+    in the order of the tabs; an empty tab is an empty dict.  ``active_tab``
+    is the tab that was shown when saving, ``prefs`` the settings common to
+    all tabs (tolerance, timeout, refresh, global-fit weighting and shift
+    sharing), ``global_fit`` a summary of the last global fit (or None).
+    """
+    payload = {
+        "format":       TABS_FORMAT_VERSION,
+        "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "app_version":  app_version,
+        "env":          _capture_env(),
+        "notes":        notes,
+        "active_tab":   int(active_tab),
+        "prefs":        _scrub(prefs or {}),
+        "global_fit":   _scrub(global_fit) if global_fit else None,
+        "n_tabs":       len(tabs),
+        "tabs":         [t if isinstance(t, dict) else {} for t in tabs],
+    }
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
-def parse_session_json(text: str) -> dict:
-    """Decode a session JSON string.
-
-    Returns a dict with the same shape as the saved JSON, except the
-    ``data`` sub-dict (if present) carries an extra ``bytes`` field
-    containing the decoded raw bytes.  Raises ``ValueError`` on a
-    format-version mismatch or a SHA-256 integrity-check failure.
-    """
-    try:
-        obj = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Could not parse session JSON: {e}") from e
-
-    fmt = obj.get("format", "")
-    if fmt not in _ACCEPTED_SESSION_FORMATS:
-        raise ValueError(
-            f"Unrecognized session format: {fmt!r}.  "
-            f"This file is from a different Equilibrist version "
-            f"(expected one of {sorted(_ACCEPTED_SESSION_FORMATS)})."
-        )
-
+def _decode_embedded_data(obj: dict) -> None:
+    """Decode (in place) the base64 data file of one session and verify its
+    SHA-256.  Raises ``ValueError`` on a bad encoding or a checksum mismatch."""
     data = obj.get("data")
     if isinstance(data, dict) and data.get("encoding") == "base64":
         content = data.get("content", "")
@@ -484,6 +616,51 @@ def parse_session_json(text: str) -> dict:
                     "(saved file appears to be corrupted)."
                 )
         data["bytes"] = decoded
+
+
+def parse_session_json(text: str) -> dict:
+    """Decode a session JSON string (one tab, or an all-tabs file).
+
+    Returns a dict with the same shape as the saved JSON, except the
+    ``data`` sub-dict (if present) carries an extra ``bytes`` field
+    containing the decoded raw bytes.  For an all-tabs file
+    (``format == TABS_FORMAT_VERSION``) this is done for every entry of
+    ``tabs``.  Raises ``ValueError`` on a format-version mismatch or a
+    SHA-256 integrity-check failure.
+    """
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Could not parse session JSON: {e}") from e
+
+    if not isinstance(obj, dict):
+        raise ValueError("Could not parse session JSON: not a JSON object.")
+    fmt = obj.get("format", "")
+    if fmt == TABS_FORMAT_VERSION:
+        # all tabs in one file: each entry is a single-tab session
+        tabs = obj.get("tabs")
+        if not isinstance(tabs, list) or not tabs:
+            raise ValueError("This all-tabs file contains no tab.")
+        for i, t in enumerate(tabs):
+            if not isinstance(t, dict):
+                raise ValueError(f"Tab {i + 1} of this all-tabs file is not readable.")
+            if not t:
+                continue                                   # an empty tab
+            if t.get("format", "") not in _ACCEPTED_SESSION_FORMATS:
+                raise ValueError(f"Tab {i + 1}: unrecognized session format {t.get('format')!r}.")
+            try:
+                _decode_embedded_data(t)
+            except ValueError as e:
+                raise ValueError(f"Tab {i + 1}: {e}") from e
+        return obj
+    if fmt not in _ACCEPTED_SESSION_FORMATS:
+        raise ValueError(
+            f"Unrecognized session format: {fmt!r}.  "
+            f"This file is from a different Equilibrist version "
+            f"(expected one of {sorted(_ACCEPTED_SESSION_FORMATS | {TABS_FORMAT_VERSION})})."
+        )
+
+    _decode_embedded_data(obj)
     return obj
 
 
@@ -550,6 +727,12 @@ def summarize_stats(stats: dict) -> dict:
             if cleaned:
                 out[key] = cleaned
 
+    # Why an error is missing (flat direction, one-sided limit, too large):
+    # shown next to the constant, and not recomputed when a global fit is reopened.
+    pen = stats.get("param_error_notes")
+    if isinstance(pen, dict) and pen:
+        out["param_error_notes"] = pen
+
     # Full Hessian covariance matrix + parameter ordering.  _scrub
     # at the end of this function turns the ndarray into a nested
     # list, so it round-trips through JSON cleanly.
@@ -567,6 +750,15 @@ def summarize_stats(stats: dict) -> dict:
     # low-MB range even for spectra fits with n ≳ 10⁴; if any array
     # is over the cap we drop ALL three (mixing kept-and-dropped arrays
     # would break the panels that need both).
+    # A tab whose latest fit was a global one: which tabs took part, the shared
+    # constants with their errors, and this tab's share of the information.
+    # Without it a reloaded tab could not tell that its constants are global.
+    gf = stats.get("global_fit")
+    if isinstance(gf, dict) and gf:
+        out["global_fit"] = {k: gf.get(k) for k in (
+            "labels", "shared", "share_shifts", "rmse", "rmse_by_label", "values",
+            "errors", "info_share", "own_share", "n_points_total") if k in gf}
+
     MAX_RES_LEN = 50000
     res_keys = ("residuals", "y_calc", "y_obs")
     try:

@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-META = ("_tabs", "_tab_idx", "_tab_radio", "_tab_close", "_tab_new", "_tab_new_snapshot",
-        "_tab_switch_to", "_tab_notice", "_tab_nonce_seq")
+META = ("_tabs", "_tab_idx", "_tab_radio", "_tab_close", "_tab_new", "_tab_new_snapshot", "_tab_new_state",
+        "_tab_switch_to", "_tab_notice", "_tab_nonce_seq", "_restore_tour", "_welcome_nonce",
+        "_py_code")          # the loaded custom .py script: one for the session, like its uploader
 PREFS = ("fit_tolerance_log", "fit_timeout", "fit_refresh", "_global_weighted", "_global_share_shifts", "_global_share_shifts_touched")   # kept across tabs like across resets
 _NONCES = ("_uploader_nonce", "_exp_uploader_nonce")
 
@@ -92,6 +93,52 @@ def _is_upload(v) -> bool:
     return isinstance(v, (list, tuple)) and bool(v) and all(isinstance(x, UploadedFile) for x in v)
 
 
+class StateView(dict):
+    """A tab's state addressed the way ``st.session_state`` is.
+
+    Streamlit stores every key as ``str(key)``, so the tuple keys of the
+    profile caches sit in a snapshot under their string form.  Code written
+    against ``st.session_state`` (the session save / restore) can read and
+    write a tab that is not on screen through this wrapper."""
+
+    @staticmethod
+    def _k(k):
+        return k if isinstance(k, str) else str(k)
+
+    def __getitem__(self, k):
+        return dict.__getitem__(self, self._k(k))
+
+    def __setitem__(self, k, v):
+        dict.__setitem__(self, self._k(k), v)
+
+    def __delitem__(self, k):
+        dict.__delitem__(self, self._k(k))
+
+    def __contains__(self, k):
+        return dict.__contains__(self, self._k(k))
+
+    def get(self, k, default=None):
+        return dict.get(self, self._k(k), default)
+
+    def pop(self, k, *default):
+        return dict.pop(self, self._k(k), *default)
+
+    def setdefault(self, k, default=None):
+        return dict.setdefault(self, self._k(k), default)
+
+
+def forget(ss, k) -> None:
+    """Delete ``k`` from the session, skipping a key the session lists but no
+    longer holds.  A chart's widget id depends on what it draws (Streamlit
+    1.6x), so a chart key can stay listed under an id of an earlier drawing
+    after its current entry is gone; deleting it then raises KeyError
+    (seen as a crash on a second "Reset" in a kinetics tab)."""
+    try:
+        del ss[k]
+    except KeyError:
+        pass
+
+
 def ensure(ss) -> None:
     """Make sure the tab registry exists."""
     if not isinstance(ss.get("_tabs"), list) or not ss["_tabs"]:
@@ -100,10 +147,23 @@ def ensure(ss) -> None:
         ss["_tab_idx"] = 0
 
 
+def live_items(ss) -> list:
+    """``[(key, value)]`` of every entry the session really holds: a key that is
+    listed but can no longer be read (see :func:`forget`) is skipped, where
+    ``ss.items()`` would raise KeyError on it."""
+    out = []
+    for k in list(ss.keys()):
+        try:
+            out.append((k, ss[k]))
+        except KeyError:
+            continue
+    return out
+
+
 def snapshot(ss) -> dict:
     """The current workspace as a plain dict (no meta keys, no uploads)."""
     out = {}
-    for k, v in list(ss.items()):
+    for k, v in live_items(ss):
         if k in META or _is_upload(v) or _is_readonly_key(k):
             continue
         out[k] = v
@@ -124,7 +184,7 @@ def restore(ss, state: dict) -> None:
     for k in list(ss.keys()):
         if k in META:
             continue
-        del ss[k]
+        forget(ss, k)
     for k, v in state.items():
         if k in META or _is_upload(v) or _is_readonly_key(k):
             continue
@@ -135,6 +195,37 @@ def restore(ss, state: dict) -> None:
         seq += 1
         ss[n] = seq
     ss["_tab_nonce_seq"] = seq
+
+
+def reset_all(ss) -> None:
+    """A full reset: the session as it is when the app is launched.  One empty
+    tab; every tab's script, data, constants and results are dropped and the
+    settings return to their defaults.  Only two counters survive, and both
+    move on, so that no uploader or script editor comes back under a key it
+    had before (the browser would show its old content again): the uploader
+    nonces (see :func:`restore`) and the one of the welcome-screen editor,
+    which therefore shows the skeleton script again and not an old draft.
+    The same counter keys the custom-script uploader, which comes back empty."""
+    welcome = int(ss.get("_welcome_nonce", 0) or 0) + 1
+    seq = int(ss.get("_tab_nonce_seq", 0) or 0)
+    for n in _NONCES:
+        seq = max(seq, int(ss.get(n, 0) or 0))
+    for tab in (ss.get("_tabs") or []):
+        state = (tab.get("state") or {}) if isinstance(tab, dict) else {}
+        for n in _NONCES:
+            seq = max(seq, int(state.get(n, 0) or 0))
+    for k in list(ss.keys()):
+        if k == "_tab_radio":             # the Tabs widget: reassigned below
+            continue
+        forget(ss, k)
+    ss["_tabs"] = [{"name": "Tab 1", "state": {}}]
+    ss["_tab_idx"] = 0
+    ss["_tab_radio"] = 0
+    for n in _NONCES:
+        seq += 1
+        ss[n] = seq
+    ss["_tab_nonce_seq"] = seq
+    ss["_welcome_nonce"] = welcome
 
 
 def tab_name(ss, i: int) -> str:
@@ -184,11 +275,16 @@ def swap_if_requested(ss) -> Optional[str]:
         # widget absent from that run (constants, ticks, concentrations).  The
         # button therefore snapshots the tab itself, while the values are still
         # there; the snapshot taken here is only the fallback.
+        # "Duplicate tab" hands over what the new tab starts with (the script of
+        # the tab being left, as a freshly loaded script: no data, no results)
+        init = ss.pop("_tab_new_state", None)
+        init = dict(init) if isinstance(init, dict) else {}
         tabs[cur] = {"name": tab_name(ss, cur), "state": ss.pop("_tab_new_snapshot", None) or snapshot(ss)}
-        tabs.append({"name": f"Tab {len(tabs) + 1}", "state": {}})
-        restore(ss, {})
+        tabs.append({"name": f"Tab {len(tabs) + 1}", "state": dict(init)})
+        restore(ss, init)
         ss["_tab_idx"] = len(tabs) - 1
-        notice = "New tab opened. Load a script and data for it."
+        notice = ("Tab duplicated: same script; load its data." if init.get("_script_text")
+                  else "New tab opened. Load a script and data for it.")
 
     elif ss.pop("_tab_close", False):
         if len(tabs) <= 1:
@@ -218,6 +314,86 @@ def swap_if_requested(ss) -> Optional[str]:
     return notice
 
 
+def open_tabs(ss, states: list, active: int = 0, run_global: bool = False, note: str = "",
+              info: Optional[dict] = None) -> None:
+    """Replace every open tab by ``states`` (one state per tab, in order) and
+    show the first one.  The app then walks through the tabs once
+    (:func:`tour_step`): a tab's fit record only exists after the tab has been
+    drawn, and a global fit needs the record of every tab."""
+    states = [s if isinstance(s, dict) else {} for s in states] or [{}]
+    ss["_tabs"] = [{"name": f"Tab {i + 1}", "state": s} for i, s in enumerate(states)]
+    ss["_tab_idx"] = 0
+    for k in ("_tab_close", "_tab_new", "_tab_new_snapshot", "_tab_new_state", "_tab_switch_to", "_tab_notice"):
+        ss.pop(k, None)
+    restore(ss, states[0])
+    ss["_tab_radio"] = 0
+    active = active if isinstance(active, int) and 0 <= active < len(states) else 0
+    ss["_restore_tour"] = {"todo": list(range(1, len(states))), "final": active,
+                           "global": bool(run_global), "n": len(states), "note": str(note or ""),
+                           "info": dict(info or {}),      # the saved global fit (weights, ticks per tab)
+                           "seen": 0, "stuck": 0, "seq": 0}
+
+
+def _fit_thread_alive(ss) -> bool:
+    bg = ss.get("_bg_fit")
+    try:
+        return bg is not None and bg["thread"].is_alive()
+    except Exception:
+        return False
+
+
+def tour_step(ss) -> Optional[str]:
+    """Run once at the very top of every script run, before
+    :func:`swap_if_requested`.  While an all-tabs file is being reopened: a
+    tab is drawn twice (the first pass puts the restored values into the
+    boxes, the second builds the fit record from them), any fit it asked for
+    is left to finish, then the next tab is shown; after the last one the
+    tab that was active when the file was saved comes back.
+
+    Returns "global" on the run that ends the walk when the saved result was
+    a global fit (the app then restores it), "done" when the walk ends
+    without one, else None."""
+    tour = ss.get("_restore_tour")
+    if not isinstance(tour, dict):
+        return None
+    ensure(ss)
+    tour["seq"] = int(tour.get("seq", 0)) + 1          # one per full run (see the app's ticker)
+    if len(ss["_tabs"]) != int(tour.get("n", -1)):
+        ss.pop("_restore_tour", None)                 # tabs were added or closed meanwhile
+        return "done"
+    if _fit_thread_alive(ss):
+        tour["stuck"] = 0
+        return None
+    if ss.get("_bg_fit") is not None or ss.get("_fit_requested") or ss.get("_global_fit_requested"):
+        # a fit about to start or about to be collected; if it never does
+        # (a script or data problem), stop waiting for it
+        tour["stuck"] = int(tour.get("stuck", 0)) + 1
+        if tour["stuck"] < 5:
+            return None
+        ss.pop("_fit_requested", None)
+        ss.pop("_global_fit_requested", None)
+    tour["stuck"] = 0
+    seen = int(tour.get("seen", 0))
+    drawn = (not ss.get("_script_text")) and seen >= 1          # an empty tab: one pass is enough
+    drawn = drawn or (seen >= 2 and isinstance(ss.get("_fit_args_live"), dict)) or seen >= 4
+    if not drawn:
+        tour["seen"] = seen + 1
+        return None
+    cur = ss["_tab_idx"]
+    todo = [i for i in tour.get("todo", []) if i != cur and 0 <= i < len(ss["_tabs"])]
+    if todo:
+        tour["todo"], tour["seen"] = todo[1:], 1      # the next tab is drawn in this very run
+        ss["_tab_switch_to"] = todo[0]
+        return None
+    tour["todo"] = []
+    if cur != tour.get("final", cur):
+        tour["seen"] = 2                              # already drawn twice earlier in the walk
+        ss["_tab_switch_to"] = tour["final"]
+        return None
+    ss.pop("_restore_tour", None)
+    return "global" if tour.get("global") else "done"
+
+
 def scrub_diagnostics(state: dict) -> None:
     """Drop one-fit diagnostics from a snapshot that is about to receive a new fit."""
     for k in list(state.keys()):
@@ -230,7 +406,8 @@ def scrub_diagnostics(state: dict) -> None:
 def write_fit_into(state: dict, stats: dict, fit_args: dict, message, key: str = "_fit_args_eq") -> None:
     """Give a (non-active) tab's snapshot the result of a global fit, the way
     the app does for the active tab after a fit."""
-    scrub_diagnostics(state)
+    if not state.pop("_preserve_uq_on_next_reset", False):   # set by a session reload
+        scrub_diagnostics(state)
     for k, v in (stats.get("param_values") or {}).items():
         state[f"_pending_logK_{k}"] = float(v)
     for root, mM in (stats.get("fitted_concs") or {}).items():

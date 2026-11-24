@@ -234,7 +234,11 @@ def sidebar_controls() -> None:
     """The two sidebar buttons (call inside ``with st.sidebar:``)."""
     import streamlit as st
     st.markdown("**Custom Python script**")
-    up = st.file_uploader("Load custom .py script", type=["py"], key="_py_uploader",
+    # The loaded script is kept for the whole session (every tab runs the same
+    # one against its own job).  The key moves on with a full reset, so that
+    # the box does not come back listing a file that is no longer loaded.
+    n = int(st.session_state.get("_welcome_nonce", 0) or 0)
+    up = st.file_uploader("Load custom .py script", type=["py"], key=f"_py_uploader_{n}",
                           help="A Python file that receives the current job as `eq` "
                                "and produces a figure, a table or text.  Download "
                                "the example to see what is available.")
@@ -305,9 +309,9 @@ def render_output(build_context) -> None:
                 except Exception as e:
                     col.caption(f"{fmt.upper()} export failed: {e}")
         elif kind == "plotly":
-            st.plotly_chart(obj, use_container_width=True, key=f"_py_plotly_{i}")
+            st.plotly_chart(obj, width="stretch", key=f"_py_plotly_{i}")
         elif kind == "table":
-            st.dataframe(obj, use_container_width=True)
+            st.dataframe(obj, width="stretch")
         else:
             st.write(obj)
         if caption:

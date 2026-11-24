@@ -8,8 +8,14 @@ integrated signals per spectrum (A, B, C, D), all in slow exchange.  The
 concentrations come from Equilibrist's own ODE integrator (compute_kinetics_curve,
 Radau, rtol 1e-8), interpolated onto the spectrum times.
 
+Also written: tutorial_22A_input_replicate.xlsx, a second run of 22A (same
+conditions, independent noise) for a global fit of two repeats of one experiment:
+load tutorial_22A.txt with tutorial_22A_input.xlsx, press "Duplicate tab", load
+the replicate in the copy, tick the same constants in both tabs, Global fit.
+
 Usage:  python3 gen_tutorial22.py [out_dir] [noise_scale] [seed]
         defaults: TUTORIALS/  1.0  1
+        (run from the Equilibrist folder, or with it on PYTHONPATH)
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -73,9 +79,8 @@ def concentrations(tag):
     t = np.asarray(curve[tkey], float)
     return {sp: np.interp(T_EXP, t, np.asarray(curve[sp], float)) for sp in COLS}
 
-os.makedirs(OUT, exist_ok=True)
-for tag in ("22A", "22B", "22C"):
-    conc = concentrations(tag)
+def noisy_rows(conc, rng):
+    """One row per spectrum: time, then the four integrals with gain and noise."""
     rows = []
     for i, t in enumerate(T_EXP):
         gain = rng.uniform(0.8, 1.2)                       # per-spectrum receiver gain, cancels in ratios
@@ -85,9 +90,20 @@ for tag in ("22A", "22B", "22C"):
             I = I * (1.0 + NOISE * 0.02 * rng.standard_normal()) + NOISE * 0.01 * gain * rng.standard_normal()
             row.append(float(max(I, 0.0)))
         rows.append(row)
+    return rows
+
+os.makedirs(OUT, exist_ok=True)
+for tag in ("22A", "22B", "22C"):
+    conc = concentrations(tag)
+    rows = noisy_rows(conc, rng)
     with open(os.path.join(OUT, f"tutorial_{tag}.txt"), "w") as fh:
         fh.write(script(tag, START))
     write_xlsx(os.path.join(OUT, f"tutorial_{tag}_input.xlsx"), "data", ["t (s)"] + COLS, rows)
     c_end = {sp: conc[sp][-1] for sp in COLS}
     print(f"{tag}: B0 {B0[tag]:.2f} mM, {len(rows)} spectra, at {T_MAX:.0f} s: " + ", ".join(f"{sp} {v:.3f}" for sp, v in c_end.items()) + " mM")
+# a replicate of 22A: same conditions, new noise (its own random stream, so the
+# three files above do not depend on it)
+rows = noisy_rows(concentrations("22A"), np.random.default_rng(SEED + 100))
+write_xlsx(os.path.join(OUT, "tutorial_22A_input_replicate.xlsx"), "data", ["t (s)"] + COLS, rows)
+print(f"22A replicate: {len(rows)} spectra, noise seed {SEED + 100}")
 print("truth:", TRUE, " scripts start at:", START)

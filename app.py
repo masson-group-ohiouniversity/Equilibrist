@@ -55,11 +55,13 @@ from equilibrist_diagnostics import (augment_stats, render_diagnostics_panel,
                                      make_profile_trace_figure,
                                      render_identifiability_panel,
                                      render_rank_analysis_panel,
+                                     rank_analysis_inputs,
                                      compute_local_sensitivity)
 import equilibrist_bootstrap as ebs
 import equilibrist_hpc_ui as hpc_ui   # supercomputer (SLURM) submission panel
 import equilibrist_pyscript as pyscript   # user's custom .py script (sidebar buttons)
 import equilibrist_tabs as eqtabs           # several workspaces ("tabs") in one session
+from equilibrist_session import TABS_FORMAT_VERSION as _TABS_FORMAT   # the "all tabs" session file
 import equilibrist_global as eqglobal       # one fit across several tabs
 import equilibrist_live as eqlive           # live view of a running fit
 
@@ -161,6 +163,34 @@ def _fit_end_message_core(stats, success, message, n_fitted, tol_log, timeout_s)
                 f"✅ Converged after {n_ev} evaluations in {el:.0f} s (Tol = {tol:.0e}).  "
                 f"Updated {n_fitted} parameters.")
     return ("warning", f"Stopped at the iteration cap after {n_ev} evaluations; {moving}.")
+
+
+_FIT_MSG_FOLD = 120          # a fit message longer than this is folded under its first clause
+
+
+def _show_fit_message(msg):
+    """Show the (level, text) message left by the last fit.  A short one is
+    shown whole, as the green / yellow box.  A long one (a global fit lists
+    every constant, weight and share) is folded: its first clause becomes the
+    label of an expander that holds the whole box, so that it no longer pushes
+    the fit controls down the page.  A warning sign further down the text is
+    repeated on the label."""
+    if not msg:
+        return
+    level, text = msg
+    text = str(text)
+    box = st.success if level == "success" else st.warning
+    if len(text) <= _FIT_MSG_FOLD:
+        box(text)
+        return
+    first = re.split(r":\s|;\s|\.\s|\s\(|\n", text.strip(), maxsplit=1)[0].strip()
+    head = first if len(first) <= 80 else first[:80].rsplit(" ", 1)[0] + "…"
+    if not head or head[0].isalnum():                     # no status sign of its own
+        head = ("✅ " if level == "success" else "⚠️ ") + head
+    if "⚠️" in text.strip()[len(first):] and "⚠️" not in head:
+        head += "  ⚠️"
+    with st.expander(head, expanded=False):
+        box(text)
 
 
 @_contextlib.contextmanager
@@ -390,7 +420,7 @@ def _fit_ticks_crossed_zero(fit_key: str) -> None:
     (first box ticked) or unfittable (last box unticked).  Other clicks keep the
     scroll position, which is what the fragment is for."""
     ss = st.session_state
-    n = sum(1 for k, v in ss.items() if isinstance(k, str) and v is True
+    n = sum(1 for k, v in eqtabs.live_items(ss) if isinstance(k, str) and v is True
             and k.startswith(("fit_logK_", "fit_conc_", "fit_titrant_mM_")))
     if (ss.get(fit_key) and n == 1) or (not ss.get(fit_key) and n == 0):
         ss["_fit_ticks_rerun"] = True
@@ -844,6 +874,127 @@ def _global_fit_dispatch(_fit_slot):
             st.caption(_gtb.format_exc())
 
 
+def _global_restore_dispatch():
+    """An all-tabs file has been reopened and its tabs carried a global fit:
+    evaluate that fit AT its saved constants, with its saved weights and the
+    constants it floated in each tab -- no search -- and hand every tab its
+    stats, errors and global fit record exactly as after the fit itself.  The
+    constants are the saved ones to the last digit.  What the file carries is
+    kept as saved (constants, their errors and covariance, RMSE, information
+    shares); only what it does not carry is computed (curves, pure-species
+    shifts and spectra, residuals, the fit record of the diagnostics).  The
+    errors in particular are NOT recomputed: they come from second differences
+    of the objective, and the equilibrium solver of a freshly opened tab has
+    not yet settled to the last digits the way it has at the end of a fit.
+    When the saved fit cannot be matched to the tabs, the global fit is simply
+    run again."""
+    _info = st.session_state.pop("_global_restore", None) or {}
+    _saved_tabs = {int(_k): _v for _k, _v in (_info.get("tabs") or {}).items()}
+    _names = eqtabs.labels(st.session_state)
+    _gexps, _saved_stats = [], {}
+    for _i in sorted(_saved_tabs):
+        if not (0 <= _i < len(_names)):
+            continue
+        if _i == st.session_state["_tab_idx"]:
+            _fa = st.session_state.get("_fit_args_live")
+            _sv = st.session_state.get("_fit_stats")
+        else:
+            _state = st.session_state["_tabs"][_i].get("state") or {}
+            _fa = _state.get("_fit_args_live")
+            _sv = _state.get("_fit_stats")
+            if isinstance(_fa, dict):
+                _fa = eqtabs.refresh_fit_args(_fa, _state)
+        _saved_stats[_names[_i]] = dict(_sv) if isinstance(_sv, dict) else {}
+        if not isinstance(_fa, dict) or not _fa.get("has_data"):
+            continue
+        _fa = dict(_fa)
+        for _k in ("fit_keys", "fit_conc_keys", "fit_titrant_keys"):     # what the saved fit floated here
+            _fa[_k] = list(_saved_tabs[_i].get(_k) or [])
+        _vals = {_k: float(_v) for _k, _v in (_info.get("values") or {}).items()}
+        _start = dict(_fa.get("start_logK") or {})
+        _start.update({_k: _v for _k, _v in _vals.items() if _k in _start})
+        _fa["start_logK"], _fa["start_logk"] = _start, dict(_start)
+        _gexps.append((_i, _names[_i], _fa))
+    _w = {str(_k): float(_v) for _k, _v in (_info.get("tab_weights") or {}).items()}
+    if not (len(_gexps) >= 2 and len(_gexps) == len(_saved_tabs) and _w
+            and all(_lab in _w for _i, _lab, _fa in _gexps)):
+        # the saved fit cannot be matched to the tabs: run the global fit again
+        for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+            if _pref in st.session_state:
+                st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+        st.session_state["_global_fit_requested"] = True
+        return
+    try:
+        _g_tol_log = float(st.session_state.get("fit_tolerance_log", 3.0))
+        _g_timeout = float(st.session_state.get("fit_timeout", 30))
+        _g_in = [{"label": _lab, "fa": _fa, "start_logK": dict(_fa.get("start_logK") or {}),
+                  "ticked": list(_fa.get("fit_keys") or [])} for _i, _lab, _fa in _gexps]
+        _g_active = [x for x in _g_in if x["label"] == _names[st.session_state["_tab_idx"]]]
+        if _g_active:
+            _g_in.remove(_g_active[0]); _g_in.insert(0, _g_active[0])
+        with st.spinner("Restoring the saved global fit (evaluated at its constants, no new search)…"):
+            _gres = eqglobal.global_fit(_g_in, tolerance=10.0 ** (-_g_tol_log), maxiter=100_000,
+                                        timeout_s=_g_timeout, weighted=False, fixed_weights=_w,
+                                        share_shifts=bool(_info.get("share_shifts", False)), at_start=True,
+                                        with_errors=False)
+        _gres["weighted"] = bool(_info.get("weighted", True))     # the fit's own setting, for its record
+        _gres["saved_timed_out"] = bool(_info.get("timed_out", False))
+        # the saved numbers win over their re-evaluation (see the docstring)
+        for _lab, _st_new in (_gres.get("stats") or {}).items():
+            if isinstance(_st_new, dict) and _saved_stats.get(_lab):
+                _st_new.update(_saved_stats[_lab])
+        _gf_saved = next((_sv.get("global_fit") for _sv in _saved_stats.values()
+                          if isinstance(_sv.get("global_fit"), dict)), None) or {}
+        for _k in ("info_share", "errors", "rmse", "rmse_by_label"):
+            if _gf_saved.get(_k) is not None:
+                _gres[_k] = _gf_saved[_k]
+        # Tol / Timeout / Refresh are drawn after this point: keep them through the rerun
+        for _pref in ("fit_tolerance_log", "fit_timeout", "fit_refresh"):
+            if _pref in st.session_state:
+                st.session_state[f"_shadow_{_pref}"] = st.session_state[_pref]
+        _apply_global_result(_gres, _g_in, _gexps, _g_tol_log, _g_timeout)
+    except Exception as _ge:
+        st.session_state["_fit_message"] = ("warning", f"The saved global fit could not be restored ({_ge}); "
+                                            "the tabs show the saved constants.  Press Global fit to repeat it.")
+    # This run ends here, in kinetics mode before the sidebar is drawn: Streamlit
+    # then drops the values of the boxes it has not drawn (fit ticks, constants,
+    # concentrations, ranges, options).  Hand them to the next run the way a fit
+    # does (_bg_prefs_restore: put back before any widget, never over a newer value).
+    from equilibrist_session import input_keys_present as _inputs_now
+    _keep = _inputs_now(st.session_state)
+    _keep.update({_k: st.session_state[_k] for _k in ("_global_weighted", "_global_share_shifts",
+                                                       "_global_share_shifts_touched") if _k in st.session_state})
+    st.session_state["_bg_prefs_restore"] = _keep
+    st.rerun()
+
+
+def _tab_restore_eval():
+    """A tab saved after a global fit and reopened on its own (or left as saved)
+    is not refitted.  Its plots still need this tab's curves at the saved
+    constants -- pure-species shifts, absorptivities -- which a session file does
+    not carry: evaluate them once, without any search.  The saved numbers
+    (constants, errors, RMSE, global-fit record) are kept as they are."""
+    st.session_state.pop("_restore_eval", None)
+    _fa = st.session_state.get("_fit_args_live")
+    _saved = st.session_state.get("_fit_stats")
+    if not isinstance(_fa, dict) or not _fa.get("has_data") or not isinstance(_saved, dict):
+        return
+    try:
+        _st = eqglobal.evaluate_tab(_fa)
+        if not _st:
+            return
+        _merged = dict(_st)
+        _merged.update(_saved)                    # the saved numbers win; the evaluation adds the curves
+        _x_expr = (_fa.get("x_expr") or (_fa.get("parsed_fit") or {}).get("plot_x_expr")
+                   or ("t" if _fa.get("kind") == "kin" else ""))
+        _res = collect_residuals_from_stats(_merged, x_expr=_x_expr)
+        augment_stats(_merged, _res)
+        st.session_state["_fit_stats"] = _merged
+        st.session_state["_fit_residuals"] = _res
+    except Exception:
+        pass
+
+
 def _apply_global_result(_gres, _g_in, _gexps, _g_tol_log, _g_timeout):
     """Hand every tab its share of a global fit result (computed here or fetched
     from the cluster): fitted values, stats, the global fit-args for the diagnostics."""
@@ -875,9 +1026,20 @@ def _apply_global_result(_gres, _g_in, _gexps, _g_tol_log, _g_timeout):
         _g_parts += f";  {_gres['summary']['n_restarts']} restart(s)"
     _g_lvl = "success" if _gres["success"] else "warning"
     _parsed_list = [_fa.get("parsed_fit") for _i, _lab, _fa in _gexps]
-    _g_txt = (f"{'✅' if _gres['success'] else '⏱️'} Global fit over {len(_g_in)} tabs "
-              f"{_gres['message']} after {_gres['summary'].get('n_evals')} evaluations "
-              f"in {_gres['elapsed_s']:.0f} s.  Shared constants: "
+    if _gres.get("restored"):
+        # a saved fit reopened from an all-tabs file: evaluated at its constants, not searched
+        _g_head = (f"{'⏱️' if _gres.get('saved_timed_out') else '✅'} Global fit over {len(_g_in)} tabs "
+                   "reopened from the saved file: the constants are the saved ones, evaluated again "
+                   "without a new search"
+                   + (" (the saved fit had stopped at its time limit; press Global fit to continue it)"
+                      if _gres.get("saved_timed_out") else "") + ".  Shared constants: ")
+        if _gres.get("saved_timed_out"):
+            _g_lvl = "warning"
+    else:
+        _g_head = (f"{'✅' if _gres['success'] else '⏱️'} Global fit over {len(_g_in)} tabs "
+                   f"{_gres['message']} after {_gres['summary'].get('n_evals')} evaluations "
+                   f"in {_gres['elapsed_s']:.0f} s.  Shared constants: ")
+    _g_txt = (_g_head
               + ", ".join(eqglobal.format_shared_constant(k, _gres['values'][k], _parsed_list) for k in _gres["shared"])
               + f".  Global RMSE {(_gres['rmse'] or float('nan')):.3g}  (per tab — {_g_parts}).")
     _names_now = eqtabs.labels(st.session_state)
@@ -1150,9 +1312,40 @@ st.set_page_config(page_title="Equilibrist", layout="wide")
 
 # ── Tabs: a pending new / close / switch request is honoured here, before any
 # widget exists (the only moment widget-owned keys may be rewritten freely).
+# An all-tabs file is being reopened: show the next tab once the one on screen
+# has been drawn (see eqtabs.tour_step); at the end, repeat the global fit.
+_tour_before = st.session_state.get("_restore_tour")
+_tour_end = eqtabs.tour_step(st.session_state)
 _tab_notice = eqtabs.swap_if_requested(st.session_state)
 if _tab_notice:
     st.session_state["_tab_notice"] = _tab_notice
+if _tour_end and isinstance(_tour_before, dict):
+    st.session_state["_just_restored"] = {"all_tabs": int(_tour_before.get("n", 0)),
+                                          "will_refit": _tour_end == "global",
+                                          "note": _tour_before.get("note", "")}
+    if _tour_end == "global":
+        # handled where fits are dispatched, once this tab's fit record is built
+        st.session_state["_global_restore"] = dict(_tour_before.get("info") or {})
+
+
+@st.fragment(run_every=0.7)
+def _tour_ticker():
+    """Keeps the walk through the reopened tabs going: nothing reruns a page that
+    has finished drawing, so this asks for the next run.  It does nothing on the
+    pass made while the page is being drawn (same run number), and nothing
+    while a fit runs in the background (the fit's own watcher reruns the page)."""
+    _tour = st.session_state.get("_restore_tour")
+    if not isinstance(_tour, dict):
+        return
+    if _tour.get("tick_seq") != _tour.get("seq"):
+        _tour["tick_seq"] = _tour.get("seq")
+        return
+    if not eqtabs._fit_thread_alive(st.session_state):
+        st.rerun(scope="app")
+
+
+if isinstance(st.session_state.get("_restore_tour"), dict):
+    _tour_ticker()
 
 # Custom CSS
 st.markdown("""
@@ -1593,23 +1786,639 @@ for _pk in [k for k in st.session_state if k.startswith("_persist_fit_conc_")]:
 if "_persist_xmax" in st.session_state:
     st.session_state["xmax"] = st.session_state.pop("_persist_xmax")
 
+_APP_VERSION_TAG = "equilibrist-v3.0.2-beta"
+
+
+def _tab_session_kwargs(ss, notes=""):
+    """The arguments of ``make_session_payload`` for one tab, and the name of
+    its data file.  ``ss`` is ``st.session_state`` (the tab on screen) or an
+    ``eqtabs.StateView`` of a tab that is not on screen.  ``(None, None)`` for
+    a tab without script."""
+    from equilibrist_session import (summarize_stats, capture_inputs,
+                                     _capture_widget_state, _serialize_tuple_caches)
+    _script_now = ss.get("_script_text", "")
+    if not _script_now:
+        return None, None
+    _data_bytes = ss.get("_exp_data_bytes")
+    _data_name  = ss.get("_exp_data_filename")
+    # ITC: the thermogram is the data file.  It used to be left out, so
+    # a reloaded ITC session had its constants but no thermogram.
+    _itc_on_save = (ss.get("_itc_raw") is not None and bool(ss.get("_itc_file_bytes")))
+    if _itc_on_save:
+        _data_bytes = ss["_itc_file_bytes"]
+        _data_name  = ss.get("_itc_filename") or "thermogram.itc"
+    _fit_stats  = ss.get("_fit_stats") or {}
+    _fa_eq      = ss.get("_fit_args_eq")
+    _fa_kin     = ss.get("_fit_args_kin")
+    # Pick whichever fit_args dict is populated — kinetics
+    # branch wins if both exist (because the equilibrium
+    # block runs only after kinetics returns).
+    _fa_save = _fa_kin or _fa_eq or {}
+    _fit_state_save = {
+        k: _fa_save.get(k) for k in (
+            "kind", "fit_keys", "fit_conc_keys",
+            "fit_titrant_keys", "tolerance", "maxiter",
+            "timeout_s", "wl_min", "wl_max",
+            "use_spectra_fit", "use_nmr_fit", "nmr_mode",
+            "allow_neg_eps", "constraints",
+        ) if k in _fa_save
+    }
+    _start = _fa_save.get("start_logK") or _fa_save.get("start_logk")
+    if _start:
+        _fit_state_save["start_logK"] = dict(_start)
+    if _fa_save.get("kind") == "global":
+        # the global fit this tab's constants come from: the tabs it covered, their
+        # frozen weights, and what it floated in THIS tab -- enough to re-evaluate
+        # it at its constants when the all-tabs file is reopened
+        _own_g = next((_e for _e in (_fa_save.get("experiments") or [])
+                       if _e.get("label") == _fa_save.get("own_label")), None) or {}
+        _own_fa_g = _own_g.get("fa") or {}
+        _fit_state_save["global"] = {
+            "labels": list(_fa_save.get("labels") or []),
+            "own_label": _fa_save.get("own_label"),
+            "tab_weights": {str(_k): float(_v) for _k, _v in (_fa_save.get("tab_weights") or {}).items()},
+            "weighted": bool(_fa_save.get("weighted", True)),
+            "share_shifts": bool(_fa_save.get("share_shifts", False)),
+            "values": {str(_k): float(_v) for _k, _v in (_fa_save.get("global_values") or {}).items()},
+            "fit_keys": list(_own_fa_g.get("fit_keys") or []),
+            "fit_conc_keys": list(_own_fa_g.get("fit_conc_keys") or []),
+            "fit_titrant_keys": list(_own_fa_g.get("fit_titrant_keys") or []),
+            "timed_out": bool(_fit_stats.get("timed_out", False)),
+        }
+    # ── xmax snapshot (2026-05-22 audit) ────────────────────
+    # The widget value of ``xmax`` can have drifted from the
+    # script's ``$plot xmax = …`` after a data upload, because
+    # the live data-load path overrides xmax with the
+    # data-derived value via ``convert_exp_x`` (tutorial 13:
+    # script says ``xmax = 3``, data covers H0/G0 only to
+    # ~0.8 → widget snaps to 0.8).  The script text is NOT
+    # rewritten when this happens, so without snapshotting
+    # the widget value here the JSON loses the user's actual
+    # on-screen xmax.  See the restore block for the read
+    # side, which prefers this value over ``plot_xmax``.
+    #
+    # Priority: ``_pending_xmax`` (queued by a recent data
+    # upload or restore but NOT yet consumed by the xmax
+    # widget's ``_num_input`` call — the save block runs
+    # BEFORE the kinetics sidebar that owns the widget, so
+    # the pending value is the most up-to-date intent) →
+    # ``session_state["xmax"]`` (the current widget value,
+    # already a post-consume snapshot).  Without consulting
+    # the pending key first, a save immediately after a
+    # data upload captures the stale pre-upload widget
+    # value (tutorial 11 pre-fit save: script xmax=3, data
+    # range 0-20 → JSON would capture 3 instead of 20).
+    _xmax_widget = ss.get("_pending_xmax", ss.get("xmax"))
+    if _xmax_widget is not None:
+        try:
+            _fit_state_save["xmax"] = float(_xmax_widget)
+        except (TypeError, ValueError):
+            pass
+    if _itc_on_save:
+        # what the user did to the thermogram: excluded injections, edited
+        # baselines, and the heat offset with its fit tick
+        try:
+            _fit_state_save["itc"] = {
+                "excluded": sorted(int(_i) for _i in (ss.get("_outliers_itc") or set())),
+                "pre_baselines": [float(_v) for _v in np.asarray(
+                    ss.get("_itc_baselines", []), dtype=float)],
+                "post_baselines": [float(_v) for _v in np.asarray(
+                    ss.get("_itc_post_baselines", []), dtype=float)],
+                "q_offset": float(ss.get("_pending_itc_q_offset", ss.get("itc_q_offset", 0.0)) or 0.0),
+                "fit_q_offset": bool(ss.get("fit_itc_q_offset", False)),
+            }
+        except Exception:
+            pass
+    # the sidebar as it stands: the value in every box, the fit ticks, the
+    # ranges and options, the points excluded by clicking
+    _fit_state_save["inputs"] = capture_inputs(ss)
+    _kw = dict(
+        script=_script_now,
+        script_filename=ss.get("_script_filename", ""),
+        data_bytes=_data_bytes,
+        data_filename=_data_name,
+        fit_state=_fit_state_save,
+        fit_result_summary=summarize_stats(_fit_stats),
+        bootstrap_result=(ss.get("_bs_result_kin") or ss.get("_bs_result_eq")),
+        jackknife_result=(ss.get("_jk_result_kin") or ss.get("_jk_result_eq")),
+        monte_carlo_result=(ss.get("_mc_result_kin") or ss.get("_mc_result_eq")),
+        lst_result=(ss.get("_lst_result_kin") or ss.get("_lst_result_eq")),
+        widget_state=_capture_widget_state(ss),
+        profile_caches=_serialize_tuple_caches(ss),
+        seed=42,
+        notes=notes,
+        app_version=_APP_VERSION_TAG,
+    )
+    return _kw, _data_name
+
+
+def _inject_html(html):
+    """Run a small HTML + script snippet in a hidden frame of the page.
+
+    ``st.iframe`` where Streamlit has it: it replaces
+    ``st.components.v1.html``, which recent versions announce as removed.
+    Older versions get the older call.  Both put the snippet in a frame that
+    allows scripts, access to the page and downloads."""
+    html = html.strip()                              # must start with "<" to be read as HTML
+    if hasattr(st, "iframe"):
+        try:
+            st.iframe(html, height=1)                # a height of 0 is refused
+            return
+        except Exception:
+            pass                                     # an early st.iframe: fall back
+    from streamlit.components.v1 import html as _components_html
+    _components_html(html, height=0)
+
+
+def _download_json(text, fname):
+    """Hand a JSON string to the browser as a file download.
+
+    The data is encoded inline as a base64 data URL in a hidden anchor that
+    an injected script clicks, so no server round-trip is needed.  Streamlit
+    sandboxes the injected HTML inside an iframe but ``<a download>`` works
+    there because the sandbox includes ``allow-downloads``."""
+    import base64 as _base64
+    _b64 = _base64.b64encode(text.encode("utf-8")).decode("ascii")
+    _inject_html(
+        f"""
+        <a id="_eq_autodl"
+           href="data:application/json;base64,{_b64}"
+           download="{fname}"
+           style="display:none">.</a>
+        <script>
+          document.getElementById("_eq_autodl").click();
+        </script>
+        """)
+
+
+def _restore_session_into(ss, _obj, refit_global=False):
+    """Fill ``ss`` -- ``st.session_state`` right after it was cleared, or the
+    state of a tab that is not on screen (``eqtabs.StateView``) -- from one
+    saved session (a single-tab file, or one entry of an all-tabs file).
+    Must run before any widget of that tab exists.
+
+    ``refit_global``: the caller (the all-tabs loader) will repeat the global
+    fit once every tab is back.  Returns what the banner needs."""
+    _data_in = _obj.get("data") or {}
+    ss["_script_text"]        = _obj.get("script", "")
+    ss["_script_filename"]    = (
+        _obj.get("script_filename") or "restored.txt"
+    )
+    # Re-parse the embedded data into the mode-appropriate
+    # session dict (_nmr_data / _exp_data / _spectra_data)
+    # — the rest of the app looks at THOSE keys, not the
+    # raw bytes — by re-parsing the script to detect mode.
+    # ALSO: set ``_input_filename`` (the key that drives the
+    # "📄 file loaded" badge in the data-uploader area) and
+    # ``_pending_xmax`` (the auto-fit x-axis end), because
+    # the live uploader sets both of those alongside the
+    # data dict.  Without _input_filename the badge stays
+    # empty and the user can't tell that the data is
+    # actually loaded — they assume it isn't and re-upload.
+    _data_is_itc = bool(_data_in and "bytes" in _data_in and str(
+        _data_in.get("filename", "") or "").lower().endswith(".itc"))
+    if _data_in and "bytes" in _data_in:
+        if not _data_is_itc:
+            ss["_exp_data_bytes"]    = _data_in["bytes"]
+            ss["_exp_data_filename"] = _data_in.get(
+                "filename", "restored_data.xlsx")
+            ss["_input_filename"]    = _data_in.get(
+                "filename", "restored_data.xlsx")
+        try:
+            _r_parsed = parse_script(_obj.get("script", ""))
+            _raw = _data_in["bytes"]
+            if _data_is_itc:
+                # ITC session: integrate the thermogram as an upload does, then
+                # put back what the user had changed before saving
+                _raw_itc_r = parse_itc_file(_raw)
+                _q_r, _pre_r, _post_r, _eq_r = auto_integrate(_raw_itc_r)
+                _pre_full_r  = np.concatenate([[_pre_r[0]  if len(_pre_r)  > 0 else 0.0], _pre_r])
+                _post_full_r = np.concatenate([[_post_r[0] if len(_post_r) > 0 else 0.0], _post_r])
+                _itc_in = (_obj.get("fit_state") or {}).get("itc") or {}
+                _pre_s  = np.asarray(_itc_in.get("pre_baselines")  or [], dtype=float)
+                _post_s = np.asarray(_itc_in.get("post_baselines") or [], dtype=float)
+                if (len(_pre_s) == len(_pre_full_r) and len(_post_s) == len(_post_full_r)
+                        and not (np.allclose(_pre_s, _pre_full_r) and np.allclose(_post_s, _post_full_r))):
+                    # baselines edited before saving: integrate with those
+                    _q_r = integrate_with_baselines(_raw_itc_r, _pre_s, _post_s)
+                    _pre_full_r, _post_full_r = _pre_s, _post_s
+                ss["_itc_raw"]            = _raw_itc_r
+                ss["_itc_q_exp"]          = _q_r
+                ss["_itc_baselines"]      = _pre_full_r
+                ss["_itc_post_baselines"] = _post_full_r
+                ss["_itc_eq_times"]       = _eq_r
+                ss["_itc_file_bytes"]     = _raw
+                ss["_itc_filename"]       = str(_data_in.get("filename") or "thermogram.itc")
+                _excl_r = set(int(_i) for _i in (_itc_in.get("excluded") or []))
+                if _excl_r:
+                    ss["_outliers_itc"] = _excl_r
+                else:
+                    ss.pop("_outliers_itc", None)
+                if "q_offset" in _itc_in:
+                    ss["_pending_itc_q_offset"] = float(_itc_in["q_offset"])
+                if "fit_q_offset" in _itc_in:
+                    ss["fit_itc_q_offset"] = bool(_itc_in["fit_q_offset"])
+                # concentrations from the file header, as on upload (and the
+                # cell volume too when the script leaves it blank)
+                _cn_r = list((_r_parsed.get("concentrations") or {}).keys())
+                _tk_r = list((_r_parsed.get("titrant") or {}).keys())
+                _cell_r, _syr_r = _raw_itc_r.get("cell_conc_mM"), _raw_itc_r.get("syringe_conc_mM")
+                if _cn_r and _cell_r:
+                    _root_r = _cn_r[0][:-1] if _cn_r[0].endswith("0") else _cn_r[0]
+                    ss[f"_pending_conc_{_root_r}"] = float(_cell_r)
+                    if _r_parsed["concentrations"][_cn_r[0]] is None:
+                        ss[f"conc_{_root_r}"] = float(_cell_r)
+                if _tk_r and _syr_r:
+                    ss[f"_pending_titrant_mM_{_tk_r[0]}"] = float(_syr_r)
+                    if _r_parsed["titrant"][_tk_r[0]] is None:
+                        ss[f"titrant_mM_{_tk_r[0]}"] = float(_syr_r)
+                if (_raw_itc_r.get("cell_vol_mL") and any(
+                        _v is None for _v in (_r_parsed.get("volumes") or {}).values())):
+                    ss["V0_mL"] = float(_raw_itc_r["cell_vol_mL"])
+            elif _r_parsed.get("spectra") is not None:
+                _loaded_r = load_spectra_data(_raw)
+                ss["_spectra_data"] = _loaded_r
+                # Default wavelength range to the spectrum extent
+                if _loaded_r and len(_loaded_r.get("wavelengths", [])) > 0:
+                    ss["_pending_spectra_wl_min"] = \
+                        float(_loaded_r["wavelengths"][0])
+                    ss["_pending_spectra_wl_max"] = \
+                        float(_loaded_r["wavelengths"][-1])
+            elif _r_parsed.get("nmr") is not None:
+                _loaded_r = load_experimental_data(_raw)
+                ss["_nmr_data"] = _loaded_r
+            else:
+                _loaded_r = load_experimental_data(_raw)
+                ss["_exp_data"] = _loaded_r
+            # ── xmax restore (2026-05-22 audit) ────────────
+            # Two-tier priority:
+            #
+            #   1. The widget value snapshotted into
+            #      ``fit_state["xmax"]`` at save time (this is
+            #      the on-screen value the user actually saw —
+            #      may be data-derived and differ from the
+            #      script's ``$plot xmax = …``).
+            #
+            #   2. Fallback to the script's ``plot_xmax``,
+            #      which handles older JSONs saved before the
+            #      widget-snapshot was added, and is the most
+            #      reasonable default given the JSON has no
+            #      other record of xmax.
+            #
+            # NB.  The previous behaviour wrote the raw
+            # ``v_add_mL`` value (or x_vals[-1] for spectra)
+            # directly into ``_pending_xmax``, producing a
+            # mL-vs-script-units mismatch — tutorial 5: 0.15
+            # mL appeared as xmax = 0.2 instead of H0/G0 = 3.0,
+            # off by ~15× (caught by the unit conversion in
+            # the live data-upload path at line ~4972-4984,
+            # which routes through ``convert_exp_x``; that
+            # helper isn't usable here because ``params`` /
+            # ``network`` / ``x_expr_default`` aren't built
+            # until later in the rerun).
+            _xmax_saved = (_obj.get("fit_state") or {}).get("xmax")
+            _pending_xmax_set = False
+            if _xmax_saved is not None:
+                try:
+                    ss["_pending_xmax"] = float(_xmax_saved)
+                    _pending_xmax_set = True
+                except (TypeError, ValueError):
+                    pass
+            if not _pending_xmax_set:
+                _px = _r_parsed.get("plot_xmax")
+                if _px is not None:
+                    ss["_pending_xmax"] = float(_px)
+        except Exception as _pe:
+            ss["_restore_data_warning"] = str(_pe)
+    # Push fitted values into the _pending_* keys so the
+    # sidebar widgets show them as starting values on the
+    # next rerun — same channel the fit engine uses after
+    # a successful fit.
+    _summary = _obj.get("fit_result_summary") or {}
+    if _summary:
+        for _name, _val in (_summary.get("param_values") or {}).items():
+            try:
+                ss[f"_pending_logK_{_name}"] = float(_val)
+            except Exception:
+                pass
+        for _root, _mM in (_summary.get("fitted_concs") or {}).items():
+            try:
+                ss[f"_pending_conc_{_root}"] = float(_mM)
+            except Exception:
+                pass
+        # fitted_titrants: parallel to fitted_concs.  Missing
+        # pre-audit (2026-05-22) — without this, titrant
+        # stock concentrations saved as "free parameters"
+        # came back at their script default values, then the
+        # auto-refit re-fit them from scratch instead of
+        # warm-starting at the previously-converged value.
+        for _tkey, _mM in (_summary.get("fitted_titrants") or {}).items():
+            try:
+                ss[f"_pending_titrant_mM_{_tkey}"] = float(_mM)
+            except Exception:
+                pass
+        ss["_restored_fit_summary"] = _summary
+
+    # ── Restore _fit_stats so the diagnostic panels
+    # (correlation heatmap, identifiability panel,
+    # residual-diagnostic figure, AIC/BIC/F-test) render
+    # immediately, without waiting for the auto-refit
+    # below to complete (or in the case where there's
+    # nothing to refit because the JSON was saved with
+    # all parameters frozen).  Re-inflate list-shaped
+    # fields back to numpy arrays so downstream consumers
+    # don't need to know whether they came from a fresh
+    # fit or a JSON restore.
+    if _summary:
+        _fs = dict(_summary)
+        _pc = _fs.get("param_cov")
+        if _pc is not None:
+            try:
+                _fs["param_cov"] = np.asarray(_pc, dtype=float)
+            except Exception:
+                _fs["param_cov"] = None
+        for _arr_key in ("residuals", "y_calc", "y_obs"):
+            if _fs.get(_arr_key) is not None:
+                try:
+                    _fs[_arr_key] = np.asarray(_fs[_arr_key],
+                                                dtype=float)
+                except Exception:
+                    pass
+        ss["_fit_stats"] = _fs
+
+    # ── Restore the bootstrap / jackknife / Monte Carlo
+    # session-state keys so those UQ panels also render
+    # without requiring the user to click "Run bootstrap"
+    # (etc.) again after a JSON reload.  The keys are
+    # mode-suffixed (`_eq` for equilibrium fits, `_kin`
+    # for kinetics fits) — pick the right one based on
+    # the `is_kinetics` flag captured in fit_result_summary.
+    _uq_in = _obj.get("uq") or {}
+    _ws_in = _obj.get("widget_state")
+    _pc_in = _obj.get("profile_caches")
+    # Set the one-shot preserve flag iff at least one
+    # diagnostic-state field is going to be restored.
+    # Without this, the upcoming auto-refit's
+    # ``_reset_diagnostic_toggles()`` will wipe the
+    # restored UQ / LST / profile-cache / widget-toggle
+    # entries before any panel can render them.
+    if _uq_in or isinstance(_ws_in, dict) or (
+            isinstance(_pc_in, list) and _pc_in):
+        ss["_preserve_uq_on_next_reset"] = True
+    if _uq_in:
+        # Determine equilibrium vs kinetics so we can write
+        # the UQ data to the session_state suffix the UI
+        # actually reads.  Prefer the explicit `is_kinetics`
+        # flag introduced in v2 of the session schema; for
+        # legacy JSONs that lack it, fall back to inferring
+        # from `fit_mode` (the two non-NMR kinetics modes
+        # use uniquely kinetic mode strings).
+        _fit_mode_str = str(_summary.get("fit_mode", ""))
+        _is_kin = (
+            bool(_summary.get("is_kinetics", False))
+            or _fit_mode_str in ("kinetics", "kinetics_spectra")
+        )
+        _suf = "_kin" if _is_kin else "_eq"
+        if isinstance(_uq_in.get("bootstrap"), dict):
+            ss[f"_bs_result{_suf}"] = _uq_in["bootstrap"]
+        if isinstance(_uq_in.get("jackknife"), dict):
+            ss[f"_jk_result{_suf}"] = _uq_in["jackknife"]
+        if isinstance(_uq_in.get("monte_carlo"), dict):
+            ss[f"_mc_result{_suf}"] = _uq_in["monte_carlo"]
+        # Masson ξ (LST) result — same kin/eq suffix
+        # convention.  Stored under ``_lst_result_*`` so
+        # the LST UI panel re-renders the saved table
+        # and per-paired-difference transparency view
+        # without recomputation.
+        if isinstance(_uq_in.get("lst"), dict):
+            ss[f"_lst_result{_suf}"] = _uq_in["lst"]
+    # Restore the diagnostic-widget input values so the
+    # boxes display what was actually used during the
+    # saved diagnostics rather than their defaults.  Done
+    # before the widgets render in the current rerun;
+    # ``st.rerun()`` below propagates these into the
+    # widget cache on the next pass.
+    if isinstance(_ws_in, dict):
+        for _wk, _wv in _ws_in.items():
+            if isinstance(_wk, str):
+                ss[_wk] = _wv
+    # Restore tuple-keyed profile caches (1-D & 2-D
+    # RMSE).  Encoded keys are reconstructed into tuples
+    # via ``_from_json_key``.  Older JSONs saved before
+    # the cache-key was simplified carry an extra
+    # trailing element — a sorted tuple of
+    # ``(param_name, fitted_value)`` pairs — that the
+    # current UI no longer includes when looking up.  We
+    # strip that trailing element off old-format keys so
+    # legacy JSONs still light up the panels on reload
+    # without forcing the user to re-save.
+    if isinstance(_pc_in, list) and _pc_in:
+        try:
+            from equilibrist_session import _from_json_key
+            # Expected key shapes (post-strip):
+            #   ("_prof_cache_*", span, npts)              len 3
+            #   ("_p2d_cache_*", p1, p2, sx, sy, np)       len 6
+            _expected_lens = {"_prof_cache_": 3,
+                              "_p2d_cache_":  6,
+                              "_lst_cache_":  None}
+            _registry = ss.setdefault(
+                "_tuple_cache_registry", [])
+            for _entry in _pc_in:
+                if not (isinstance(_entry, list)
+                        and len(_entry) == 2):
+                    continue
+                _k_decoded = _from_json_key(_entry[0])
+                if not (isinstance(_k_decoded, tuple)
+                        and _k_decoded
+                        and isinstance(_k_decoded[0], str)):
+                    continue
+                _prefix_match = next(
+                    (p for p in _expected_lens
+                     if _k_decoded[0].startswith(p)), None)
+                if (_prefix_match
+                        and _expected_lens[_prefix_match]
+                        is not None
+                        and len(_k_decoded)
+                        > _expected_lens[_prefix_match]
+                        and isinstance(_k_decoded[-1], tuple)):
+                    # Old-format key — trim the trailing
+                    # param_values tuple.
+                    _k_decoded = _k_decoded[:_expected_lens[
+                        _prefix_match]]
+                ss[_k_decoded] = _entry[1]
+                # Seed the registry so a subsequent save
+                # (without an intervening recompute) can
+                # still find and persist this cache entry.
+                if _k_decoded not in _registry:
+                    _registry.append(_k_decoded)
+        except Exception:
+            pass
+
+    # ── Restore which parameters were being fitted ────────
+    # The "fit" checkbox next to each K / concentration /
+    # titrant input is what tells the fitter "this is a
+    # free parameter".  Their session_state keys are
+    # ``fit_logK_<kname>``, ``fit_conc_<root>``, and
+    # ``fit_titrant_mM_<tkey>``.  Without flipping these
+    # on, the restored UI shows all the fitted values but
+    # the fit engine has no parameters to fit — the auto-
+    # rerun completes instantly (with nothing to do) and
+    # the "Re-running the fit" banner appears stuck.
+    _fit_state_in = _obj.get("fit_state") or {}
+    # The sidebar as it was when saving (values, ticks, ranges, options,
+    # excluded points) -- files written since "Save all tabs" was added.  It
+    # comes last so that it wins over the values of the last fit.  Older
+    # files only have the fit record: tick what that fit floated.
+    from equilibrist_session import apply_inputs as _apply_inputs
+    if not _apply_inputs(ss, _fit_state_in.get("inputs")):
+        for _kname in (_fit_state_in.get("fit_keys") or []):
+            ss[f"fit_logK_{_kname}"] = True
+        for _croot in (_fit_state_in.get("fit_conc_keys") or []):
+            ss[f"fit_conc_{_croot}"] = True
+        for _tkey in (_fit_state_in.get("fit_titrant_keys") or []):
+            ss[f"fit_titrant_mM_{_tkey}"] = True
+    # The app clears the excluded points when it meets a script it has not seen
+    # (_last_script_hash); this state comes with its own script, so the restored
+    # exclusions must survive the first draw.
+    ss["_last_script_hash"] = hash(ss.get("_script_text", ""))
+    _any_tick = any(bool(_v) for _k, _v in eqtabs.live_items(ss) if isinstance(_k, str)
+                    and _k.startswith(("fit_logK_", "fit_conc_", "fit_titrant_mM_")))
+    # A tab whose constants come from a GLOBAL fit is not refitted on its own:
+    # alone it would drift to its single-tab optimum.  The all-tabs loader
+    # repeats the global fit itself once every tab is back (refit_global).
+    _was_global = (_fit_state_in.get("kind") == "global")
+    _will_refit = bool(_summary) and _any_tick and not _was_global
+
+    # Auto-trigger the fit so the plot, the fitted-curve
+    # overlay, and the diagnostic panel reconstruct
+    # themselves automatically — but only if there was a
+    # fit to begin with (skip when the bundle was saved
+    # before any fit had run).
+    if _will_refit:
+        ss["_fit_requested"] = True
+    elif not (_was_global and refit_global):
+        # no fit follows: the one-shot "keep the restored diagnostics through
+        # the next fit" flag must not linger until a fit the user starts later
+        ss.pop("_preserve_uq_on_next_reset", None)
+    if _was_global and not refit_global:
+        # no fit, but the plots need the curves of this tab at the saved constants
+        # (pure-species shifts, spectra): evaluated once the tab has been drawn
+        ss["_restore_eval"] = True
+        _g_labels = list(((_summary or {}).get("global_fit") or {}).get("labels") or [])
+        ss["_fit_message"] = ("warning",
+            "These constants are those of the saved global fit"
+            + (f" over {len(_g_labels)} tabs ({', '.join(str(_l) for _l in _g_labels)})" if _g_labels else "")
+            + "; they were not refitted.  Fit Parameters fits this tab alone; "
+              "load the all-tabs file to get the global fit back.")
+
+    # One-shot success banner shown by the block below.
+    return {
+        "notes":      _obj.get("notes", ""),
+        "saved_at":   _obj.get("saved_at_utc", ""),
+        "data_file":  _data_in.get("filename", ""),
+        "will_refit": _will_refit,
+        "was_global": _was_global,
+    }
+
+
+def _open_all_tabs_file(_obj):
+    """Reopen every tab of an all-tabs file: the saved tabs replace the open
+    ones, the app walks through them once (eqtabs.tour_step), then restores the
+    global fit (_global_restore_dispatch) when that was the saved result of all
+    the tabs it covered."""
+    _tabs_in = [(_t if isinstance(_t, dict) else {}) for _t in (_obj.get("tabs") or [])]
+    _is_g = [((_t.get("fit_state") or {}).get("kind") == "global") for _t in _tabs_in]
+    _n_g = sum(_is_g)
+    _n_in_fit = [len(((_t.get("fit_result_summary") or {}).get("global_fit") or {}).get("labels") or [])
+                 for _t, _g in zip(_tabs_in, _is_g) if _g]
+    # every tab that took part in the global fit still carries its result
+    _run_global = _n_g >= 2 and all(_n in (0, _n_g) for _n in _n_in_fit)
+    _note = ""
+    if _n_g and not _run_global:
+        _note = ("The saved global fit was not restored: not all of its tabs still carried its "
+                 "result when the file was saved.  Tabs showing global constants were left as saved.")
+    # what the saved global fit was: its frozen weights and what it floated in each tab
+    _ginfo = {}
+    if _run_global:
+        _gs = {_i: ((_t.get("fit_state") or {}).get("global") or {})
+               for _i, (_t, _g) in enumerate(zip(_tabs_in, _is_g)) if _g}
+        _first = next((_g for _g in _gs.values() if _g.get("tab_weights")), None)
+        if _first and all(_g.get("labels") == _first.get("labels") for _g in _gs.values()):
+            _ginfo = {"tab_weights": dict(_first["tab_weights"]), "weighted": bool(_first.get("weighted", True)),
+                      "share_shifts": bool(_first.get("share_shifts", False)),
+                      "values": {_k: _v for _k, _v in (_first.get("values") or {}).items() if "@" not in _k},
+                      "timed_out": any(bool(_g.get("timed_out")) for _g in _gs.values()),
+                      "tabs": {int(_i): {_k: list(_g.get(_k) or []) for _k in
+                                         ("fit_keys", "fit_conc_keys", "fit_titrant_keys")}
+                               for _i, _g in _gs.items()}}
+    _prefs_in = {_k: _v for _k, _v in (_obj.get("prefs") or {}).items() if _k in eqtabs.PREFS}
+    # Tol / Timeout / Refresh also go into their shadow keys: the run that starts a
+    # fit ends before those boxes are drawn and Streamlit then drops their values
+    # (the Fit buttons shadow them for the same reason); _num_input reads the shadow.
+    _prefs_in.update({f"_shadow_{_k}": _prefs_in[_k]
+                      for _k in ("fit_tolerance_log", "fit_timeout", "fit_refresh") if _k in _prefs_in})
+    _states = []
+    for _t in _tabs_in:
+        _s = eqtabs.StateView()
+        if _t:
+            _restore_session_into(_s, _t, refit_global=_run_global)
+        _s.update(_prefs_in)
+        _states.append(_s)
+    try:
+        _active = int(_obj.get("active_tab", 0))
+    except (TypeError, ValueError):
+        _active = 0
+    _active = _active if 0 <= _active < len(_tabs_in) else 0
+
+    def _is_itc_tab(_t):
+        return str((_t.get("data") or {}).get("filename", "") or "").lower().endswith(".itc")
+    if _run_global and _is_itc_tab(_tabs_in[_active]):
+        # the Global fit is not started from an ITC tab (its button is not offered
+        # there): end the walk on the first other tab of the global fit instead
+        _active = next((_i for _i, (_t, _g) in enumerate(zip(_tabs_in, _is_g))
+                        if _g and not _is_itc_tab(_t)), _active)
+    eqtabs.open_tabs(st.session_state, _states, active=_active, run_global=_run_global, note=_note,
+                     info=_ginfo)
+
+
 # ── Script upload ─────────────────────────────
 with st.sidebar:
     st.subheader("Equilibrist Script")
-    st.caption("Equilibrist v3.0.1 beta")
+    st.caption("Equilibrist v3.0.2 beta")
 
-    # A "Clear & reload" button that wipes everything and resets the uploader
-    if st.button("↺ Reset / load new script"):
-        for k in list(st.session_state.keys()):
-            if k not in eqtabs.META:
-                del st.session_state[k]
-        st.rerun()
-    if st.button("➕ New tab", help="Open another workspace with its own script and data.  "
-                                    "Constants with the same name are shared by the Global fit."):
-        # snapshot now: after st.rerun() the widgets not rendered in this run lose their state
-        st.session_state["_tab_new_snapshot"] = eqtabs.snapshot(st.session_state)
-        st.session_state["_tab_new"] = True
-        st.rerun()
+    # Four buttons in a 2 x 2 array: reset on top, new tabs underneath.
+    # (no help bubbles on them: they got in the way when moving over them; the
+    # right-hand column is the wider one because its labels are the longer ones)
+    _tb_rst, _tb_all = st.columns([0.43, 0.57])
+    with _tb_rst:
+        # wipes this tab (script, data, constants, results) and resets its uploaders
+        if st.button("↺ Reset tab", width="stretch"):
+            for k in list(st.session_state.keys()):
+                if k not in eqtabs.META:
+                    eqtabs.forget(st.session_state, k)      # a listed chart key may already be gone
+            st.rerun()
+    with _tb_all:
+        # a full reset: the app as it is when launched
+        if st.button("↺ Reset all tabs", width="stretch"):
+            eqtabs.reset_all(st.session_state)
+            st.rerun()
+    _tb_new, _tb_dup = st.columns([0.43, 0.57])
+    with _tb_new:
+        if st.button("➕ New tab", width="stretch"):
+            # snapshot now: after st.rerun() the widgets not rendered in this run lose their state
+            st.session_state["_tab_new_snapshot"] = eqtabs.snapshot(st.session_state)
+            st.session_state["_tab_new"] = True
+            st.rerun()
+    with _tb_dup:
+        # a new tab that starts with the script of this one (as it stands, edits
+        # included), the way an upload of that script would: no data, no results
+        if st.button("➕ Duplicate tab", width="stretch", disabled=not st.session_state.get("_script_text")):
+            st.session_state["_tab_new_snapshot"] = eqtabs.snapshot(st.session_state)
+            st.session_state["_tab_new_state"] = {
+                "_script_text": st.session_state.get("_script_text", ""),
+                "_script_filename": st.session_state.get("_script_filename", "untitled.txt")}
+            st.session_state["_tab_new"] = True
+            st.rerun()
 
     # Nonce makes the uploader widget unique each session so re-uploading
     # the same filename is always treated as a new upload by the browser.
@@ -1621,9 +2430,10 @@ with st.sidebar:
         type=["txt", "json"],
         key=f"_uploader_{st.session_state['_uploader_nonce']}",
         help="Drop a .txt Equilibrist script to start a new analysis, "
-             "or a .json session bundle (from the Save button below) "
+             "or a .json session bundle (from the Save buttons below) "
              "to restore a previous one — including the data file and "
-             "last fit result."
+             "last fit result.  A one-tab file fills the current tab; an "
+             "all-tabs file closes the open tabs and reopens the saved ones."
     )
     if uploaded is not None:
         _is_session = uploaded.name.lower().endswith(".json")
@@ -1643,14 +2453,17 @@ with st.sidebar:
                 )
                 _obj = None
 
-            if _obj is not None:
+            if _obj is not None and _obj.get("format") == _TABS_FORMAT:
+                # every tab in one file: the saved tabs replace the open ones
+                _open_all_tabs_file(_obj)
+                st.rerun()
+            elif _obj is not None:
                 # Mirror the .txt branch's reset pattern: preserve fit
                 # preferences, bump BOTH uploader nonces (so the file
                 # uploader widgets get fresh keys and don't replay the
                 # JSON on the next rerun — without this, the JSON would
                 # re-trigger the restore on every rerun, an infinite
                 # loop), clear state, then re-populate from the bundle.
-                _data_in   = _obj.get("data") or {}
                 _fit_prefs = {k: st.session_state[k]
                               for k in ("fit_tolerance_log", "fit_timeout", "fit_refresh")
                               if k in st.session_state}
@@ -1662,341 +2475,7 @@ with st.sidebar:
                 st.session_state.update(_tab_meta)
                 st.session_state["_uploader_nonce"]     = _nonce + 1
                 st.session_state["_exp_uploader_nonce"] = _exp_nonce + 1
-                st.session_state["_script_text"]        = _obj.get("script", "")
-                st.session_state["_script_filename"]    = (
-                    _obj.get("script_filename") or "restored.txt"
-                )
-                # Re-parse the embedded data into the mode-appropriate
-                # session dict (_nmr_data / _exp_data / _spectra_data)
-                # — the rest of the app looks at THOSE keys, not the
-                # raw bytes — by re-parsing the script to detect mode.
-                # ALSO: set ``_input_filename`` (the key that drives the
-                # "📄 file loaded" badge in the data-uploader area) and
-                # ``_pending_xmax`` (the auto-fit x-axis end), because
-                # the live uploader sets both of those alongside the
-                # data dict.  Without _input_filename the badge stays
-                # empty and the user can't tell that the data is
-                # actually loaded — they assume it isn't and re-upload.
-                _data_is_itc = bool(_data_in and "bytes" in _data_in and str(
-                    _data_in.get("filename", "") or "").lower().endswith(".itc"))
-                if _data_in and "bytes" in _data_in:
-                    if not _data_is_itc:
-                        st.session_state["_exp_data_bytes"]    = _data_in["bytes"]
-                        st.session_state["_exp_data_filename"] = _data_in.get(
-                            "filename", "restored_data.xlsx")
-                        st.session_state["_input_filename"]    = _data_in.get(
-                            "filename", "restored_data.xlsx")
-                    try:
-                        _r_parsed = parse_script(_obj.get("script", ""))
-                        _raw = _data_in["bytes"]
-                        if _data_is_itc:
-                            # ITC session: integrate the thermogram as an upload does, then
-                            # put back what the user had changed before saving
-                            _raw_itc_r = parse_itc_file(_raw)
-                            _q_r, _pre_r, _post_r, _eq_r = auto_integrate(_raw_itc_r)
-                            _pre_full_r  = np.concatenate([[_pre_r[0]  if len(_pre_r)  > 0 else 0.0], _pre_r])
-                            _post_full_r = np.concatenate([[_post_r[0] if len(_post_r) > 0 else 0.0], _post_r])
-                            _itc_in = (_obj.get("fit_state") or {}).get("itc") or {}
-                            _pre_s  = np.asarray(_itc_in.get("pre_baselines")  or [], dtype=float)
-                            _post_s = np.asarray(_itc_in.get("post_baselines") or [], dtype=float)
-                            if (len(_pre_s) == len(_pre_full_r) and len(_post_s) == len(_post_full_r)
-                                    and not (np.allclose(_pre_s, _pre_full_r) and np.allclose(_post_s, _post_full_r))):
-                                # baselines edited before saving: integrate with those
-                                _q_r = integrate_with_baselines(_raw_itc_r, _pre_s, _post_s)
-                                _pre_full_r, _post_full_r = _pre_s, _post_s
-                            st.session_state["_itc_raw"]            = _raw_itc_r
-                            st.session_state["_itc_q_exp"]          = _q_r
-                            st.session_state["_itc_baselines"]      = _pre_full_r
-                            st.session_state["_itc_post_baselines"] = _post_full_r
-                            st.session_state["_itc_eq_times"]       = _eq_r
-                            st.session_state["_itc_file_bytes"]     = _raw
-                            st.session_state["_itc_filename"]       = str(_data_in.get("filename") or "thermogram.itc")
-                            _excl_r = set(int(_i) for _i in (_itc_in.get("excluded") or []))
-                            if _excl_r:
-                                st.session_state["_outliers_itc"] = _excl_r
-                            else:
-                                st.session_state.pop("_outliers_itc", None)
-                            if "q_offset" in _itc_in:
-                                st.session_state["_pending_itc_q_offset"] = float(_itc_in["q_offset"])
-                            if "fit_q_offset" in _itc_in:
-                                st.session_state["fit_itc_q_offset"] = bool(_itc_in["fit_q_offset"])
-                            # concentrations from the file header, as on upload (and the
-                            # cell volume too when the script leaves it blank)
-                            _cn_r = list((_r_parsed.get("concentrations") or {}).keys())
-                            _tk_r = list((_r_parsed.get("titrant") or {}).keys())
-                            _cell_r, _syr_r = _raw_itc_r.get("cell_conc_mM"), _raw_itc_r.get("syringe_conc_mM")
-                            if _cn_r and _cell_r:
-                                _root_r = _cn_r[0][:-1] if _cn_r[0].endswith("0") else _cn_r[0]
-                                st.session_state[f"_pending_conc_{_root_r}"] = float(_cell_r)
-                                if _r_parsed["concentrations"][_cn_r[0]] is None:
-                                    st.session_state[f"conc_{_root_r}"] = float(_cell_r)
-                            if _tk_r and _syr_r:
-                                st.session_state[f"_pending_titrant_mM_{_tk_r[0]}"] = float(_syr_r)
-                                if _r_parsed["titrant"][_tk_r[0]] is None:
-                                    st.session_state[f"titrant_mM_{_tk_r[0]}"] = float(_syr_r)
-                            if (_raw_itc_r.get("cell_vol_mL") and any(
-                                    _v is None for _v in (_r_parsed.get("volumes") or {}).values())):
-                                st.session_state["V0_mL"] = float(_raw_itc_r["cell_vol_mL"])
-                        elif _r_parsed.get("spectra") is not None:
-                            _loaded_r = load_spectra_data(_raw)
-                            st.session_state["_spectra_data"] = _loaded_r
-                            # Default wavelength range to the spectrum extent
-                            if _loaded_r and len(_loaded_r.get("wavelengths", [])) > 0:
-                                st.session_state["_pending_spectra_wl_min"] = \
-                                    float(_loaded_r["wavelengths"][0])
-                                st.session_state["_pending_spectra_wl_max"] = \
-                                    float(_loaded_r["wavelengths"][-1])
-                        elif _r_parsed.get("nmr") is not None:
-                            _loaded_r = load_experimental_data(_raw)
-                            st.session_state["_nmr_data"] = _loaded_r
-                        else:
-                            _loaded_r = load_experimental_data(_raw)
-                            st.session_state["_exp_data"] = _loaded_r
-                        # ── xmax restore (2026-05-22 audit) ────────────
-                        # Two-tier priority:
-                        #
-                        #   1. The widget value snapshotted into
-                        #      ``fit_state["xmax"]`` at save time (this is
-                        #      the on-screen value the user actually saw —
-                        #      may be data-derived and differ from the
-                        #      script's ``$plot xmax = …``).
-                        #
-                        #   2. Fallback to the script's ``plot_xmax``,
-                        #      which handles older JSONs saved before the
-                        #      widget-snapshot was added, and is the most
-                        #      reasonable default given the JSON has no
-                        #      other record of xmax.
-                        #
-                        # NB.  The previous behaviour wrote the raw
-                        # ``v_add_mL`` value (or x_vals[-1] for spectra)
-                        # directly into ``_pending_xmax``, producing a
-                        # mL-vs-script-units mismatch — tutorial 5: 0.15
-                        # mL appeared as xmax = 0.2 instead of H0/G0 = 3.0,
-                        # off by ~15× (caught by the unit conversion in
-                        # the live data-upload path at line ~4972-4984,
-                        # which routes through ``convert_exp_x``; that
-                        # helper isn't usable here because ``params`` /
-                        # ``network`` / ``x_expr_default`` aren't built
-                        # until later in the rerun).
-                        _xmax_saved = (_obj.get("fit_state") or {}).get("xmax")
-                        _pending_xmax_set = False
-                        if _xmax_saved is not None:
-                            try:
-                                st.session_state["_pending_xmax"] = float(_xmax_saved)
-                                _pending_xmax_set = True
-                            except (TypeError, ValueError):
-                                pass
-                        if not _pending_xmax_set:
-                            _px = _r_parsed.get("plot_xmax")
-                            if _px is not None:
-                                st.session_state["_pending_xmax"] = float(_px)
-                    except Exception as _pe:
-                        st.session_state["_restore_data_warning"] = str(_pe)
-                # Push fitted values into the _pending_* keys so the
-                # sidebar widgets show them as starting values on the
-                # next rerun — same channel the fit engine uses after
-                # a successful fit.
-                _summary = _obj.get("fit_result_summary") or {}
-                if _summary:
-                    for _name, _val in (_summary.get("param_values") or {}).items():
-                        try:
-                            st.session_state[f"_pending_logK_{_name}"] = float(_val)
-                        except Exception:
-                            pass
-                    for _root, _mM in (_summary.get("fitted_concs") or {}).items():
-                        try:
-                            st.session_state[f"_pending_conc_{_root}"] = float(_mM)
-                        except Exception:
-                            pass
-                    # fitted_titrants: parallel to fitted_concs.  Missing
-                    # pre-audit (2026-05-22) — without this, titrant
-                    # stock concentrations saved as "free parameters"
-                    # came back at their script default values, then the
-                    # auto-refit re-fit them from scratch instead of
-                    # warm-starting at the previously-converged value.
-                    for _tkey, _mM in (_summary.get("fitted_titrants") or {}).items():
-                        try:
-                            st.session_state[f"_pending_titrant_mM_{_tkey}"] = float(_mM)
-                        except Exception:
-                            pass
-                    st.session_state["_restored_fit_summary"] = _summary
-
-                # ── Restore _fit_stats so the diagnostic panels
-                # (correlation heatmap, identifiability panel,
-                # residual-diagnostic figure, AIC/BIC/F-test) render
-                # immediately, without waiting for the auto-refit
-                # below to complete (or in the case where there's
-                # nothing to refit because the JSON was saved with
-                # all parameters frozen).  Re-inflate list-shaped
-                # fields back to numpy arrays so downstream consumers
-                # don't need to know whether they came from a fresh
-                # fit or a JSON restore.
-                if _summary:
-                    _fs = dict(_summary)
-                    _pc = _fs.get("param_cov")
-                    if _pc is not None:
-                        try:
-                            _fs["param_cov"] = np.asarray(_pc, dtype=float)
-                        except Exception:
-                            _fs["param_cov"] = None
-                    for _arr_key in ("residuals", "y_calc", "y_obs"):
-                        if _fs.get(_arr_key) is not None:
-                            try:
-                                _fs[_arr_key] = np.asarray(_fs[_arr_key],
-                                                            dtype=float)
-                            except Exception:
-                                pass
-                    st.session_state["_fit_stats"] = _fs
-
-                # ── Restore the bootstrap / jackknife / Monte Carlo
-                # session-state keys so those UQ panels also render
-                # without requiring the user to click "Run bootstrap"
-                # (etc.) again after a JSON reload.  The keys are
-                # mode-suffixed (`_eq` for equilibrium fits, `_kin`
-                # for kinetics fits) — pick the right one based on
-                # the `is_kinetics` flag captured in fit_result_summary.
-                _uq_in = _obj.get("uq") or {}
-                _ws_in = _obj.get("widget_state")
-                _pc_in = _obj.get("profile_caches")
-                # Set the one-shot preserve flag iff at least one
-                # diagnostic-state field is going to be restored.
-                # Without this, the upcoming auto-refit's
-                # ``_reset_diagnostic_toggles()`` will wipe the
-                # restored UQ / LST / profile-cache / widget-toggle
-                # entries before any panel can render them.
-                if _uq_in or isinstance(_ws_in, dict) or (
-                        isinstance(_pc_in, list) and _pc_in):
-                    st.session_state["_preserve_uq_on_next_reset"] = True
-                if _uq_in:
-                    # Determine equilibrium vs kinetics so we can write
-                    # the UQ data to the session_state suffix the UI
-                    # actually reads.  Prefer the explicit `is_kinetics`
-                    # flag introduced in v2 of the session schema; for
-                    # legacy JSONs that lack it, fall back to inferring
-                    # from `fit_mode` (the two non-NMR kinetics modes
-                    # use uniquely kinetic mode strings).
-                    _fit_mode_str = str(_summary.get("fit_mode", ""))
-                    _is_kin = (
-                        bool(_summary.get("is_kinetics", False))
-                        or _fit_mode_str in ("kinetics", "kinetics_spectra")
-                    )
-                    _suf = "_kin" if _is_kin else "_eq"
-                    if isinstance(_uq_in.get("bootstrap"), dict):
-                        st.session_state[f"_bs_result{_suf}"] = _uq_in["bootstrap"]
-                    if isinstance(_uq_in.get("jackknife"), dict):
-                        st.session_state[f"_jk_result{_suf}"] = _uq_in["jackknife"]
-                    if isinstance(_uq_in.get("monte_carlo"), dict):
-                        st.session_state[f"_mc_result{_suf}"] = _uq_in["monte_carlo"]
-                    # Masson ξ (LST) result — same kin/eq suffix
-                    # convention.  Stored under ``_lst_result_*`` so
-                    # the LST UI panel re-renders the saved table
-                    # and per-paired-difference transparency view
-                    # without recomputation.
-                    if isinstance(_uq_in.get("lst"), dict):
-                        st.session_state[f"_lst_result{_suf}"] = _uq_in["lst"]
-                # Restore the diagnostic-widget input values so the
-                # boxes display what was actually used during the
-                # saved diagnostics rather than their defaults.  Done
-                # before the widgets render in the current rerun;
-                # ``st.rerun()`` below propagates these into the
-                # widget cache on the next pass.
-                if isinstance(_ws_in, dict):
-                    for _wk, _wv in _ws_in.items():
-                        if isinstance(_wk, str):
-                            st.session_state[_wk] = _wv
-                # Restore tuple-keyed profile caches (1-D & 2-D
-                # RMSE).  Encoded keys are reconstructed into tuples
-                # via ``_from_json_key``.  Older JSONs saved before
-                # the cache-key was simplified carry an extra
-                # trailing element — a sorted tuple of
-                # ``(param_name, fitted_value)`` pairs — that the
-                # current UI no longer includes when looking up.  We
-                # strip that trailing element off old-format keys so
-                # legacy JSONs still light up the panels on reload
-                # without forcing the user to re-save.
-                if isinstance(_pc_in, list) and _pc_in:
-                    try:
-                        from equilibrist_session import _from_json_key
-                        # Expected key shapes (post-strip):
-                        #   ("_prof_cache_*", span, npts)              len 3
-                        #   ("_p2d_cache_*", p1, p2, sx, sy, np)       len 6
-                        _expected_lens = {"_prof_cache_": 3,
-                                          "_p2d_cache_":  6,
-                                          "_lst_cache_":  None}
-                        _registry = st.session_state.setdefault(
-                            "_tuple_cache_registry", [])
-                        for _entry in _pc_in:
-                            if not (isinstance(_entry, list)
-                                    and len(_entry) == 2):
-                                continue
-                            _k_decoded = _from_json_key(_entry[0])
-                            if not (isinstance(_k_decoded, tuple)
-                                    and _k_decoded
-                                    and isinstance(_k_decoded[0], str)):
-                                continue
-                            _prefix_match = next(
-                                (p for p in _expected_lens
-                                 if _k_decoded[0].startswith(p)), None)
-                            if (_prefix_match
-                                    and _expected_lens[_prefix_match]
-                                    is not None
-                                    and len(_k_decoded)
-                                    > _expected_lens[_prefix_match]
-                                    and isinstance(_k_decoded[-1], tuple)):
-                                # Old-format key — trim the trailing
-                                # param_values tuple.
-                                _k_decoded = _k_decoded[:_expected_lens[
-                                    _prefix_match]]
-                            st.session_state[_k_decoded] = _entry[1]
-                            # Seed the registry so a subsequent save
-                            # (without an intervening recompute) can
-                            # still find and persist this cache entry.
-                            if _k_decoded not in _registry:
-                                _registry.append(_k_decoded)
-                    except Exception:
-                        pass
-
-                # ── Restore which parameters were being fitted ────────
-                # The "fit" checkbox next to each K / concentration /
-                # titrant input is what tells the fitter "this is a
-                # free parameter".  Their session_state keys are
-                # ``fit_logK_<kname>``, ``fit_conc_<root>``, and
-                # ``fit_titrant_mM_<tkey>``.  Without flipping these
-                # on, the restored UI shows all the fitted values but
-                # the fit engine has no parameters to fit — the auto-
-                # rerun completes instantly (with nothing to do) and
-                # the "Re-running the fit" banner appears stuck.
-                _fit_state_in = _obj.get("fit_state") or {}
-                for _kname in (_fit_state_in.get("fit_keys") or []):
-                    st.session_state[f"fit_logK_{_kname}"] = True
-                for _croot in (_fit_state_in.get("fit_conc_keys") or []):
-                    st.session_state[f"fit_conc_{_croot}"] = True
-                for _tkey in (_fit_state_in.get("fit_titrant_keys") or []):
-                    st.session_state[f"fit_titrant_mM_{_tkey}"] = True
-
-                # Auto-trigger the fit so the plot, the fitted-curve
-                # overlay, and the diagnostic panel reconstruct
-                # themselves automatically — but only if there was a
-                # fit to begin with (skip when the bundle was saved
-                # before any fit had run).
-                if _summary and (
-                    _fit_state_in.get("fit_keys") or
-                    _fit_state_in.get("fit_conc_keys") or
-                    _fit_state_in.get("fit_titrant_keys")
-                ):
-                    st.session_state["_fit_requested"] = True
-
-                # One-shot success banner shown by the block below.
-                st.session_state["_just_restored"] = {
-                    "notes":      _obj.get("notes", ""),
-                    "saved_at":   _obj.get("saved_at_utc", ""),
-                    "data_file":  _data_in.get("filename", ""),
-                    "will_refit": bool(_summary) and bool(
-                        _fit_state_in.get("fit_keys") or
-                        _fit_state_in.get("fit_conc_keys") or
-                        _fit_state_in.get("fit_titrant_keys")
-                    ),
-                }
+                st.session_state["_just_restored"] = _restore_session_into(st.session_state, _obj)
                 st.rerun()
         else:
             # ── .txt script upload (original behavior) ────────────────
@@ -2015,9 +2494,21 @@ with st.sidebar:
             st.rerun()
 
     # Brief success banner after a restore
+    _tour_now = st.session_state.get("_restore_tour")
+    if isinstance(_tour_now, dict):
+        st.info(f"Reopening the {_tour_now.get('n')} saved tabs: each one is shown in turn"
+                + (", then the saved global fit is restored." if _tour_now.get("global") else "."))
     _jr = st.session_state.pop("_just_restored", None)
     if _jr:
-        if _jr.get("will_refit"):
+        if _jr.get("all_tabs"):
+            st.success(f"{_jr['all_tabs']} tabs reopened"
+                       + (" — restoring the saved global fit…" if _jr.get("will_refit") else "."))
+            if _jr.get("note"):
+                st.warning(_jr["note"])
+        elif _jr.get("was_global"):
+            st.success("Session restored with the constants of its global fit (not refitted: "
+                       "this tab alone would give other values).")
+        elif _jr.get("will_refit"):
             st.success("Session restored — re-running the fit to "
                        "reconstruct the plot and diagnostics…")
         else:
@@ -2057,89 +2548,18 @@ with st.sidebar:
     # The file is human-inspectable, self-contained, and reloadable via
     # the main script uploader above (which now accepts .json too).
     with st.expander("💾 Save current session", expanded=False):
+        _n_tabs_save = len(st.session_state.get("_tabs") or [])
         st.caption(
             "Download a self-contained JSON bundle (script + data file "
             "+ last fit result).  Restore later by dropping the .json "
             "into the uploader above."
+            + ("  **This tab** saves the tab on screen; **all tabs** saves every tab "
+               "in one file, which reopens them all with their global fit."
+               if _n_tabs_save > 1 else "")
         )
         _script_now = st.session_state.get("_script_text", "")
-        if _script_now:
+        if _script_now or _n_tabs_save > 1:
             try:
-                from equilibrist_session import (make_session_json,
-                                                   summarize_stats)
-                _data_bytes = st.session_state.get("_exp_data_bytes")
-                _data_name  = st.session_state.get("_exp_data_filename")
-                # ITC: the thermogram is the data file.  It used to be left out, so
-                # a reloaded ITC session had its constants but no thermogram.
-                _itc_on_save = (st.session_state.get("_itc_raw") is not None
-                                and bool(st.session_state.get("_itc_file_bytes")))
-                if _itc_on_save:
-                    _data_bytes = st.session_state["_itc_file_bytes"]
-                    _data_name  = st.session_state.get("_itc_filename") or "thermogram.itc"
-                _fit_stats  = st.session_state.get("_fit_stats") or {}
-                _fa_eq      = st.session_state.get("_fit_args_eq")
-                _fa_kin     = st.session_state.get("_fit_args_kin")
-                # Pick whichever fit_args dict is populated — kinetics
-                # branch wins if both exist (because the equilibrium
-                # block runs only after kinetics returns).
-                _fa_save = _fa_kin or _fa_eq or {}
-                _fit_state_save = {
-                    k: _fa_save.get(k) for k in (
-                        "kind", "fit_keys", "fit_conc_keys",
-                        "fit_titrant_keys", "tolerance", "maxiter",
-                        "timeout_s", "wl_min", "wl_max",
-                        "use_spectra_fit", "use_nmr_fit", "nmr_mode",
-                        "allow_neg_eps", "constraints",
-                    ) if k in _fa_save
-                }
-                _start = _fa_save.get("start_logK") or _fa_save.get("start_logk")
-                if _start:
-                    _fit_state_save["start_logK"] = dict(_start)
-                # ── xmax snapshot (2026-05-22 audit) ────────────────────
-                # The widget value of ``xmax`` can have drifted from the
-                # script's ``$plot xmax = …`` after a data upload, because
-                # the live data-load path overrides xmax with the
-                # data-derived value via ``convert_exp_x`` (tutorial 13:
-                # script says ``xmax = 3``, data covers H0/G0 only to
-                # ~0.8 → widget snaps to 0.8).  The script text is NOT
-                # rewritten when this happens, so without snapshotting
-                # the widget value here the JSON loses the user's actual
-                # on-screen xmax.  See the restore block for the read
-                # side, which prefers this value over ``plot_xmax``.
-                #
-                # Priority: ``_pending_xmax`` (queued by a recent data
-                # upload or restore but NOT yet consumed by the xmax
-                # widget's ``_num_input`` call — the save block runs
-                # BEFORE the kinetics sidebar that owns the widget, so
-                # the pending value is the most up-to-date intent) →
-                # ``session_state["xmax"]`` (the current widget value,
-                # already a post-consume snapshot).  Without consulting
-                # the pending key first, a save immediately after a
-                # data upload captures the stale pre-upload widget
-                # value (tutorial 11 pre-fit save: script xmax=3, data
-                # range 0-20 → JSON would capture 3 instead of 20).
-                _xmax_widget = st.session_state.get(
-                    "_pending_xmax", st.session_state.get("xmax"))
-                if _xmax_widget is not None:
-                    try:
-                        _fit_state_save["xmax"] = float(_xmax_widget)
-                    except (TypeError, ValueError):
-                        pass
-                if _itc_on_save:
-                    # what the user did to the thermogram: excluded injections, edited
-                    # baselines, and the heat offset with its fit tick
-                    try:
-                        _fit_state_save["itc"] = {
-                            "excluded": sorted(int(_i) for _i in (st.session_state.get("_outliers_itc") or set())),
-                            "pre_baselines": [float(_v) for _v in np.asarray(
-                                st.session_state.get("_itc_baselines", []), dtype=float)],
-                            "post_baselines": [float(_v) for _v in np.asarray(
-                                st.session_state.get("_itc_post_baselines", []), dtype=float)],
-                            "q_offset": float(st.session_state.get("itc_q_offset", 0.0) or 0.0),
-                            "fit_q_offset": bool(st.session_state.get("fit_itc_q_offset", False)),
-                        }
-                    except Exception:
-                        pass
                 _notes = st.text_input(
                     "Notes (optional)", value="",
                     key="_session_notes",
@@ -2160,76 +2580,54 @@ with st.sidebar:
                 # most-recent UQ work would be missing.
                 #
                 # Clicking a regular ``st.button`` outside any
-                # fragment forces a full script rerun, on which
-                # ``make_session_json`` reads the current
-                # session_state (including whatever the fragments
-                # populated on their internal reruns) and builds a
-                # fresh JSON.  The bytes are then handed to the
-                # browser via a ``<a download>`` whose click is
-                # immediately fired by an injected ``<script>``,
-                # so the file downloads without a second user
-                # action.
-                if st.button("💾 Save session JSON",
-                              key="_session_save_btn",
-                              type="primary"):
-                    from equilibrist_session import (
-                        _capture_widget_state,
-                        _serialize_tuple_caches,
-                    )
-                    _lst_for_save = (
-                        st.session_state.get("_lst_result_kin")
-                        or st.session_state.get("_lst_result_eq")
-                    )
-                    _session_json = make_session_json(
-                        script=_script_now,
-                        script_filename=st.session_state.get("_script_filename", ""),
-                        data_bytes=_data_bytes,
-                        data_filename=_data_name,
-                        fit_state=_fit_state_save,
-                        fit_result_summary=summarize_stats(_fit_stats),
-                        bootstrap_result=(st.session_state.get("_bs_result_kin")
-                                           or st.session_state.get("_bs_result_eq")),
-                        jackknife_result=(st.session_state.get("_jk_result_kin")
-                                           or st.session_state.get("_jk_result_eq")),
-                        monte_carlo_result=(st.session_state.get("_mc_result_kin")
-                                             or st.session_state.get("_mc_result_eq")),
-                        lst_result=_lst_for_save,
-                        widget_state=_capture_widget_state(st.session_state),
-                        profile_caches=_serialize_tuple_caches(st.session_state),
-                        seed=42,
-                        notes=_notes,
-                        app_version="equilibrist-v3.0.1-beta",
-                    )
-                    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # fragment forces a full script rerun, on which the
+                # payload is built from the current session_state
+                # (including whatever the fragments populated on
+                # their internal reruns).  The bytes are then handed
+                # to the browser via a ``<a download>`` whose click
+                # is immediately fired by an injected ``<script>``,
+                # so the file downloads without a second user action.
+                _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                if _script_now and st.button(
+                        "💾 Save this tab" if _n_tabs_save > 1 else "💾 Save session JSON",
+                        key="_session_save_btn",
+                        help=("The tab on screen: script, data, sidebar values, last fit and "
+                              "diagnostics.  Loading it fills the current tab."
+                              if _n_tabs_save > 1 else None)):
+                    from equilibrist_session import make_session_json
+                    _payload_kw, _data_name = _tab_session_kwargs(st.session_state, _notes)
+                    _session_json = make_session_json(**_payload_kw)
                     _stem = "session"
                     if _data_name:
                         import os as _os
                         _stem = _os.path.splitext(_data_name)[0] or _stem
                     _fname = f"Equilibrist_{_stem}_{_ts}.json"
-                    # Trigger the browser download by injecting a
-                    # hidden anchor + a script that clicks it.  The
-                    # data is encoded inline as a base64 data URL so
-                    # no server round-trip is needed.  Streamlit
-                    # sandboxes the injected HTML inside an iframe
-                    # but ``<a download>`` works inside the sandbox
-                    # because Streamlit's iframe sandbox includes
-                    # ``allow-downloads``.
-                    import base64 as _base64
-                    from streamlit.components.v1 import html as _components_html
-                    _b64 = _base64.b64encode(
-                        _session_json.encode("utf-8")).decode("ascii")
-                    _components_html(
-                        f"""
-                        <a id="_eq_autodl"
-                           href="data:application/json;base64,{_b64}"
-                           download="{_fname}"
-                           style="display:none">.</a>
-                        <script>
-                          document.getElementById("_eq_autodl").click();
-                        </script>
-                        """,
-                        height=0,
+                    _download_json(_session_json, _fname)
+                    st.success(f"Saved as `{_fname}`")
+                if _n_tabs_save > 1 and st.button(
+                        "💾 Save all tabs", key="_session_save_all_btn",
+                        help="Every tab in one file, with the global fit.  Loading it closes "
+                             "the open tabs, reopens the saved ones and restores the global "
+                             "fit at its saved constants."):
+                    from equilibrist_session import make_session_payload, make_tabs_json
+                    _tab_payloads = []
+                    for _ti, _tab_s in enumerate(st.session_state["_tabs"]):
+                        _src = (st.session_state if _ti == st.session_state["_tab_idx"]
+                                else eqtabs.StateView(_tab_s.get("state") or {}))
+                        _kw_t, _dn_t = _tab_session_kwargs(_src, "")
+                        _tab_payloads.append(make_session_payload(**_kw_t) if _kw_t else {})
+                    _gf_all = next((_tp["fit_result_summary"]["global_fit"] for _tp in _tab_payloads
+                                    if (_tp.get("fit_result_summary") or {}).get("global_fit")), None)
+                    _all_json = make_tabs_json(
+                        tabs=_tab_payloads,
+                        active_tab=int(st.session_state["_tab_idx"]),
+                        prefs={_k: st.session_state[_k] for _k in eqtabs.PREFS if _k in st.session_state},
+                        global_fit=_gf_all,
+                        notes=_notes,
+                        app_version=_APP_VERSION_TAG,
                     )
+                    _fname = f"Equilibrist_{len(_tab_payloads)}tabs_{_ts}.json"
+                    _download_json(_all_json, _fname)
                     st.success(f"Saved as `{_fname}`")
             except Exception as _se:
                 st.warning(f"Could not build session bundle: {_se}")
@@ -2267,11 +2665,13 @@ y = G, H, GH\
 
 if script_text is None:
     st.info("📂 Upload a script (.txt) in the sidebar — or write one directly below and click **▶ Apply**.")
+    # the key moves on at "Reset all tabs", so the editor then shows the skeleton
+    # again (under a key it had before, the browser would bring back an old draft)
     _draft = st.text_area(
         "Script editor",
         value=_SKELETON,
         height=320,
-        key="_welcome_editor",
+        key=f"_welcome_editor_{int(st.session_state.get('_welcome_nonce', 0) or 0)}",
         label_visibility="collapsed",
     )
     _c1, _c2 = st.columns([1, 5])
@@ -2517,6 +2917,10 @@ if IS_KINETICS:
         st.session_state["_fit_args_live"] = _fa_live_k
     except Exception:
         st.session_state.pop("_fit_args_live", None)
+    if "_global_restore" in st.session_state:          # an all-tabs file was reopened
+        _global_restore_dispatch()
+    if st.session_state.get("_restore_eval"):          # a tab from a global fit, not refitted
+        _tab_restore_eval()
     if _fit_turn(_fit_slot, "_global_fit_requested"):
         _global_fit_dispatch(_fit_slot)
     if st.session_state.get("_global_fit_pending"):
@@ -3366,13 +3770,7 @@ if IS_KINETICS:
 
     with col2:
         # ── Fit message ──────────────────────────────────────────
-        _fit_msg = st.session_state.pop("_fit_message", None)
-        if _fit_msg:
-            level, text = _fit_msg
-            if level == "success":
-                st.success(text)
-            else:
-                st.warning(text)
+        _show_fit_message(st.session_state.pop("_fit_message", None))
 
         # ── Fitting controls (identical layout to equilibrium branch) ──
         exp_data      = st.session_state.get("_exp_data", {})
@@ -3554,7 +3952,7 @@ if IS_KINETICS:
                 if (k.startswith("_exp") or k.startswith("_nmr") or
                         k.startswith("_spectra") or k.startswith("_fit") or
                         k.startswith("_pending_logK") or k == "_input_filename"):
-                    del st.session_state[k]
+                    eqtabs.forget(st.session_state, k)
             st.rerun()
 
         if "_exp_uploader_nonce" not in st.session_state:
@@ -3888,7 +4286,7 @@ if IS_KINETICS:
                                                                        "* p<0.05, n.s. otherwise"),
                                         },
                                         hide_index=True,
-                                        use_container_width=True,
+                                        width="stretch",
                                         on_change=_on_ttest_kin_change,
                                         key="_ttest_editor_kin")
                                     if _rows_k and _rows_k[0]["df"] > 0:
@@ -3903,10 +4301,11 @@ if IS_KINETICS:
                         # ── Rank analysis (EFA / scree / TFA) ────────
                         # Data-space diagnostic — see equilibrium-side
                         # comment for rationale.  Only visible when the
-                        # fit produced a multi-channel data matrix
-                        # (kinetics-with-spectra; multi-signal kinetics
-                        # NMR shift/integ).
-                        if fit_stats.get("data_matrix") is not None:
+                        # fit keeps a multi-channel data matrix: the
+                        # UV-Vis kinetics fit, whose absorbance matrix
+                        # ``rank_analysis_inputs`` reads from the
+                        # statistics.  NMR fits store no such matrix.
+                        if rank_analysis_inputs(fit_stats) is not None:
                             _show_rank_k = _indented_checkbox(
                                 "📊 Show data-rank analysis "
                                 "(EFA / scree / TFA)",
@@ -4388,7 +4787,7 @@ if IS_KINETICS:
                                         _row[f"{_lvl} % CI"] = "—"
                                 _rows.append(_row)
                             st.dataframe(_rows, hide_index=True,
-                                          use_container_width=True)
+                                          width="stretch")
             _bs_kin_frag()
 
             # ── v2 jackknife (leave-one-out) — kinetics branch ────────
@@ -4552,7 +4951,7 @@ if IS_KINETICS:
                                             if np.isfinite(_se) else "—"),
                                     })
                                 st.dataframe(_rows_jk_k, hide_index=True,
-                                              use_container_width=True)
+                                              width="stretch")
 
                                 _show_inf_k = st.checkbox(
                                     "Show per-step influence plot",
@@ -4819,7 +5218,7 @@ if IS_KINETICS:
                                              else "—"),
                                     })
                                 st.dataframe(_rows_mc_k, hide_index=True,
-                                              use_container_width=True)
+                                              width="stretch")
                                 st.caption("**Comparing with bootstrap σ above** "
                                            "tells you which uncertainty source "
                                            "dominates: residual noise (bootstrap) "
@@ -5009,7 +5408,7 @@ if IS_KINETICS:
                                             _cp_tag,
                                     })
                                 st.dataframe(_rows, hide_index=True,
-                                              use_container_width=True)
+                                              width="stretch")
                                 st.caption(
                                     "**σ_cond** is the conditional CI "
                                     "half-width (other variables held "
@@ -5048,7 +5447,7 @@ if IS_KINETICS:
                                                     "diff r [%]": f"{_rec['diff']*100:+.4f}%",
                                                 })
                                             st.dataframe(_drows, hide_index=True,
-                                                          use_container_width=True)
+                                                          width="stretch")
                 _lst_kin_frag()
 
             # ── v2 model comparison (AIC / BIC / F-test / Akaike weights) ────
@@ -6000,6 +6399,10 @@ else:
         st.session_state.pop("_fit_args_live", None)
 
 # ── Global fit dispatch (all tabs at once) ────────────────────────────
+if "_global_restore" in st.session_state:              # an all-tabs file was reopened
+    _global_restore_dispatch()
+if st.session_state.get("_restore_eval"):              # a tab from a global fit, not refitted
+    _tab_restore_eval()
 if _fit_turn(_fit_slot, "_global_fit_requested"):
     _global_fit_dispatch(_fit_slot)
 if st.session_state.get("_global_fit_pending"):
@@ -6228,7 +6631,7 @@ with col1:
         )
         fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False),
                           height=350)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     # Build a color map: label → color (for matching exp dots to traces)
     trace_colors = {}
     for idx, (label, species_list) in enumerate(plot_targets):
@@ -7220,13 +7623,7 @@ with col1:
 
 with col2:
     # ── Show fit message from previous run ───────
-    _fit_msg = st.session_state.pop("_fit_message", None)
-    if _fit_msg:
-        level, text = _fit_msg
-        if level == "success":
-            st.success(text)
-        else:
-            st.warning(text)
+    _show_fit_message(st.session_state.pop("_fit_message", None))
 
     # ── Fitting ──────────────────────────────────
     nmr_cfg  = parsed.get("nmr")
@@ -7475,7 +7872,7 @@ with col2:
                     k.startswith("_outliers_itc") or
                     k.startswith("_pending_logK") or k == "_fit_requested" or
                     k == "_input_filename"):
-                del st.session_state[k]
+                eqtabs.forget(st.session_state, k)
         st.rerun()
 
     if "_exp_uploader_nonce" not in st.session_state:
@@ -7987,7 +8384,7 @@ with col2:
                                                                    "* p<0.05, n.s. otherwise"),
                                     },
                                     hide_index=True,
-                                    use_container_width=True,
+                                    width="stretch",
                                     on_change=_on_ttest_eq_change,
                                     key="_ttest_editor_eq")
                                 if _rows_e and _rows_e[0]["df"] > 0:
@@ -8005,11 +8402,12 @@ with col2:
                     # well-determined, this one asks whether the *data*
                     # supports the rank (= number of distinguishable
                     # species) implied by the chemical model.  Only
-                    # available for fit modes that produce a multi-
-                    # channel data matrix D (UV-Vis spectra; multi-
-                    # signal NMR shift / integration).  For modes
-                    # without D the checkbox is hidden.
-                    if fit_stats.get("data_matrix") is not None:
+                    # available for fits that keep a multi-channel
+                    # data matrix D: the UV-Vis spectra fit, whose
+                    # absorbance matrix ``rank_analysis_inputs`` reads
+                    # from the statistics.  NMR fits store no such
+                    # matrix; for them the checkbox is hidden.
+                    if rank_analysis_inputs(fit_stats) is not None:
                         _show_rank_e = _indented_checkbox(
                             "📊 Show data-rank analysis "
                             "(EFA / scree / TFA)",
@@ -8492,7 +8890,7 @@ with col2:
                                         _row[f"{_lvl} % CI"] = "—"
                                 _rows.append(_row)
                             st.dataframe(_rows, hide_index=True,
-                                          use_container_width=True)
+                                          width="stretch")
             _bs_eq_frag()
 
         # ── v2 jackknife (leave-one-out) ─────────────────────────────────
@@ -8682,7 +9080,7 @@ with col2:
                                         else "—"),
                                 })
                             st.dataframe(_rows_jk, hide_index=True,
-                                          use_container_width=True)
+                                          width="stretch")
 
                             # Influence plot toggle
                             _show_inf = st.checkbox(
@@ -9004,7 +9402,7 @@ with col2:
                                          else "—"),
                                 })
                             st.dataframe(_rows_mc, hide_index=True,
-                                          use_container_width=True)
+                                          width="stretch")
                             st.caption("**Comparing with bootstrap σ above** "
                                        "tells you which uncertainty source "
                                        "dominates: residual noise (bootstrap) "
@@ -9193,7 +9591,7 @@ with col2:
                                         _cp_tag,
                                 })
                             st.dataframe(_rows, hide_index=True,
-                                          use_container_width=True)
+                                          width="stretch")
                             st.caption(
                                 "**σ_cond** is the conditional CI half-width "
                                 "(other variables held fixed); **σ_marg** is "
@@ -9234,7 +9632,7 @@ with col2:
                                                 "diff r [%]": f"{_rec['diff']*100:+.4f}%",
                                             })
                                         st.dataframe(_drows, hide_index=True,
-                                                      use_container_width=True)
+                                                      width="stretch")
             _lst_eq_frag()
 
         # ── v2 model comparison (AIC / BIC / F-test / Akaike weights) ────

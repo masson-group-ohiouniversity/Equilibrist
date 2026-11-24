@@ -282,7 +282,7 @@ def global_fit(experiments: list, *, tolerance: float = 1e-3, maxiter: int = 100
                progress: Optional[Callable] = None,
                with_stats: bool = True, with_errors: bool = True,
                weighted: bool = True, fixed_weights: Optional[dict] = None,
-               share_shifts: bool = False) -> dict:
+               share_shifts: bool = False, at_start: bool = False) -> dict:
     """Fit all ``experiments`` at once.
 
     ``experiments``: list of ``{"label": str, "fa": fit_args, "start_logK": {name: log K},
@@ -300,6 +300,11 @@ def global_fit(experiments: list, *, tolerance: float = 1e-3, maxiter: int = 100
     the tabs (same compound, same protons: see :func:`_shared_shift_solve`) instead
     of separately in every tab; every tab's stats then describe that common
     solution (its species shifts are pinned to it in the final one-shot).
+
+    With ``at_start`` nothing is searched: the starting point IS the solution (a
+    saved global fit being reopened, with its ``fixed_weights``).  Every tab's
+    stats, the errors and the information shares are computed there exactly as
+    after a fit, so a reopened file shows the saved constants to the last digit.
 
     Returns ``{"success", "message", "stats": {label: stats_dict}, "shared": {...},
     "global": {...}}``; every ``stats_dict`` is the usual per-experiment stats
@@ -541,6 +546,9 @@ def global_fit(experiments: list, *, tolerance: float = 1e-3, maxiter: int = 100
     if x0.size == 0:                      # evaluation only
         x_best, success, res = x0, True, None
         summary = {"n_evals": 0, "stop_reason": "evaluation", "final_spread": None, "elapsed_s": 0.0}
+    elif at_start:                        # a saved solution: no search, x0 is the answer
+        x_best, success, res = x0.copy(), True, None
+        summary = {"n_evals": 0, "stop_reason": "restored", "final_spread": None, "elapsed_s": 0.0}
     else:
         steps = np.empty_like(x0)
         for i, n in enumerate(gnames):
@@ -832,6 +840,8 @@ def global_fit(experiments: list, *, tolerance: float = 1e-3, maxiter: int = 100
         st_["global_fit"]["own_share"] = dict(info_share.get(_lab_s) or {})
 
     msg = ("converged" if success else ("timed out" if timed_out else "stopped"))
+    if at_start:
+        msg = "reopened at the saved constants"
     if success and summary.get("stationary"):
         # the stationarity stop also ends well-determined fits (the objective simply
         # stopped improving); claim a flat direction only when the errors say so
@@ -853,7 +863,7 @@ def global_fit(experiments: list, *, tolerance: float = 1e-3, maxiter: int = 100
             "rmse": rmse_global, "rmse_by_label": rmses, "summary": summary,
             "weights": _rel_weights, "abs_weights": {e["label"]: float(w) for e, w in zip(experiments, weights)},
             "chi2_per_point": dict(chi2_pp), "weighted": bool(weighted), "chi_rmse": chi_rmse,
-            "info_share": info_share,
+            "info_share": info_share, "restored": bool(at_start),
             "share_shifts": bool(share_shifts), "shared_pure_shifts": shared_pure,
             "elapsed_s": time.time() - t0}
 
@@ -862,6 +872,30 @@ def global_fit(experiments: list, *, tolerance: float = 1e-3, maxiter: int = 100
 # A "global" fit-args dict: what the diagnostics (profiles, trace, bootstrap,
 # jackknife, Monte Carlo, sensitivity) receive after a global fit.
 # ════════════════════════════════════════════════════════════════════════
+def evaluate_tab(fa: dict) -> Optional[dict]:
+    """One tab's usual stats dict (curves, pure-species shifts or spectra,
+    residuals, rmse) AT the constants of its fit record, without any search:
+    the one-shot that :func:`global_fit` runs on every tab at its solution.
+    Used when a tab saved after a global fit is reopened on its own.  None when
+    the tab cannot be evaluated."""
+    logK = dict(fa.get("start_logK") or fa.get("start_logk") or {})
+    have = experiment_constants(fa)
+    keys = [k for k in (fa.get("fit_keys") or []) if k in have] or have[:1]
+    if not keys:
+        return None
+    fa_once = dict(fa)
+    fa_once["fit_conc_keys"], fa_once["fit_titrant_keys"] = [], []      # nothing moves
+    try:
+        with simplex_step_override(1e-9):
+            out = _call_fit(fa_once, logK, keys, tolerance=1e30, maxiter=1, timeout_s=1e9,
+                            compute_hessian=False, objective_only=False)
+    except Exception:
+        return None
+    if isinstance(out, tuple) and len(out) == 4 and isinstance(out[2], dict) and out[2]:
+        return out[2]
+    return None
+
+
 def single_fit(fa: dict, *, tolerance: float, maxiter: int = 100000, timeout_s: float = 300.0) -> dict:
     """One tab's own fit from its fit-args record (what the Fit button does),
     callable on the cluster.  Returns ``{"ok", "fitted", "stats", "message"}``."""

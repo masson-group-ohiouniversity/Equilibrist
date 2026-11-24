@@ -674,6 +674,11 @@ def _export_kinetics_excel(kin_curve, t_vals, plot_y_names, parsed, logk_dict,
 
     return buf.getvalue()
 
+def _voided(cell) -> bool:
+    """True for a row-1 cell that starts with '#': its whole column is ignored."""
+    return str(cell).strip().startswith('#')
+
+
 def load_experimental_data(file_bytes) -> dict:
     """
     Read experimental data from an Excel file using pandas.
@@ -696,6 +701,17 @@ def load_experimental_data(file_bytes) -> dict:
     A row whose first cell starts with '#' is a comment row: all its entries
     are ignored (so proton labels or notes can sit under the header).
 
+    A column whose row-1 cell starts with '#' is voided: the sheet is read as
+    if that column were not there.  The first column that is not voided holds
+    the x values (so '#' in A1 moves the volumes to column B, '#' in A1 and B1
+    to column C), and the remaining ones are the data columns in their order
+    (signals in B, C, D with '#' in D1 = signals in B, C, E).  A '#' further
+    down a voided column means nothing: comment rows are judged on the x
+    column.  On sheet 2 the value belonging to a voided data column is skipped
+    as well, so the known shifts stay lined up with the columns in use; the '#'
+    may also be repeated in row 1 of sheet 2 (a column is skipped once).  A '#'
+    on sheet 2 alone only blanks the known shifts of that signal.
+
     Returns dict:
       {column_name: {"v_add_mL": np.ndarray, "y": np.ndarray}}
       plus "_x_col_header": str  (the header of column A)
@@ -709,10 +725,18 @@ def load_experimental_data(file_bytes) -> dict:
         if df.empty:
             return {}
         
-        headers = list(df.columns)
+        # A column whose row-1 cell starts with '#' is voided (see docstring).
+        _all_headers = list(df.columns)
+        _is_void = [_voided(h) for h in _all_headers]
+        headers = [h for h, v in zip(_all_headers, _is_void) if not v]
         if len(headers) < 2:
             return {}
-            
+        df = df[headers]
+        # which of the columns to the right of the x column are voided: the
+        # values of sheet 2 are listed in that same order
+        _x_pos = _is_void.index(False)
+        _void_data = _is_void[_x_pos + 1:]
+
         x_col    = headers[0]
         data_cols = headers[1:]
 
@@ -743,20 +767,34 @@ def load_experimental_data(file_bytes) -> dict:
                 continue
 
         # ── Optional sheet 2: known intrinsic chemical shifts ────────────────
-        # Layout: col A = species name (string), cols B+ = numeric values.
-        # No header row required; non-string values in col A are skipped.
+        # Layout: col A = species name (string), cols B+ = numeric values, one
+        # per data column of sheet 1 in the same order.  A header row is
+        # allowed (its cells are not numbers, so it yields nothing).
+        # Voided columns: a column of sheet 2 is skipped when the data column of
+        # sheet 1 it belongs to is voided (the '#' may be put on sheet 1 alone, or
+        # on both sheets).  A '#' in row 1 of sheet 2 alone leaves the signal in
+        # use and only blanks its known shifts (not pinned), keeping the others
+        # lined up; voided columns in front of the species names are ignored.
         try:
             df2 = pd.read_excel(io.BytesIO(file_bytes), header=None, sheet_name=1)
-            if not df2.empty and df2.shape[1] >= 2:
+            _own = [_voided(c) for c in df2.iloc[0].values] if not df2.empty else []
+            if not df2.empty and False in _own and df2.shape[1] - _own.index(False) >= 2:
+                _sp_pos = _own.index(False)                    # species names: first column not voided
+                _val_cols = [c for j, c in enumerate(range(_sp_pos + 1, df2.shape[1]))
+                             if not (j < len(_void_data) and _void_data[j])]
+                _blank = [i for i, c in enumerate(_val_cols) if _own[c]]
                 known = {}
                 for _, row in df2.iterrows():
-                    name = row.iloc[0]
+                    name = row.iloc[_sp_pos]
                     if not isinstance(name, str):
                         continue
                     name = name.strip()
-                    if not name:
+                    if not name or name.startswith('#'):       # '#': a comment row
                         continue
-                    vals = pd.to_numeric(row.iloc[1:], errors='coerce').to_numpy(dtype=float)
+                    # a copy: pandas 3 hands out read-only arrays
+                    vals = np.array(pd.to_numeric(row.iloc[_val_cols], errors='coerce'), dtype=float)
+                    if _blank:
+                        vals[_blank] = np.nan
                     # Trim trailing NaNs (allow Excel's auto-padded blank cells)
                     last = len(vals)
                     while last > 0 and not np.isfinite(vals[last - 1]):
@@ -790,6 +828,10 @@ def load_spectra_data(file_bytes) -> dict:
       Rows 1+: col A = species name, cols B+ = ε [mM⁻¹ cm⁻¹]
       Stored under key "known_spectra_raw" as {species: (wl_arr, eps_arr)}.
 
+    On either sheet a column whose row-1 cell starts with '#' is voided: the
+    sheet is read as if that column were not there (the first column left
+    holds the x values or the species names, the others are wavelengths).
+
     Returns:
       {
         "wavelengths":       np.ndarray (n_wavelengths,),
@@ -802,6 +844,9 @@ def load_spectra_data(file_bytes) -> dict:
     try:
         import io as _io
         df = pd.read_excel(_io.BytesIO(file_bytes), header=None)
+        if df.shape[0] >= 1:
+            # a column whose row-1 cell starts with '#' is voided
+            df = df.loc[:, [not _voided(c) for c in df.iloc[0].values]]
         if df.shape[0] < 2 or df.shape[1] < 2:
             return {}
 
@@ -830,6 +875,8 @@ def load_spectra_data(file_bytes) -> dict:
         # ── Sheet 2: optional known pure-species spectra ─────────────────────
         try:
             df2 = pd.read_excel(_io.BytesIO(file_bytes), header=None, sheet_name=1)
+            if df2.shape[0] >= 1:
+                df2 = df2.loc[:, [not _voided(c) for c in df2.iloc[0].values]]
             if df2.shape[0] >= 2 and df2.shape[1] >= 2:
                 wl2 = pd.to_numeric(pd.Series(df2.iloc[0, 1:].values), errors="coerce").values.astype(float)
                 wl2_valid = np.isfinite(wl2)
